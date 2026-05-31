@@ -11,7 +11,9 @@ homepage.workspace = true
 readme.workspace = true
 
 [dependencies]
+cue-rust-source.workspace = true
 indexmap.workspace = true
+thiserror.workspace = true
 
 [lints]
 workspace = true

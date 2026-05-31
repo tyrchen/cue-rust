@@ -182,7 +182,9 @@ dependencies = [
 name = "cue-rust-adt"
 version = "0.1.0"
 dependencies = [
+ "cue-rust-source",
  "indexmap",
+ "thiserror",
 ]
 
 [[package]]
