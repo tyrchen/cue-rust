@@ -71,6 +71,16 @@ async fn test_should_generate_compatibility_report() -> Result<(), Box<dyn Error
         ),
     ));
 
+    let bytes_value = context.compile_source("bytes.cue", "x: 2 * 'ab'\n")?;
+    cases.push(case(
+        "eval/bytes-repeat",
+        "semantic",
+        pass_status(
+            bytes_value.lookup_path(&["x"])?.evaluate()?
+                == cue_rust::EvaluatedValue::Bytes(b"abab".to_vec()),
+        ),
+    ));
+
     let schema = context.compile_source("schema.cue", "name: string\n")?;
     let data = context.compile_source("data.cue", "name: \"cue\"\n")?;
     cases.push(case(
