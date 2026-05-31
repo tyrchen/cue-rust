@@ -280,6 +280,9 @@ impl<'runtime> Compiler<'runtime> {
     }
 
     fn lower_identifier(&mut self, name: &str, span: Span) -> SemanticExpr {
+        if is_builtin_kind(name) {
+            return SemanticExpr::Base(BaseValue::Builtin(name.to_owned()));
+        }
         if self.scope.contains(name) {
             let feature = self.runtime.features.string(name);
             SemanticExpr::FieldReference {
@@ -312,6 +315,10 @@ fn unquote_string(value: &str) -> String {
         .strip_prefix('"')
         .and_then(|value| value.strip_suffix('"'))
         .map_or_else(|| value.to_owned(), ToOwned::to_owned)
+}
+
+fn is_builtin_kind(name: &str) -> bool {
+    matches!(name, "_" | "bool" | "int" | "null" | "number" | "string")
 }
 
 #[cfg(test)]

@@ -150,13 +150,22 @@ impl Context {
 
 #[cfg(test)]
 mod tests {
-    use super::{Context, ValueKind};
+    use super::{Context, ValidateOptions, ValueKind};
 
     #[test]
     fn test_should_compile_source_and_lookup_value() -> Result<(), Box<dyn std::error::Error>> {
         let context = Context::new();
         let value = context.compile_source("test.cue", "x: 1\n")?;
         assert_eq!(ValueKind::Number, value.lookup_path(&["x"])?.kind()?);
+        Ok(())
+    }
+
+    #[test]
+    fn test_should_validate_builtin_kind_schema() -> Result<(), Box<dyn std::error::Error>> {
+        let context = Context::new();
+        let schema = context.compile_source("schema.cue", "name: string\n")?;
+        let data = context.compile_source("data.cue", "name: \"cue\"\n")?;
+        schema.unify(&data)?.validate(ValidateOptions::default())?;
         Ok(())
     }
 }

@@ -104,6 +104,8 @@ pub enum EvaluatedValue {
     Struct(IndexMap<String, EvaluatedValue>),
     /// List items.
     List(Vec<EvaluatedValue>),
+    /// Builtin kind constraint.
+    Kind(ValueKind),
     /// Semantic bottom.
     Bottom(Bottom),
 }
@@ -121,6 +123,7 @@ impl EvaluatedValue {
             Self::Bytes(_) => ValueKind::Bytes,
             Self::Struct(_) => ValueKind::Struct,
             Self::List(_) => ValueKind::List,
+            Self::Kind(kind) => *kind,
             Self::Bottom(_) => ValueKind::Bottom,
         }
     }
@@ -470,7 +473,7 @@ impl<'runtime> Evaluator<'runtime> {
 
 fn value_from_base(base: &BaseValue) -> EvaluatedValue {
     match base {
-        BaseValue::Top | BaseValue::Builtin(_) => EvaluatedValue::Top,
+        BaseValue::Top => EvaluatedValue::Top,
         BaseValue::Null => EvaluatedValue::Null,
         BaseValue::Bool(value) => EvaluatedValue::Bool(*value),
         BaseValue::Number(value) => EvaluatedValue::Number(value.clone()),
@@ -478,6 +481,9 @@ fn value_from_base(base: &BaseValue) -> EvaluatedValue {
         BaseValue::Bytes(value) => EvaluatedValue::Bytes(value.clone()),
         BaseValue::Struct => EvaluatedValue::Struct(IndexMap::new()),
         BaseValue::List => EvaluatedValue::List(Vec::new()),
+        BaseValue::Builtin(name) => {
+            builtin_kind(name).map_or(EvaluatedValue::Top, EvaluatedValue::Kind)
+        }
         _ => EvaluatedValue::Bottom(Bottom::new(
             "cue.eval.unsupported_base",
             "unsupported base value",
@@ -554,6 +560,13 @@ fn unify_values(left: EvaluatedValue, right: EvaluatedValue, span: Option<Span>)
         (EvaluatedValue::Bottom(bottom), _) | (_, EvaluatedValue::Bottom(bottom)) => {
             EvaluatedValue::Bottom(bottom)
         }
+        (EvaluatedValue::Kind(kind), value) | (value, EvaluatedValue::Kind(kind)) => {
+            if value.kind() == kind {
+                value
+            } else {
+                conflict_bottom(kind, value.kind(), span, "cue.eval.kind_conflict")
+            }
+        }
         (EvaluatedValue::Null, EvaluatedValue::Null) => EvaluatedValue::Null,
         (EvaluatedValue::Bool(left), EvaluatedValue::Bool(right)) if left == right => {
             EvaluatedValue::Bool(left)
@@ -618,12 +631,14 @@ fn validate_value(
     report: &mut DiagnosticReport,
 ) {
     match value {
-        EvaluatedValue::Top if options.concrete => report.push(Diagnostic::new(
-            Severity::Error,
-            "cue.eval.incomplete",
-            format!("{path}: incomplete value"),
-            None,
-        )),
+        EvaluatedValue::Top | EvaluatedValue::Kind(_) if options.concrete => {
+            report.push(Diagnostic::new(
+                Severity::Error,
+                "cue.eval.incomplete",
+                format!("{path}: incomplete value"),
+                None,
+            ));
+        }
         EvaluatedValue::Bottom(bottom) => report.push(Diagnostic::new(
             Severity::Error,
             "cue.eval.bottom",
@@ -649,6 +664,16 @@ fn validate_value(
             }
         }
         _ => {}
+    }
+}
+
+fn builtin_kind(name: &str) -> Option<ValueKind> {
+    match name {
+        "bool" => Some(ValueKind::Bool),
+        "int" | "number" => Some(ValueKind::Number),
+        "null" => Some(ValueKind::Null),
+        "string" => Some(ValueKind::String),
+        _ => None,
     }
 }
 

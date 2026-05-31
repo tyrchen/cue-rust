@@ -67,7 +67,7 @@ async fn test_should_vet_json_data() -> Result<(), Box<dyn Error>> {
     let dir = fixture_dir().await?;
     let cue = dir.join("schema.cue");
     let data = dir.join("data.json");
-    fs::write(&cue, "x: 1\ny: \"ok\"\n").await?;
+    fs::write(&cue, "x: number\ny: string\n").await?;
     fs::write(&data, "{\"x\":1,\"y\":\"ok\"}\n").await?;
     let cue_arg = cue.to_string_lossy().into_owned();
     let data_arg = data.to_string_lossy().into_owned();

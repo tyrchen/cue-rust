@@ -10,12 +10,20 @@ cargo-fuzz = true
 [workspace]
 
 [dependencies]
+cue-rust-encoding = { path = "../crates/encoding" }
 cue-rust-syntax = { path = "../crates/syntax" }
 libfuzzer-sys = "0.4.12"
 
 [[bin]]
 name = "scanner"
 path = "fuzz_targets/scanner.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "decoder"
+path = "fuzz_targets/decoder.rs"
 test = false
 doc = false
 bench = false

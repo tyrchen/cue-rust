@@ -27,6 +27,13 @@ deny:
 
 fuzz-smoke:
 	@cargo +nightly fuzz run scanner -- -runs=1
+	@cargo +nightly fuzz run decoder -- -runs=1
+
+compat-report:
+	@cargo test -p cue-rust --test compatibility -- --ignored --nocapture
+
+bench-smoke:
+	@cargo bench -p cue-rust --bench phase9 -- --sample-size 10 --warm-up-time 0.1 --measurement-time 0.1
 
 check: build test fmt-check clippy doc audit deny
 
@@ -58,4 +65,4 @@ release:
 update-submodule:
 	@git submodule update --init --recursive --remote
 
-.PHONY: build test fmt fmt-check clippy clippy-pedantic doc audit deny fuzz-smoke check ci check-agent-sync release update-submodule
+.PHONY: build test fmt fmt-check clippy clippy-pedantic doc audit deny fuzz-smoke compat-report bench-smoke check ci check-agent-sync release update-submodule

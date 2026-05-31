@@ -24,5 +24,15 @@ cue-rust-source.workspace = true
 cue-rust-syntax.workspace = true
 thiserror.workspace = true
 
+[dev-dependencies]
+criterion.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+
+[[bench]]
+name = "phase9"
+harness = false
+
 [lints]
 workspace = true
