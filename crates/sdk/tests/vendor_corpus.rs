@@ -223,6 +223,22 @@ async fn test_should_run_supported_upstream_core_eval_fixtures() -> TestResult {
         ]),
         slice_value.lookup_path(&["openStart"])?.evaluate()?,
     );
+
+    let arithmetic = TxtarArchive::read(
+        &root.join("vendors/cue/cue/testdata/basicrewrite/002_arithmetic.txtar"),
+    )
+    .await?;
+    let arithmetic_source = first_lines(arithmetic.file("in.cue")?, 7);
+    let arithmetic_value =
+        context.compile_source("basicrewrite/002_arithmetic/in.cue", arithmetic_source)?;
+    assert_eq!(
+        EvaluatedValue::Number("1".to_owned()),
+        arithmetic_value.lookup_path(&["sum"])?.evaluate()?,
+    );
+    assert_eq!(
+        EvaluatedValue::Number("4".to_owned()),
+        arithmetic_value.lookup_path(&["div1"])?.evaluate()?,
+    );
     Ok(())
 }
 

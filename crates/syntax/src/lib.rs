@@ -372,12 +372,25 @@ impl<'src> Scanner<'src> {
 
     fn scan_number(&mut self) {
         let start = self.offset;
-        self.advance_while(|byte| {
-            matches!(byte, b'0'..=b'9' | b'_' | b'.' | b'e' | b'E' | b'+' | b'-')
-        });
+        self.advance_digits();
+        if self.peek_byte() == Some(b'.') && self.peek_next_byte() != Some(b'.') {
+            self.advance_one();
+            self.advance_digits();
+        }
+        if matches!(self.peek_byte(), Some(b'e' | b'E')) {
+            self.advance_one();
+            if matches!(self.peek_byte(), Some(b'+' | b'-')) {
+                self.advance_one();
+            }
+            self.advance_digits();
+        }
         let text = self.text(start, self.offset).to_owned();
         self.push_token(TokenKind::Number, start, self.offset, text, false);
         self.insert_comma = true;
+    }
+
+    fn advance_digits(&mut self) {
+        self.advance_while(|byte| matches!(byte, b'0'..=b'9' | b'_'));
     }
 
     fn scan_string(&mut self, quote: u8) {
@@ -639,6 +652,20 @@ mod tests {
         assert!(!result.diagnostics().has_errors());
         let kinds: Vec<TokenKind> = result.tokens().iter().map(Token::kind).collect();
         assert!(kinds.starts_with(&prefix));
+    }
+
+    #[test]
+    fn test_should_scan_number_operators_separately() {
+        let result = scan_bytes("test.cue", b"x: 1+2\ny: 1e-2\n", ParseConfig::default());
+        assert!(!result.diagnostics().has_errors());
+        let tokens = result.tokens();
+        let number_texts = tokens
+            .iter()
+            .filter(|token| token.kind() == TokenKind::Number)
+            .map(Token::text)
+            .collect::<Vec<_>>();
+        assert_eq!(vec!["1", "2", "1e-2"], number_texts);
+        assert!(tokens.iter().any(|token| token.text() == "+"));
     }
 
     #[test]

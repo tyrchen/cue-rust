@@ -3,7 +3,7 @@
 #![forbid(unsafe_code)]
 #![warn(rust_2024_compatibility, missing_docs, missing_debug_implementations)]
 
-use std::fmt;
+use std::{cmp::Ordering, fmt, num::FpCategory};
 
 use cue_rust_adt::{
     AdtError, BaseValue, Bottom, EnvironmentId, ExprId, Feature, Runtime, SemanticExpr, VertexId,
@@ -557,9 +557,10 @@ fn evaluate_binary(op: &str, left: EvaluatedValue, right: EvaluatedValue) -> Eva
     match op {
         "&" | "&&" => unify_values(left, right, None),
         "|" | "||" => choose_disjunction(left, right),
-        "==" => EvaluatedValue::Bool(left == right),
-        "!=" => EvaluatedValue::Bool(left != right),
+        "==" => evaluate_equality(&left, &right, false),
+        "!=" => evaluate_equality(&left, &right, true),
         "+" => evaluate_add(left, right),
+        "-" | "*" | "/" | "<" | "<=" | ">" | ">=" => evaluate_numeric_binary(op, left, right),
         _ => EvaluatedValue::Bottom(Bottom::new(
             "cue.eval.unsupported_binary",
             format!("unsupported binary operator `{op}`"),
@@ -567,6 +568,71 @@ fn evaluate_binary(op: &str, left: EvaluatedValue, right: EvaluatedValue) -> Eva
             false,
         )),
     }
+}
+
+fn evaluate_numeric_binary(
+    op: &str,
+    left: EvaluatedValue,
+    right: EvaluatedValue,
+) -> EvaluatedValue {
+    let (left, right) = match (number_operand(left), number_operand(right)) {
+        (Ok(left), Ok(right)) => (left, right),
+        (Err(bottom), _) | (_, Err(bottom)) => return EvaluatedValue::Bottom(bottom),
+    };
+
+    match op {
+        "-" => EvaluatedValue::Number(format_number(left - right)),
+        "*" => EvaluatedValue::Number(format_number(left * right)),
+        "/" if is_zero(right) => EvaluatedValue::Bottom(Bottom::new(
+            "cue.eval.division_by_zero",
+            "division by zero",
+            None,
+            false,
+        )),
+        "/" => EvaluatedValue::Number(format_number(left / right)),
+        "<" => EvaluatedValue::Bool(compare_numbers(left, right, Ordering::Less)),
+        "<=" => EvaluatedValue::Bool(
+            compare_numbers(left, right, Ordering::Less)
+                || compare_numbers(left, right, Ordering::Equal),
+        ),
+        ">" => EvaluatedValue::Bool(compare_numbers(left, right, Ordering::Greater)),
+        ">=" => EvaluatedValue::Bool(
+            compare_numbers(left, right, Ordering::Greater)
+                || compare_numbers(left, right, Ordering::Equal),
+        ),
+        _ => EvaluatedValue::Bottom(Bottom::new(
+            "cue.eval.unsupported_binary",
+            format!("unsupported binary operator `{op}`"),
+            None,
+            false,
+        )),
+    }
+}
+
+fn evaluate_equality(
+    left: &EvaluatedValue,
+    right: &EvaluatedValue,
+    negated: bool,
+) -> EvaluatedValue {
+    let equal = match (left, right) {
+        (EvaluatedValue::Number(left), EvaluatedValue::Number(right)) => {
+            match (parse_number(left), parse_number(right)) {
+                (Some(left), Some(right)) => compare_numbers(left, right, Ordering::Equal),
+                _ => left == right,
+            }
+        }
+        _ => left == right,
+    };
+    EvaluatedValue::Bool(if negated { !equal } else { equal })
+}
+
+fn compare_numbers(left: f64, right: f64, ordering: Ordering) -> bool {
+    left.partial_cmp(&right)
+        .is_some_and(|actual_ordering| actual_ordering == ordering)
+}
+
+fn is_zero(value: f64) -> bool {
+    matches!(value.classify(), FpCategory::Zero)
 }
 
 fn choose_disjunction(left: EvaluatedValue, right: EvaluatedValue) -> EvaluatedValue {
@@ -581,6 +647,17 @@ fn evaluate_add(left: EvaluatedValue, right: EvaluatedValue) -> EvaluatedValue {
         (EvaluatedValue::String(left), EvaluatedValue::String(right)) => {
             EvaluatedValue::String(format!("{left}{right}"))
         }
+        (EvaluatedValue::Number(left), EvaluatedValue::Number(right)) => {
+            match (parse_number(&left), parse_number(&right)) {
+                (Some(left), Some(right)) => EvaluatedValue::Number(format_number(left + right)),
+                _ => EvaluatedValue::Bottom(Bottom::new(
+                    "cue.eval.invalid_number",
+                    "invalid numeric operand",
+                    None,
+                    false,
+                )),
+            }
+        }
         (left, right) => EvaluatedValue::Bottom(Bottom::new(
             "cue.eval.unsupported_add",
             format!("cannot add {} and {}", left.kind(), right.kind()),
@@ -588,6 +665,40 @@ fn evaluate_add(left: EvaluatedValue, right: EvaluatedValue) -> EvaluatedValue {
             false,
         )),
     }
+}
+
+fn number_operand(value: EvaluatedValue) -> Result<f64, Bottom> {
+    let EvaluatedValue::Number(value) = value else {
+        return Err(Bottom::new(
+            "cue.eval.invalid_numeric_operand",
+            "numeric operator requires number operands",
+            None,
+            false,
+        ));
+    };
+    parse_number(&value).ok_or_else(|| {
+        Bottom::new(
+            "cue.eval.invalid_number",
+            format!("invalid numeric operand `{value}`"),
+            None,
+            false,
+        )
+    })
+}
+
+fn parse_number(value: &str) -> Option<f64> {
+    value
+        .replace('_', "")
+        .parse::<f64>()
+        .ok()
+        .filter(|value| value.is_finite())
+}
+
+fn format_number(value: f64) -> String {
+    if is_zero(value.fract()) {
+        return format!("{value:.0}");
+    }
+    value.to_string()
 }
 
 fn evaluate_index(base: EvaluatedValue, index: EvaluatedValue) -> EvaluatedValue {

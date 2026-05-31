@@ -489,12 +489,13 @@ impl<'tokens> Parser<'tokens> {
 
     fn infix_binding_power(&self) -> Option<(String, u8, u8)> {
         match self.peek_kind()? {
-            TokenKind::Star => Some(("*".to_owned(), 7, 8)),
+            TokenKind::Star => Some(("*".to_owned(), 9, 10)),
             TokenKind::Operator => match self.peek_text()? {
                 "&" | "&&" => Some((self.peek_text()?.to_owned(), 3, 4)),
                 "|" | "||" => Some((self.peek_text()?.to_owned(), 1, 2)),
                 "==" | "!=" | "<" | "<=" | ">" | ">=" => Some((self.peek_text()?.to_owned(), 5, 6)),
                 "+" | "-" => Some((self.peek_text()?.to_owned(), 7, 8)),
+                "/" => Some((self.peek_text()?.to_owned(), 9, 10)),
                 _ => None,
             },
             _ => None,

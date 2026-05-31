@@ -221,6 +221,53 @@ mod tests {
     }
 
     #[test]
+    fn test_should_evaluate_numeric_binary_expressions() -> Result<(), Box<dyn std::error::Error>> {
+        let context = Context::new();
+        let value = context.compile_source(
+            "test.cue",
+            "sum: -1+ +2\nmul: 2*3\nquo: 6/4\neq: 2.0 == 2\nlt: 1 < 2\nge: 2 >= 2.0\n",
+        )?;
+        assert_eq!(
+            EvaluatedValue::Number("1".to_owned()),
+            value.lookup_path(&["sum"])?.evaluate()?,
+        );
+        assert_eq!(
+            EvaluatedValue::Number("6".to_owned()),
+            value.lookup_path(&["mul"])?.evaluate()?,
+        );
+        assert_eq!(
+            EvaluatedValue::Number("1.5".to_owned()),
+            value.lookup_path(&["quo"])?.evaluate()?,
+        );
+        assert_eq!(
+            EvaluatedValue::Bool(true),
+            value.lookup_path(&["eq"])?.evaluate()?,
+        );
+        assert_eq!(
+            EvaluatedValue::Bool(true),
+            value.lookup_path(&["lt"])?.evaluate()?,
+        );
+        assert_eq!(
+            EvaluatedValue::Bool(true),
+            value.lookup_path(&["ge"])?.evaluate()?,
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_should_report_numeric_division_by_zero() -> Result<(), Box<dyn std::error::Error>> {
+        let context = Context::new();
+        let value = context.compile_source("test.cue", "x: 1 / 0\n")?;
+        assert!(
+            value
+                .lookup_path(&["x"])?
+                .validate(ValidateOptions::default())
+                .is_err()
+        );
+        Ok(())
+    }
+
+    #[test]
     fn test_should_report_import_as_compile_diagnostic() {
         let context = Context::new();
         let result = context.compile_source("test.cue", "import \"strings\"\nx: 1\n");
