@@ -167,6 +167,7 @@ async fn test_should_run_supported_upstream_core_eval_fixtures() -> TestResult {
     assert_upstream_selecting(&context, &root).await?;
     assert_upstream_basic_types(&context, &root).await?;
     assert_upstream_types(&context, &root).await?;
+    assert_upstream_numeric_comparisons(&context, &root).await?;
     assert_upstream_arithmetic(&context, &root).await?;
     assert_upstream_integer_arithmetic(&context, &root).await?;
     assert_upstream_booleans(&context, &root).await?;
@@ -320,6 +321,24 @@ async fn assert_upstream_types(context: &Context, root: &Path) -> TestResult {
                 .lookup_path(&[path])?
                 .validate(ValidateOptions::default())
                 .is_err(),
+        );
+    }
+    Ok(())
+}
+
+async fn assert_upstream_numeric_comparisons(context: &Context, root: &Path) -> TestResult {
+    let comparison = TxtarArchive::read(
+        &root.join("vendors/cue/cue/testdata/basicrewrite/016_comparison.txtar"),
+    )
+    .await?;
+    let value = context.compile_source(
+        "basicrewrite/016_comparison/in.cue",
+        comparison.file("in.cue")?,
+    )?;
+    for path in ["tLss", "tLeq", "tEql", "tNeq", "tGeq", "tGtr", "tExpr"] {
+        assert_eq!(
+            EvaluatedValue::Bool(true),
+            value.lookup_path(&["numbers", path])?.evaluate()?,
         );
     }
     Ok(())
