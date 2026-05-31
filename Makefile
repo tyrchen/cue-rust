@@ -32,6 +32,10 @@ fuzz-smoke:
 compat-report:
 	@cargo test -p cue-rust --test compatibility -- --ignored --nocapture
 
+vendor-corpus:
+	@cargo test -p cue-rust --test vendor_corpus
+	@cargo test -p cue-rs --test vendor_scripts
+
 bench-smoke:
 	@cargo bench -p cue-rust --bench phase9 -- --sample-size 10 --warm-up-time 0.1 --measurement-time 0.1 --save-baseline smoke
 
@@ -65,4 +69,4 @@ release:
 update-submodule:
 	@git submodule update --init --recursive --remote
 
-.PHONY: build test fmt fmt-check clippy clippy-pedantic doc audit deny fuzz-smoke compat-report bench-smoke check ci check-agent-sync release update-submodule
+.PHONY: build test fmt fmt-check clippy clippy-pedantic doc audit deny fuzz-smoke compat-report vendor-corpus bench-smoke check ci check-agent-sync release update-submodule
