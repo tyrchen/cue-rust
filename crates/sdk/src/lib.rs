@@ -3,16 +3,37 @@
 #![forbid(unsafe_code)]
 #![warn(rust_2024_compatibility, missing_docs, missing_debug_implementations)]
 
-pub use cue_rust_eval::ValidateOptions;
+use cue_rust_adt::Runtime;
+pub use cue_rust_compiler::CompiledInstance;
+use cue_rust_compiler::{CompileError, CompileOptions, Compiler};
+pub use cue_rust_eval::{
+    EvalError, EvalOptions, EvaluatedValue, ValidateOptions, Value, ValueKind,
+};
+use cue_rust_loader::BuildInstance;
 pub use cue_rust_loader::{LoadConfig, PackageSelector};
-pub use cue_rust_source::{SourceError, SourceFile, SourceLimits};
+pub use cue_rust_source::{DiagnosticReport, SourceError, SourceFile, SourceLimits};
 pub use cue_rust_syntax::{
     AstFile, Decl, Expr, FieldDecl, ImportDecl, Label, LetDecl, PackageClause, ParseConfig,
     ParseMode, ParseResult, ParsedSource, ScanResult, Token, TokenKind,
 };
+use thiserror::Error;
 
 /// Current SDK version.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
+
+/// Top-level SDK error.
+#[derive(Clone, Debug, Error, Eq, PartialEq)]
+pub enum CueError {
+    /// Compilation infrastructure failed.
+    #[error(transparent)]
+    Compile(#[from] CompileError),
+    /// Evaluation failed.
+    #[error(transparent)]
+    Eval(#[from] EvalError),
+    /// Source, parse, compile, or validation diagnostics were emitted.
+    #[error("operation produced diagnostics")]
+    Diagnostics(DiagnosticReport),
+}
 
 /// Top-level SDK context.
 #[derive(Clone, Debug, Default)]
@@ -50,5 +71,67 @@ impl Context {
     #[must_use]
     pub fn scan_source_bytes(&self, name: impl Into<String>, bytes: &[u8]) -> ScanResult {
         cue_rust_syntax::scan_bytes(name, bytes, self.parse_config)
+    }
+
+    /// Compiles a named source into a value handle.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CueError`] when parsing or compilation emits errors.
+    pub fn compile_source(
+        &self,
+        name: impl Into<String>,
+        content: impl Into<String>,
+    ) -> Result<Value, CueError> {
+        let content = content.into();
+        self.compile_source_bytes(name, content.as_bytes())
+    }
+
+    /// Compiles raw source bytes into a value handle.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CueError`] when parsing or compilation emits errors.
+    pub fn compile_source_bytes(
+        &self,
+        name: impl Into<String>,
+        bytes: &[u8],
+    ) -> Result<Value, CueError> {
+        let parsed = self.parse_source_bytes(name, bytes);
+        if parsed.diagnostics().has_errors() {
+            return Err(CueError::Diagnostics(parsed.diagnostics().clone()));
+        }
+        let files = parsed.ast().map_or_else(Vec::new, |ast| vec![ast.clone()]);
+        let instance = BuildInstance::new(None, files);
+        self.build_instance(&instance)
+    }
+
+    /// Builds a parsed instance into a value handle.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CueError`] when compilation emits errors or ADT construction fails.
+    pub fn build_instance(&self, instance: &BuildInstance) -> Result<Value, CueError> {
+        let mut runtime = Runtime::default();
+        let compiled =
+            Compiler::new(&mut runtime).compile_instance(instance, CompileOptions::default())?;
+        let diagnostics = compiled.diagnostics().clone();
+        if diagnostics.has_errors() {
+            return Err(CueError::Diagnostics(diagnostics));
+        }
+        Ok(Value::new(runtime, compiled.root(), diagnostics))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Context, ValueKind};
+
+    #[test]
+    fn test_should_compile_source_and_lookup_value() -> Result<(), Box<dyn std::error::Error>> {
+        let context = Context::new();
+        let value = context.compile_source("test.cue", "x: 1\n")?;
+        assert_eq!(ValueKind::Number, value.lookup_path(&["x"])?.kind()?);
+        Ok(())
     }
 }

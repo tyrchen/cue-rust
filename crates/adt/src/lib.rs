@@ -32,7 +32,7 @@ impl RuntimeConfig {
 }
 
 /// Errors produced by semantic runtime construction.
-#[derive(Debug, Error, Eq, PartialEq)]
+#[derive(Clone, Debug, Error, Eq, PartialEq)]
 pub enum AdtError {
     /// Arena ids currently fit in `u32`.
     #[error("ADT arena exhausted")]
@@ -536,6 +536,28 @@ impl Runtime {
     /// Returns [`AdtError::MissingId`] if the expression does not exist.
     pub fn expression(&self, id: ExprId) -> Result<&SemanticExpr, AdtError> {
         self.expressions
+            .get(id.to_index()?)
+            .ok_or(AdtError::MissingId { id: id.get() })
+    }
+
+    /// Returns an environment.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AdtError::MissingId`] if the environment does not exist.
+    pub fn environment(&self, id: EnvironmentId) -> Result<&Environment, AdtError> {
+        self.environments
+            .get(id.to_index()?)
+            .ok_or(AdtError::MissingId { id: id.get() })
+    }
+
+    /// Returns a conjunct.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AdtError::MissingId`] if the conjunct does not exist.
+    pub fn conjunct(&self, id: ConjunctId) -> Result<&Conjunct, AdtError> {
+        self.conjuncts
             .get(id.to_index()?)
             .ok_or(AdtError::MissingId { id: id.get() })
     }

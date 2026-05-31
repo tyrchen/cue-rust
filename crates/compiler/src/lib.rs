@@ -23,7 +23,7 @@ pub struct CompileOptions {
 }
 
 /// Infrastructure errors from compilation.
-#[derive(Debug, Error)]
+#[derive(Clone, Debug, Error, Eq, PartialEq)]
 pub enum CompileError {
     /// ADT runtime construction failed.
     #[error(transparent)]

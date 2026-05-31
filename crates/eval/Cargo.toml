@@ -12,6 +12,8 @@ readme.workspace = true
 
 [dependencies]
 cue-rust-adt.workspace = true
+cue-rust-source.workspace = true
+indexmap.workspace = true
 thiserror.workspace = true
 
 [lints]

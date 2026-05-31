@@ -212,6 +212,8 @@ name = "cue-rust-eval"
 version = "0.1.0"
 dependencies = [
  "cue-rust-adt",
+ "cue-rust-source",
+ "indexmap",
  "thiserror",
 ]
 
