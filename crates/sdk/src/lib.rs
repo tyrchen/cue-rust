@@ -3,6 +3,7 @@
 #![forbid(unsafe_code)]
 #![warn(rust_2024_compatibility, missing_docs, missing_debug_implementations)]
 
+use camino::Utf8PathBuf;
 use cue_rust_adt::Runtime;
 pub use cue_rust_compiler::CompiledInstance;
 use cue_rust_compiler::{CompileError, CompileOptions, Compiler};
@@ -12,8 +13,7 @@ pub use cue_rust_encoding::{
 pub use cue_rust_eval::{
     EvalError, EvalOptions, EvaluatedValue, ValidateOptions, Value, ValueKind,
 };
-use cue_rust_loader::BuildInstance;
-pub use cue_rust_loader::{LoadConfig, PackageSelector};
+pub use cue_rust_loader::{BuildInstance, LoadConfig, LoadError, Loader, PackageSelector};
 pub use cue_rust_source::{DiagnosticReport, SourceError, SourceFile, SourceLimits};
 pub use cue_rust_syntax::{
     AstFile, Decl, Expr, FieldDecl, ImportDecl, Label, LetDecl, PackageClause, ParseConfig,
@@ -39,6 +39,9 @@ pub enum CueError {
     /// Data encoding failed.
     #[error(transparent)]
     Encode(#[from] EncodeError),
+    /// Loading failed.
+    #[error(transparent)]
+    Load(#[from] LoadError),
     /// Source, parse, compile, or validation diagnostics were emitted.
     #[error("operation produced diagnostics")]
     Diagnostics(DiagnosticReport),
@@ -80,6 +83,19 @@ impl Context {
     #[must_use]
     pub fn scan_source_bytes(&self, name: impl Into<String>, bytes: &[u8]) -> ScanResult {
         cue_rust_syntax::scan_bytes(name, bytes, self.parse_config)
+    }
+
+    /// Loads local package arguments into build instances.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CueError`] when loading fails.
+    pub async fn load(
+        &self,
+        config: LoadConfig,
+        args: &[Utf8PathBuf],
+    ) -> Result<Vec<BuildInstance>, CueError> {
+        Ok(Loader::new(config).load_args(args).await?)
     }
 
     /// Compiles a named source into a value handle.

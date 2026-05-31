@@ -10,6 +10,7 @@ use std::{
 };
 
 use anyhow::{Context as AnyhowContext, Result, anyhow};
+use camino::Utf8PathBuf;
 use clap::{Parser, Subcommand, ValueEnum};
 use cue_rust::{
     CueError, DecodeOptions, EncodeError, EncodeOptions, Encoding, EvalError, Value, decode_bytes,
@@ -148,11 +149,9 @@ async fn write_encoded_files(
 
     let ctx = cue_rust::Context::new();
     let mut saw_error = false;
-    for file in files {
-        let Some(value) = compile_cue_file(&ctx, file).await? else {
-            saw_error = true;
-            continue;
-        };
+    let loaded = compile_cue_args(&ctx, files).await?;
+    saw_error |= loaded.saw_diagnostics;
+    for value in loaded.values {
         let mut options = EncodeOptions::default();
         options.encoding = output_format.encoding();
         options.concrete = concrete;
@@ -186,25 +185,19 @@ async fn vet_files(
     }
 
     let ctx = cue_rust::Context::new();
-    let Some(schema) = compile_cue_file(&ctx, files.first().context("missing CUE file")?).await?
-    else {
+    let loaded = compile_cue_args(&ctx, files).await?;
+    if loaded.saw_diagnostics {
+        return Ok(ExitCode::from(1));
+    }
+    let Some(schema) = unify_all(loaded.values)? else {
         return Ok(ExitCode::from(1));
     };
 
     let mut saw_error = false;
     if data_files.is_empty() {
-        for file in files {
-            match compile_cue_file(&ctx, file).await? {
-                Some(value) => {
-                    if let Err(error) = value.validate(cue_rust::ValidateOptions::default()) {
-                        write_eval_error(error)?;
-                        saw_error = true;
-                    }
-                }
-                None => {
-                    saw_error = true;
-                }
-            }
+        if let Err(error) = schema.validate(cue_rust::ValidateOptions::default()) {
+            write_eval_error(error)?;
+            saw_error = true;
         }
     } else {
         for data_file in data_files {
@@ -229,19 +222,71 @@ async fn vet_files(
     }
 }
 
-async fn compile_cue_file(ctx: &cue_rust::Context, file: &Path) -> Result<Option<Value>> {
-    let bytes = tokio::fs::read(file)
-        .await
-        .with_context(|| format!("failed to read input file {}", file.display()))?;
-    let name = file.to_string_lossy().into_owned();
-    match ctx.compile_source_bytes(name, &bytes) {
-        Ok(value) => Ok(Some(value)),
-        Err(CueError::Diagnostics(report)) => {
-            write_diagnostics(&report)?;
-            Ok(None)
+#[derive(Debug)]
+struct LoadedValues {
+    values: Vec<Value>,
+    saw_diagnostics: bool,
+}
+
+async fn compile_cue_args(ctx: &cue_rust::Context, files: &[PathBuf]) -> Result<LoadedValues> {
+    let args = paths_to_utf8(files)?;
+    let config = load_config_for(files)?;
+    let instances = ctx.load(config, &args).await?;
+    let mut values = Vec::new();
+    let mut saw_diagnostics = false;
+    for instance in instances {
+        match ctx.build_instance(&instance) {
+            Ok(value) => values.push(value),
+            Err(CueError::Diagnostics(report)) => {
+                write_diagnostics(&report)?;
+                saw_diagnostics = true;
+            }
+            Err(error) => return Err(anyhow!("{error}")),
         }
-        Err(error) => Err(anyhow!("{error}")),
     }
+    Ok(LoadedValues {
+        values,
+        saw_diagnostics,
+    })
+}
+
+fn load_config_for(files: &[PathBuf]) -> Result<cue_rust::LoadConfig> {
+    let Some(first) = files.first() else {
+        return Ok(cue_rust::LoadConfig::default());
+    };
+    let current_dir = if first.is_absolute() {
+        let base = first.parent().unwrap_or_else(|| Path::new("."));
+        Some(
+            Utf8PathBuf::from_path_buf(base.to_path_buf())
+                .map_err(|path| anyhow!("path is not valid UTF-8: {}", path.display()))?,
+        )
+    } else {
+        None
+    };
+    Ok(cue_rust::LoadConfig::builder()
+        .current_dir(current_dir)
+        .build())
+}
+
+fn paths_to_utf8(files: &[PathBuf]) -> Result<Vec<Utf8PathBuf>> {
+    files
+        .iter()
+        .map(|file| {
+            Utf8PathBuf::from_path_buf(file.clone())
+                .map_err(|path| anyhow!("path is not valid UTF-8: {}", path.display()))
+        })
+        .collect()
+}
+
+fn unify_all(values: Vec<Value>) -> Result<Option<Value>> {
+    let mut values = values.into_iter();
+    let Some(mut unified) = values.next() else {
+        return Ok(None);
+    };
+    for value in values {
+        unified = unified.unify(&value).map_err(|error| anyhow!("{error}"))?;
+    }
+    Ok(Some(unified))
 }
 
 async fn read_data_file(file: &Path, format: Option<OutputFormat>) -> Result<Value> {

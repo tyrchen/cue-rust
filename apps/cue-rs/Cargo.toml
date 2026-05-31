@@ -16,6 +16,7 @@ path = "src/main.rs"
 
 [dependencies]
 anyhow.workspace = true
+camino.workspace = true
 clap.workspace = true
 cue-rust.workspace = true
 tokio.workspace = true

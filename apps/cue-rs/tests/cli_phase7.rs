@@ -49,6 +49,20 @@ async fn test_should_export_json() -> Result<(), Box<dyn Error>> {
 }
 
 #[tokio::test]
+async fn test_should_export_directory() -> Result<(), Box<dyn Error>> {
+    let dir = fixture_dir().await?;
+    fs::write(dir.join("a.cue"), "package p\nx: 1\n").await?;
+    fs::write(dir.join("b.cue"), "package p\ny: \"ok\"\n").await?;
+    let dir_arg = dir.to_string_lossy().into_owned();
+    let output = run(&["export", "--out", "json", &dir_arg]).await?;
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout)?;
+    assert!(stdout.contains("\"x\": 1"));
+    assert!(stdout.contains("\"y\": \"ok\""));
+    Ok(())
+}
+
+#[tokio::test]
 async fn test_should_vet_json_data() -> Result<(), Box<dyn Error>> {
     let dir = fixture_dir().await?;
     let cue = dir.join("schema.cue");
