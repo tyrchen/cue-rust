@@ -189,6 +189,17 @@ mod tests {
     }
 
     #[test]
+    fn test_should_evaluate_list_index_expression() -> Result<(), Box<dyn std::error::Error>> {
+        let context = Context::new();
+        let value = context.compile_source("test.cue", "x: [1, 2, 3][1]\n")?;
+        assert_eq!(
+            EvaluatedValue::Number("2".to_owned()),
+            value.lookup_path(&["x"])?.evaluate()?,
+        );
+        Ok(())
+    }
+
+    #[test]
     fn test_should_report_import_as_compile_diagnostic() {
         let context = Context::new();
         let result = context.compile_source("test.cue", "import \"strings\"\nx: 1\n");

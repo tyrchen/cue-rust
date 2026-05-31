@@ -188,6 +188,16 @@ async fn test_should_run_supported_upstream_core_eval_fixtures() -> TestResult {
             .validate(ValidateOptions::default())
             .is_err()
     );
+
+    let lists =
+        TxtarArchive::read(&root.join("vendors/cue/cue/testdata/basicrewrite/010_lists.txtar"))
+            .await?;
+    let list_source = first_lines(lists.file("in.cue")?, 2);
+    let list_value = context.compile_source("basicrewrite/010_lists/in.cue", list_source)?;
+    assert_eq!(
+        EvaluatedValue::Number("2".to_owned()),
+        list_value.lookup_path(&["index"])?.evaluate()?,
+    );
     Ok(())
 }
 
@@ -211,6 +221,10 @@ async fn test_should_export_borrowed_vendor_fixture_values() -> TestResult {
 
 fn txtar_header(line: &str) -> Option<&str> {
     line.strip_prefix("-- ")?.strip_suffix(" --")
+}
+
+fn first_lines(source: &str, limit: usize) -> String {
+    source.lines().take(limit).collect::<Vec<_>>().join("\n")
 }
 
 async fn collect_txtar_files(root: &Path) -> Result<Vec<PathBuf>, Box<dyn Error>> {

@@ -398,6 +398,11 @@ impl<'runtime> Evaluator<'runtime> {
                 let base_value = self.evaluate_expr_at(*base, environment, depth + 1)?;
                 self.select_field(base_value, *feature)
             }
+            SemanticExpr::Index { base, index } => {
+                let base_value = self.evaluate_expr_at(*base, environment, depth + 1)?;
+                let index_value = self.evaluate_expr_at(*index, environment, depth + 1)?;
+                evaluate_index(base_value, index_value)
+            }
             SemanticExpr::Unary { op, expr } => {
                 let value = self.evaluate_expr_at(*expr, environment, depth + 1)?;
                 evaluate_unary(op, value)
@@ -573,6 +578,59 @@ fn evaluate_add(left: EvaluatedValue, right: EvaluatedValue) -> EvaluatedValue {
             false,
         )),
     }
+}
+
+fn evaluate_index(base: EvaluatedValue, index: EvaluatedValue) -> EvaluatedValue {
+    let EvaluatedValue::List(items) = base else {
+        return EvaluatedValue::Bottom(Bottom::new(
+            "cue.eval.invalid_index_base",
+            "cannot index non-list value",
+            None,
+            false,
+        ));
+    };
+    let EvaluatedValue::Number(index) = index else {
+        return EvaluatedValue::Bottom(Bottom::new(
+            "cue.eval.invalid_index",
+            "list index must be a non-negative integer",
+            None,
+            false,
+        ));
+    };
+    let Some(index) = parse_list_index(&index) else {
+        return EvaluatedValue::Bottom(Bottom::new(
+            "cue.eval.invalid_index",
+            format!("invalid list index `{index}`"),
+            None,
+            false,
+        ));
+    };
+    items.get(index).cloned().unwrap_or_else(|| {
+        EvaluatedValue::Bottom(Bottom::new(
+            "cue.eval.index_out_of_bounds",
+            format!("list index {index} is out of bounds"),
+            None,
+            false,
+        ))
+    })
+}
+
+fn parse_list_index(index: &str) -> Option<usize> {
+    if index.starts_with('-') || index.contains(['.', 'e', 'E']) {
+        return None;
+    }
+    let mut value = 0_usize;
+    for byte in index.bytes() {
+        if byte == b'_' {
+            continue;
+        }
+        if !byte.is_ascii_digit() {
+            return None;
+        }
+        let digit = usize::from(byte.saturating_sub(b'0'));
+        value = value.checked_mul(10)?.checked_add(digit)?;
+    }
+    Some(value)
 }
 
 fn unify_values(left: EvaluatedValue, right: EvaluatedValue, span: Option<Span>) -> EvaluatedValue {

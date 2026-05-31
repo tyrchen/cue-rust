@@ -269,6 +269,25 @@ impl<'tokens> Parser<'tokens> {
                 continue;
             }
 
+            if self.at(TokenKind::LeftBracket) {
+                let _left_bracket = self.bump();
+                let index = self.parse_expr(0);
+                let end = self
+                    .expect_kind(
+                        TokenKind::RightBracket,
+                        "cue.parse.expected_index_close",
+                        "expected ']' after index expression",
+                    )
+                    .unwrap_or_else(|| index.span());
+                let span = merge_span(left.span(), end);
+                left = Expr::Index {
+                    base: Box::new(left),
+                    index: Box::new(index),
+                    span,
+                };
+                continue;
+            }
+
             let Some((op, left_bp, right_bp)) = self.infix_binding_power() else {
                 break;
             };
@@ -610,7 +629,7 @@ mod tests {
     fn test_should_parse_nested_struct_list_and_binary() {
         let result = parse_bytes(
             "test.cue",
-            b"x: { y: [1, 2 & 3] }\n",
+            b"x: { y: [1, 2 & 3][1] }\n",
             ParseConfig::default(),
         );
         assert!(!result.diagnostics().has_errors());

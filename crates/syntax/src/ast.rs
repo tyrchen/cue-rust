@@ -176,6 +176,15 @@ pub enum Expr {
         /// Source span.
         span: Span,
     },
+    /// Index expression.
+    Index {
+        /// Indexed base expression.
+        base: Box<Expr>,
+        /// Index expression.
+        index: Box<Expr>,
+        /// Source span.
+        span: Span,
+    },
     /// Unary expression.
     Unary {
         /// Operator text.
@@ -218,10 +227,11 @@ impl Expr {
             | Self::List(_, span)
             | Self::Default(_, span)
             | Self::Ellipsis(span)
-            | Self::Bad(span) => *span,
-            Self::Selector { span, .. } | Self::Unary { span, .. } | Self::Binary { span, .. } => {
-                *span
-            }
+            | Self::Bad(span)
+            | Self::Selector { span, .. }
+            | Self::Index { span, .. }
+            | Self::Unary { span, .. }
+            | Self::Binary { span, .. } => *span,
         }
     }
 
@@ -248,6 +258,11 @@ impl Expr {
             Self::Selector { base, field, .. } => {
                 lines.push(format!("{indent}selector {field}"));
                 base.push_debug(lines, depth + 1);
+            }
+            Self::Index { base, index, .. } => {
+                lines.push(format!("{indent}index"));
+                base.push_debug(lines, depth + 1);
+                index.push_debug(lines, depth + 1);
             }
             Self::Unary { op, expr, .. } => {
                 lines.push(format!("{indent}unary {op}"));

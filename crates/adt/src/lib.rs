@@ -249,6 +249,13 @@ pub enum SemanticExpr {
         /// Selected feature.
         feature: Feature,
     },
+    /// Index expression.
+    Index {
+        /// Indexed base expression.
+        base: ExprId,
+        /// Index expression.
+        index: ExprId,
+    },
     /// Unary expression.
     Unary {
         /// Operator text.

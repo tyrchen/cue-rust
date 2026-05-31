@@ -270,6 +270,11 @@ impl<'runtime> Compiler<'runtime> {
                 let feature = self.runtime.features.string(field);
                 SemanticExpr::Selector { base, feature }
             }
+            Expr::Index { base, index, .. } => {
+                let base = self.lower_expr(base)?;
+                let index = self.lower_expr(index)?;
+                SemanticExpr::Index { base, index }
+            }
             Expr::Unary { op, expr, .. } => {
                 let expr = self.lower_expr(expr)?;
                 SemanticExpr::Unary {
