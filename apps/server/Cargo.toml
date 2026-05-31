@@ -1,0 +1,17 @@
+[package]
+name = "cue-rust-server"
+description = """
+
+"""
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+license.workspace = true
+documentation.workspace = true
+repository.workspace = true
+homepage.workspace = true
+
+[dependencies]
+cue-rust-core.workspace = true
+anyhow.workspace = true
+tokio.workspace = true
