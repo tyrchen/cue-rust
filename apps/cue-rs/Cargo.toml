@@ -18,6 +18,7 @@ path = "src/main.rs"
 anyhow.workspace = true
 clap.workspace = true
 cue-rust.workspace = true
+tokio.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 

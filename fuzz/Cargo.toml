@@ -1,0 +1,21 @@
+[package]
+name = "cue-rust-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[package.metadata]
+cargo-fuzz = true
+
+[workspace]
+
+[dependencies]
+cue-rust-syntax = { path = "../crates/syntax" }
+libfuzzer-sys = "0.4.12"
+
+[[bin]]
+name = "scanner"
+path = "fuzz_targets/scanner.rs"
+test = false
+doc = false
+bench = false

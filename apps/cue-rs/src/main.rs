@@ -5,6 +5,7 @@
 
 use std::{
     io::{self, Write},
+    path::PathBuf,
     process::ExitCode,
 };
 
@@ -26,15 +27,26 @@ struct Cli {
     command: Command,
 }
 
-/// Supported Phase 1 CLI commands.
+/// Supported CLI commands.
 #[derive(Debug, Subcommand)]
 enum Command {
+    /// Scan CUE files and print source-level diagnostics.
+    Parse {
+        /// Files to scan.
+        files: Vec<PathBuf>,
+    },
     /// Print the cue-rust version.
     Version,
 }
 
 fn main() -> ExitCode {
-    match run() {
+    let result = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .context("failed to build Tokio runtime")
+        .and_then(|runtime| runtime.block_on(run()));
+
+    match result {
         Ok(code) => code,
         Err(error) => {
             let mut stderr = io::stderr().lock();
@@ -44,16 +56,48 @@ fn main() -> ExitCode {
     }
 }
 
-fn run() -> Result<ExitCode> {
+async fn run() -> Result<ExitCode> {
     let cli = Cli::parse();
     init_tracing(cli.verbose, cli.quiet)?;
 
     match cli.command {
+        Command::Parse { files } => scan_files(&files).await,
         Command::Version => {
             let mut stdout = io::stdout().lock();
             writeln!(stdout, "{}", cue_rust::VERSION).context("failed to write version output")?;
             Ok(ExitCode::SUCCESS)
         }
+    }
+}
+
+async fn scan_files(files: &[PathBuf]) -> Result<ExitCode> {
+    let ctx = cue_rust::Context::new();
+    let mut saw_error = false;
+
+    for file in files {
+        let bytes = tokio::fs::read(file)
+            .await
+            .with_context(|| format!("failed to read input file {}", file.display()))?;
+        let name = file.to_string_lossy().into_owned();
+        let result = ctx.scan_source_bytes(name, &bytes);
+        for diagnostic in result.diagnostics().diagnostics() {
+            let mut stderr = io::stderr().lock();
+            writeln!(
+                stderr,
+                "{:?}: {}: {}",
+                diagnostic.severity(),
+                diagnostic.code(),
+                diagnostic,
+            )
+            .context("failed to write diagnostic")?;
+        }
+        saw_error |= result.diagnostics().has_errors();
+    }
+
+    if saw_error {
+        Ok(ExitCode::from(1))
+    } else {
+        Ok(ExitCode::SUCCESS)
     }
 }
 

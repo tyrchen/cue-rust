@@ -6,7 +6,7 @@
 pub use cue_rust_eval::ValidateOptions;
 pub use cue_rust_loader::{LoadConfig, PackageSelector};
 pub use cue_rust_source::{SourceError, SourceFile, SourceLimits};
-pub use cue_rust_syntax::{ParseConfig, ParseMode, ParsedSource};
+pub use cue_rust_syntax::{ParseConfig, ParseMode, ParsedSource, ScanResult, Token, TokenKind};
 
 /// Current SDK version.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -42,5 +42,11 @@ impl Context {
         content: impl Into<String>,
     ) -> Result<ParsedSource, SourceError> {
         SourceFile::named(name, content, self.parse_config.limits()).map(ParsedSource::new)
+    }
+
+    /// Scans raw source bytes into syntax tokens and diagnostics.
+    #[must_use]
+    pub fn scan_source_bytes(&self, name: impl Into<String>, bytes: &[u8]) -> ScanResult {
+        cue_rust_syntax::scan_bytes(name, bytes, self.parse_config)
     }
 }

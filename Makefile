@@ -25,6 +25,9 @@ audit:
 deny:
 	@cargo deny check
 
+fuzz-smoke:
+	@cargo +nightly fuzz run scanner -- -runs=1
+
 check: build test fmt-check clippy doc audit deny
 
 ci: check check-agent-sync
@@ -55,4 +58,4 @@ release:
 update-submodule:
 	@git submodule update --init --recursive --remote
 
-.PHONY: build test fmt fmt-check clippy clippy-pedantic doc audit deny check ci check-agent-sync release update-submodule
+.PHONY: build test fmt fmt-check clippy clippy-pedantic doc audit deny fuzz-smoke check ci check-agent-sync release update-submodule

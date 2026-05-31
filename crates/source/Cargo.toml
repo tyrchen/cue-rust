@@ -11,6 +11,7 @@ homepage.workspace = true
 readme.workspace = true
 
 [dependencies]
+miette.workspace = true
 thiserror.workspace = true
 
 [lints]

@@ -14,5 +14,9 @@ readme.workspace = true
 cue-rust-source.workspace = true
 thiserror.workspace = true
 
+[dev-dependencies]
+proptest.workspace = true
+rstest.workspace = true
+
 [lints]
 workspace = true
