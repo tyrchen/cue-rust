@@ -165,8 +165,10 @@ async fn test_should_run_supported_upstream_core_eval_fixtures() -> TestResult {
     let object_unify =
         TxtarArchive::read(&root.join("vendors/cue/cue/testdata/basicrewrite/013_obj_unify.txtar"))
             .await?;
-    let source = strip_trailing_test_attributes(object_unify.file("in.cue")?);
-    let value = context.compile_source("basicrewrite/013_obj_unify/in.cue", source)?;
+    let value = context.compile_source(
+        "basicrewrite/013_obj_unify/in.cue",
+        object_unify.file("in.cue")?,
+    )?;
 
     assert_eq!(
         EvaluatedValue::Number("1".to_owned()),
@@ -209,17 +211,6 @@ async fn test_should_export_borrowed_vendor_fixture_values() -> TestResult {
 
 fn txtar_header(line: &str) -> Option<&str> {
     line.strip_prefix("-- ")?.strip_suffix(" --")
-}
-
-fn strip_trailing_test_attributes(source: &str) -> String {
-    source
-        .lines()
-        .map(|line| {
-            line.split_once(" @test")
-                .map_or(line, |(prefix, _suffix)| prefix)
-        })
-        .collect::<Vec<_>>()
-        .join("\n")
 }
 
 async fn collect_txtar_files(root: &Path) -> Result<Vec<PathBuf>, Box<dyn Error>> {

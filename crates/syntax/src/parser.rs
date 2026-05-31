@@ -207,6 +207,7 @@ impl<'tokens> Parser<'tokens> {
             "expected '=' in let declaration",
         );
         let value = self.parse_expr(0);
+        self.skip_attributes();
         let span = merge_span(start, value.span());
         Decl::Let(LetDecl { name, value, span })
     }
@@ -219,6 +220,7 @@ impl<'tokens> Parser<'tokens> {
             "expected ':' after field label",
         );
         let value = self.parse_expr(0);
+        self.skip_attributes();
         let span = merge_span(label.span(), value.span());
         Decl::Field(FieldDecl { label, value, span })
     }
@@ -455,10 +457,46 @@ impl<'tokens> Parser<'tokens> {
     }
 
     fn skip_separators(&mut self) {
-        while matches!(
-            self.peek_kind(),
-            Some(TokenKind::Comma | TokenKind::Comment)
-        ) {
+        loop {
+            match self.peek_kind() {
+                Some(TokenKind::Comma | TokenKind::Comment) => {
+                    self.bump();
+                }
+                Some(TokenKind::Attribute) => self.skip_attribute(),
+                _ => break,
+            }
+        }
+    }
+
+    fn skip_attributes(&mut self) {
+        while self.at(TokenKind::Attribute) {
+            self.skip_attribute();
+        }
+    }
+
+    fn skip_attribute(&mut self) {
+        self.bump();
+        if self.at(TokenKind::LeftParen) {
+            self.skip_balanced_parens();
+        }
+    }
+
+    fn skip_balanced_parens(&mut self) {
+        let mut depth = 0_u32;
+        while !self.at(TokenKind::Eof) {
+            if self.at(TokenKind::LeftParen) {
+                depth = depth.saturating_add(1);
+                self.bump();
+                continue;
+            }
+            if self.at(TokenKind::RightParen) {
+                self.bump();
+                depth = depth.saturating_sub(1);
+                if depth == 0 {
+                    break;
+                }
+                continue;
+            }
             self.bump();
         }
     }
@@ -558,7 +596,7 @@ mod tests {
 
     #[test]
     fn test_should_recover_bad_declaration() {
-        let result = parse_bytes("test.cue", b"@bad\nx: 1\n", ParseConfig::default());
+        let result = parse_bytes("test.cue", b"$bad\nx: 1\n", ParseConfig::default());
         assert!(result.diagnostics().has_errors());
         let has_bad = result.ast().is_some_and(|ast| {
             ast.declarations
@@ -585,5 +623,30 @@ mod tests {
             })
             .unwrap_or(false);
         assert!(is_struct);
+    }
+
+    #[test]
+    fn test_should_skip_attributes_around_declarations() {
+        let result = parse_bytes(
+            "test.cue",
+            br#"@experiment(foo)
+package demo
+@bar()
+import "strings"
+@baz()
+x: 1 @test(eq, {x: 1})
+y: "ok" @json(,omitempty)
+"#,
+            ParseConfig::default(),
+        );
+        assert!(!result.diagnostics().has_errors());
+        let tree = result.ast().map(crate::AstFile::to_debug_tree);
+        assert_eq!(
+            Some(
+                "file\n  package demo\n  import \"strings\"\n  field x\n    number 1\n  field y\n    string \"ok\""
+                    .to_owned(),
+            ),
+            tree,
+        );
     }
 }
