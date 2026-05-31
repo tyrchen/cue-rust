@@ -221,8 +221,8 @@ pub enum BaseValue {
 pub enum SemanticExpr {
     /// Base value expression.
     Base(BaseValue),
-    /// Struct expression represented by field conjunct ids.
-    Struct(Vec<ConjunctId>),
+    /// Struct expression represented by field expressions.
+    Struct(Vec<FieldExpr>),
     /// List expression represented by item expression ids.
     List(Vec<ExprId>),
     /// Field reference with lexical up-count.
@@ -232,8 +232,49 @@ pub enum SemanticExpr {
         /// Lexical environment hops.
         up_count: u32,
     },
+    /// Import reference by import path.
+    ImportReference {
+        /// Import path literal.
+        path: String,
+    },
+    /// Selector expression.
+    Selector {
+        /// Base expression.
+        base: ExprId,
+        /// Selected feature.
+        feature: Feature,
+    },
+    /// Unary expression.
+    Unary {
+        /// Operator text.
+        op: String,
+        /// Operand expression.
+        expr: ExprId,
+    },
+    /// Binary expression.
+    Binary {
+        /// Operator text.
+        op: String,
+        /// Left expression.
+        left: ExprId,
+        /// Right expression.
+        right: ExprId,
+    },
+    /// Default marker expression.
+    Default(ExprId),
     /// Bottom expression.
     Bottom(Bottom),
+}
+
+/// Field expression inside a semantic struct literal.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct FieldExpr {
+    /// Field feature.
+    pub feature: Feature,
+    /// Field value expression.
+    pub expression: ExprId,
+    /// Optional source span.
+    pub span: Option<Span>,
 }
 
 /// Vertex evaluation status.

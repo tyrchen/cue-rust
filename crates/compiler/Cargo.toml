@@ -13,6 +13,7 @@ readme.workspace = true
 [dependencies]
 cue-rust-adt.workspace = true
 cue-rust-loader.workspace = true
+cue-rust-source.workspace = true
 cue-rust-syntax.workspace = true
 thiserror.workspace = true
 

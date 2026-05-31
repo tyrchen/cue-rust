@@ -193,6 +193,7 @@ version = "0.1.0"
 dependencies = [
  "cue-rust-adt",
  "cue-rust-loader",
+ "cue-rust-source",
  "cue-rust-syntax",
  "thiserror",
 ]
