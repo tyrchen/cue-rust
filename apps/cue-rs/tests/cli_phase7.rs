@@ -37,6 +37,19 @@ async fn test_should_eval_cue_file() -> Result<(), Box<dyn Error>> {
 }
 
 #[tokio::test]
+async fn test_should_eval_selected_expression() -> Result<(), Box<dyn Error>> {
+    let dir = fixture_dir().await?;
+    let cue = dir.join("basic.cue");
+    fs::write(&cue, "x: { y: { z: 3 } }\n").await?;
+    let cue_arg = cue.to_string_lossy().into_owned();
+    let output = run(&["eval", "--expr", "x.y.z", &cue_arg]).await?;
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout)?;
+    assert_eq!("3\n", stdout);
+    Ok(())
+}
+
+#[tokio::test]
 async fn test_should_export_json() -> Result<(), Box<dyn Error>> {
     let dir = fixture_dir().await?;
     let cue = dir.join("basic.cue");
@@ -47,6 +60,33 @@ async fn test_should_export_json() -> Result<(), Box<dyn Error>> {
     let stdout = String::from_utf8(output.stdout)?;
     assert!(stdout.contains("\"x\": 1"));
     assert!(stdout.contains("\"y\": \"ok\""));
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_should_export_selected_expression_json() -> Result<(), Box<dyn Error>> {
+    let dir = fixture_dir().await?;
+    let cue = dir.join("basic.cue");
+    fs::write(&cue, "x: { y: 2 }\nz: 3\n").await?;
+    let cue_arg = cue.to_string_lossy().into_owned();
+    let output = run(&["export", "--out", "json", "--expr", "x", &cue_arg]).await?;
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout)?;
+    assert!(stdout.contains("\"y\": 2"));
+    assert!(!stdout.contains("\"z\": 3"));
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_should_fail_on_missing_selected_expression() -> Result<(), Box<dyn Error>> {
+    let dir = fixture_dir().await?;
+    let cue = dir.join("basic.cue");
+    fs::write(&cue, "x: 1\n").await?;
+    let cue_arg = cue.to_string_lossy().into_owned();
+    let output = run(&["eval", "--expr", "missing", &cue_arg]).await?;
+    assert!(!output.status.success());
+    let stderr = String::from_utf8(output.stderr)?;
+    assert!(stderr.contains("failed to select expression"));
     Ok(())
 }
 

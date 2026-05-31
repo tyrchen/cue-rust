@@ -42,6 +42,9 @@ enum Command {
     },
     /// Evaluate CUE files and print CUE-like value syntax.
     Eval {
+        /// Dot-separated expression path to evaluate.
+        #[arg(short = 'e', long = "expr")]
+        expressions: Vec<String>,
         /// CUE files to evaluate.
         files: Vec<PathBuf>,
     },
@@ -50,6 +53,9 @@ enum Command {
         /// Output format.
         #[arg(long, value_enum, default_value_t = OutputFormat::Json)]
         out: OutputFormat,
+        /// Dot-separated expression path to export.
+        #[arg(short = 'e', long = "expr")]
+        expressions: Vec<String>,
         /// CUE files to export.
         files: Vec<PathBuf>,
     },
@@ -115,8 +121,12 @@ async fn run() -> Result<ExitCode> {
 
     match cli.command {
         Command::Parse { files } => scan_files(&files).await,
-        Command::Eval { files } => eval_files(&files).await,
-        Command::Export { out, files } => export_files(out, &files).await,
+        Command::Eval { expressions, files } => eval_files(&files, &expressions).await,
+        Command::Export {
+            out,
+            expressions,
+            files,
+        } => export_files(out, &files, &expressions).await,
         Command::Vet {
             files,
             data,
@@ -130,16 +140,21 @@ async fn run() -> Result<ExitCode> {
     }
 }
 
-async fn eval_files(files: &[PathBuf]) -> Result<ExitCode> {
-    write_encoded_files(files, OutputFormat::Cue, false).await
+async fn eval_files(files: &[PathBuf], expressions: &[String]) -> Result<ExitCode> {
+    write_encoded_files(files, expressions, OutputFormat::Cue, false).await
 }
 
-async fn export_files(out: OutputFormat, files: &[PathBuf]) -> Result<ExitCode> {
-    write_encoded_files(files, out, true).await
+async fn export_files(
+    out: OutputFormat,
+    files: &[PathBuf],
+    expressions: &[String],
+) -> Result<ExitCode> {
+    write_encoded_files(files, expressions, out, true).await
 }
 
 async fn write_encoded_files(
     files: &[PathBuf],
+    expressions: &[String],
     output_format: OutputFormat,
     concrete: bool,
 ) -> Result<ExitCode> {
@@ -152,19 +167,13 @@ async fn write_encoded_files(
     let loaded = compile_cue_args(&ctx, files).await?;
     saw_error |= loaded.saw_diagnostics;
     for value in loaded.values {
-        let mut options = EncodeOptions::default();
-        options.encoding = output_format.encoding();
-        options.concrete = concrete;
-        match encode_value(&value, options) {
-            Ok(output) => {
-                let mut stdout = io::stdout().lock();
-                writeln!(stdout, "{output}").context("failed to write encoded value")?;
-            }
-            Err(error) => {
-                if write_encode_error(error)? {
-                    saw_error = true;
-                }
-            }
+        if expressions.is_empty() {
+            saw_error |= write_value(&value, output_format, concrete)?;
+            continue;
+        }
+        for expression in expressions {
+            let selected = select_expression(&value, expression)?;
+            saw_error |= write_value(&selected, output_format, concrete)?;
         }
     }
 
@@ -173,6 +182,49 @@ async fn write_encoded_files(
     } else {
         Ok(ExitCode::SUCCESS)
     }
+}
+
+fn write_value(value: &Value, output_format: OutputFormat, concrete: bool) -> Result<bool> {
+    let mut saw_error = false;
+    let mut options = EncodeOptions::default();
+    options.encoding = output_format.encoding();
+    options.concrete = concrete;
+    match encode_value(value, options) {
+        Ok(output) => {
+            let mut stdout = io::stdout().lock();
+            writeln!(stdout, "{output}").context("failed to write encoded value")?;
+        }
+        Err(error) => {
+            if write_encode_error(error)? {
+                saw_error = true;
+            }
+        }
+    }
+    Ok(saw_error)
+}
+
+fn select_expression(value: &Value, expression: &str) -> Result<Value> {
+    let path = parse_expression_path(expression)?;
+    value
+        .lookup_path(&path)
+        .map_err(|error| anyhow!("failed to select expression `{expression}`: {error}"))
+}
+
+fn parse_expression_path(expression: &str) -> Result<Vec<&str>> {
+    let trimmed = expression.trim();
+    if trimmed.is_empty() {
+        return Err(anyhow!("expression path must not be empty"));
+    }
+    let mut path = Vec::new();
+    for segment in trimmed.split('.') {
+        if segment.is_empty() {
+            return Err(anyhow!(
+                "expression path `{expression}` contains an empty segment"
+            ));
+        }
+        path.push(segment);
+    }
+    Ok(path)
 }
 
 async fn vet_files(
