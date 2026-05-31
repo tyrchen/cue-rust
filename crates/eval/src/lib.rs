@@ -779,16 +779,68 @@ fn evaluate_equality(
     right: &EvaluatedValue,
     negated: bool,
 ) -> EvaluatedValue {
-    let equal = match (left, right) {
-        (EvaluatedValue::Number(left), EvaluatedValue::Number(right)) => {
-            match (parse_number(left), parse_number(right)) {
-                (Some(left), Some(right)) => compare_numbers(left, right, Ordering::Equal),
-                _ => left == right,
-            }
-        }
-        _ => left == right,
+    let equal = match values_equal(left, right) {
+        Ok(equal) => equal,
+        Err(bottom) => return EvaluatedValue::Bottom(bottom),
     };
     EvaluatedValue::Bool(if negated { !equal } else { equal })
+}
+
+fn values_equal(left: &EvaluatedValue, right: &EvaluatedValue) -> Result<bool, Bottom> {
+    match (left, right) {
+        (EvaluatedValue::Bottom(bottom), _) | (_, EvaluatedValue::Bottom(bottom)) => {
+            Err(bottom.clone())
+        }
+        (EvaluatedValue::Number(left), EvaluatedValue::Number(right)) => {
+            Ok(equal_numbers(left, right))
+        }
+        (EvaluatedValue::Struct(left), EvaluatedValue::Struct(right)) => structs_equal(left, right),
+        (EvaluatedValue::List(left), EvaluatedValue::List(right)) => lists_equal(left, right),
+        (EvaluatedValue::Top, EvaluatedValue::Top)
+        | (EvaluatedValue::Null, EvaluatedValue::Null) => Ok(true),
+        (EvaluatedValue::Bool(left), EvaluatedValue::Bool(right)) => Ok(left == right),
+        (EvaluatedValue::String(left), EvaluatedValue::String(right)) => Ok(left == right),
+        (EvaluatedValue::Bytes(left), EvaluatedValue::Bytes(right)) => Ok(left == right),
+        (EvaluatedValue::Kind(left), EvaluatedValue::Kind(right)) => Ok(left == right),
+        _ => Ok(false),
+    }
+}
+
+fn equal_numbers(left: &str, right: &str) -> bool {
+    match (parse_number(left), parse_number(right)) {
+        (Some(left), Some(right)) => compare_numbers(left, right, Ordering::Equal),
+        _ => left == right,
+    }
+}
+
+fn lists_equal(left: &[EvaluatedValue], right: &[EvaluatedValue]) -> Result<bool, Bottom> {
+    if left.len() != right.len() {
+        return Ok(false);
+    }
+    for (left, right) in left.iter().zip(right) {
+        if !values_equal(left, right)? {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+fn structs_equal(
+    left: &IndexMap<String, EvaluatedValue>,
+    right: &IndexMap<String, EvaluatedValue>,
+) -> Result<bool, Bottom> {
+    if left.len() != right.len() {
+        return Ok(false);
+    }
+    for (label, left_value) in left {
+        let Some(right_value) = right.get(label) else {
+            return Ok(false);
+        };
+        if !values_equal(left_value, right_value)? {
+            return Ok(false);
+        }
+    }
+    Ok(true)
 }
 
 fn compare_numbers(left: f64, right: f64, ordering: Ordering) -> bool {

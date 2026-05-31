@@ -168,6 +168,8 @@ async fn test_should_run_supported_upstream_core_eval_fixtures() -> TestResult {
     assert_upstream_basic_types(&context, &root).await?;
     assert_upstream_types(&context, &root).await?;
     assert_upstream_numeric_comparisons(&context, &root).await?;
+    assert_upstream_list_comparisons(&context, &root).await?;
+    assert_upstream_struct_comparisons(&context, &root).await?;
     assert_upstream_arithmetic(&context, &root).await?;
     assert_upstream_integer_arithmetic(&context, &root).await?;
     assert_upstream_booleans(&context, &root).await?;
@@ -339,6 +341,69 @@ async fn assert_upstream_numeric_comparisons(context: &Context, root: &Path) -> 
         assert_eq!(
             EvaluatedValue::Bool(true),
             value.lookup_path(&["numbers", path])?.evaluate()?,
+        );
+    }
+    Ok(())
+}
+
+async fn assert_upstream_list_comparisons(context: &Context, root: &Path) -> TestResult {
+    let comparison = TxtarArchive::read(
+        &root.join("vendors/cue/cue/testdata/basicrewrite/016_comparison.txtar"),
+    )
+    .await?;
+    let list_source = format!(
+        "lists: {{\n{}\n}}\n",
+        selected_lines(
+            comparison.file("lists.cue")?,
+            &[
+                "t1:", "t2:", "t3:", "t4:", "f1:", "f2:", "f3:", "f4:", "f5:", "tNeq1:", "fNeq2:",
+            ],
+        )
+    );
+    let value = context.compile_source("basicrewrite/016_comparison/lists.cue", list_source)?;
+    for path in ["t1", "t2", "t3", "t4", "tNeq1"] {
+        assert_eq!(
+            EvaluatedValue::Bool(true),
+            value.lookup_path(&["lists", path])?.evaluate()?,
+        );
+    }
+    for path in ["f1", "f2", "f3", "f4", "f5", "fNeq2"] {
+        assert_eq!(
+            EvaluatedValue::Bool(false),
+            value.lookup_path(&["lists", path])?.evaluate()?,
+        );
+    }
+    Ok(())
+}
+
+async fn assert_upstream_struct_comparisons(context: &Context, root: &Path) -> TestResult {
+    let comparison = TxtarArchive::read(
+        &root.join("vendors/cue/cue/testdata/basicrewrite/016_comparison.txtar"),
+    )
+    .await?;
+    let struct_source = format!(
+        "structs: {{ eq: {{\n{}\n}} }}\n",
+        selected_lines_in_block(
+            comparison.file("structs.cue")?,
+            "structs: eq:",
+            "}",
+            &[
+                "t1:", "t2:", "t3:", "t4:", "t5:", "f1:", "f2:", "f3:", "f4:", "f5:", "f6:",
+                "tNe1:", "fNe1:",
+            ],
+        )
+    );
+    let value = context.compile_source("basicrewrite/016_comparison/structs.cue", struct_source)?;
+    for path in ["t1", "t2", "t3", "t4", "t5", "tNe1"] {
+        assert_eq!(
+            EvaluatedValue::Bool(true),
+            value.lookup_path(&["structs", "eq", path])?.evaluate()?,
+        );
+    }
+    for path in ["f1", "f2", "f3", "f4", "f5", "f6", "fNe1"] {
+        assert_eq!(
+            EvaluatedValue::Bool(false),
+            value.lookup_path(&["structs", "eq", path])?.evaluate()?,
         );
     }
     Ok(())
@@ -580,6 +645,26 @@ fn selected_lines(source: &str, prefixes: &[&str]) -> String {
             prefixes
                 .iter()
                 .any(|prefix| line.trim_start().starts_with(prefix))
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn selected_lines_in_block(source: &str, start: &str, end: &str, prefixes: &[&str]) -> String {
+    let mut in_block = false;
+    source
+        .lines()
+        .filter(|line| {
+            let trimmed = line.trim_start();
+            if !in_block {
+                in_block = trimmed.starts_with(start);
+                return false;
+            }
+            if trimmed == end {
+                in_block = false;
+                return false;
+            }
+            prefixes.iter().any(|prefix| trimmed.starts_with(prefix))
         })
         .collect::<Vec<_>>()
         .join("\n")

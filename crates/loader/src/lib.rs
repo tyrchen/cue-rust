@@ -619,6 +619,7 @@ async fn discover_module_root(current_dir: &Utf8PathBuf) -> Result<Utf8PathBuf, 
 mod tests {
     use std::{
         error::Error,
+        sync::atomic::{AtomicU64, Ordering},
         time::{SystemTime, UNIX_EPOCH},
     };
 
@@ -627,9 +628,12 @@ mod tests {
 
     use super::{LoadConfig, LoadError, Loader, PackageSelector};
 
+    static NEXT_FIXTURE_ID: AtomicU64 = AtomicU64::new(0);
+
     async fn fixture_dir() -> Result<Utf8PathBuf, Box<dyn Error>> {
         let nanos = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
-        let path = std::env::temp_dir().join(format!("cue-rust-loader-{nanos}"));
+        let suffix = NEXT_FIXTURE_ID.fetch_add(1, Ordering::Relaxed);
+        let path = std::env::temp_dir().join(format!("cue-rust-loader-{nanos}-{suffix}"));
         fs::create_dir_all(&path).await?;
         Utf8PathBuf::from_path_buf(path).map_err(|path| format!("non-UTF-8 path: {path:?}").into())
     }

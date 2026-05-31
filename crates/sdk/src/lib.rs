@@ -209,6 +209,35 @@ mod tests {
     }
 
     #[test]
+    fn test_should_evaluate_recursive_equality() -> Result<(), Box<dyn std::error::Error>> {
+        let context = Context::new();
+        let value = context.compile_source(
+            "test.cue",
+            "list: [1, {a: 2}] == [1.0, {a: 2}]\nstruct: {a: 1, b: 2} == {b: 2, a: 1}\nmissing: \
+             {a: 1} == {a: 1, b: 2}\nerr: [1/0] == [1]\n",
+        )?;
+        assert_eq!(
+            EvaluatedValue::Bool(true),
+            value.lookup_path(&["list"])?.evaluate()?,
+        );
+        assert_eq!(
+            EvaluatedValue::Bool(true),
+            value.lookup_path(&["struct"])?.evaluate()?,
+        );
+        assert_eq!(
+            EvaluatedValue::Bool(false),
+            value.lookup_path(&["missing"])?.evaluate()?,
+        );
+        assert!(
+            value
+                .lookup_path(&["err"])?
+                .validate(ValidateOptions::default())
+                .is_err()
+        );
+        Ok(())
+    }
+
+    #[test]
     fn test_should_resolve_nested_field_before_outer_field()
     -> Result<(), Box<dyn std::error::Error>> {
         let context = Context::new();
