@@ -3,7 +3,7 @@
 #![forbid(unsafe_code)]
 #![warn(rust_2024_compatibility, missing_docs, missing_debug_implementations)]
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use cue_rust_adt::{
     AdtError, BaseValue, Bottom, Conjunct, Environment, ExprId, Feature, FieldExpr, Runtime,
@@ -62,7 +62,13 @@ impl CompiledInstance {
 pub struct Compiler<'runtime> {
     runtime: &'runtime mut Runtime,
     diagnostics: DiagnosticReport,
-    scope: BTreeSet<String>,
+    scopes: Vec<Scope>,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+struct Scope {
+    fields: BTreeSet<String>,
+    lets: BTreeMap<String, ExprId>,
 }
 
 impl<'runtime> Compiler<'runtime> {
@@ -72,7 +78,7 @@ impl<'runtime> Compiler<'runtime> {
         Self {
             runtime,
             diagnostics: DiagnosticReport::new(),
-            scope: BTreeSet::new(),
+            scopes: Vec::new(),
         }
     }
 
@@ -88,7 +94,8 @@ impl<'runtime> Compiler<'runtime> {
     ) -> Result<CompiledInstance, CompileError> {
         self.diagnostics
             .extend(instance.diagnostics().diagnostics().iter().cloned());
-        self.collect_scope(instance.files());
+        let root_scope = Self::collect_scope(instance.files());
+        self.scopes.push(root_scope);
 
         let root = self
             .runtime
@@ -101,18 +108,21 @@ impl<'runtime> Compiler<'runtime> {
         for file in instance.files() {
             self.lower_file(file, root, root_env)?;
         }
+        self.scopes.pop();
 
         Ok(CompiledInstance::new(root, self.diagnostics))
     }
 
-    fn collect_scope(&mut self, files: &[AstFile]) {
+    fn collect_scope(files: &[AstFile]) -> Scope {
+        let mut scope = Scope::default();
         for file in files {
             for declaration in &file.declarations {
                 if let Decl::Field(field) = declaration {
-                    self.scope.insert(field.label.display_name().to_owned());
+                    scope.fields.insert(field.label.display_name().to_owned());
                 }
             }
         }
+        scope
     }
 
     fn lower_file(
@@ -122,9 +132,23 @@ impl<'runtime> Compiler<'runtime> {
         environment: cue_rust_adt::EnvironmentId,
     ) -> Result<(), CompileError> {
         for import in &file.imports {
-            let _expr = self.runtime.add_expression(SemanticExpr::ImportReference {
+            self.runtime.add_expression(SemanticExpr::ImportReference {
                 path: import.path.clone(),
             })?;
+            self.diagnostics.push(Diagnostic::new(
+                Severity::Error,
+                "cue.compile.unsupported_import",
+                format!("import {} is not loaded by the current loader", import.path),
+                Some(import.span),
+            ));
+        }
+        for declaration in &file.declarations {
+            if let Decl::Let(let_decl) = declaration {
+                let expression = self.lower_expr(&let_decl.value)?;
+                if let Some(scope) = self.scopes.last_mut() {
+                    scope.lets.insert(let_decl.name.clone(), expression);
+                }
+            }
         }
         for declaration in &file.declarations {
             self.lower_decl(declaration, root, environment)?;
@@ -150,16 +174,7 @@ impl<'runtime> Compiler<'runtime> {
                 };
                 self.runtime.add_conjunct(child, conjunct)?;
             }
-            Decl::Let(let_decl) => {
-                let expression = self.lower_expr(&let_decl.value)?;
-                let conjunct = Conjunct {
-                    environment,
-                    expression,
-                    span: Some(let_decl.span),
-                };
-                self.runtime.add_conjunct(parent, conjunct)?;
-            }
-            Decl::Ellipsis(_) => {}
+            Decl::Let(_) | Decl::Ellipsis(_) => {}
             Decl::Bad(span) => self.diagnostics.push(Diagnostic::new(
                 Severity::Error,
                 "cue.compile.bad_decl",
@@ -215,6 +230,20 @@ impl<'runtime> Compiler<'runtime> {
             Expr::Null(_) => SemanticExpr::Base(BaseValue::Null),
             Expr::Struct(declarations, _) => {
                 let mut fields = Vec::new();
+                let mut scope = Scope::default();
+                for declaration in declarations {
+                    match declaration {
+                        Decl::Field(field) => {
+                            scope.fields.insert(field.label.display_name().to_owned());
+                        }
+                        Decl::Let(let_decl) => {
+                            let expression = self.lower_expr(&let_decl.value)?;
+                            scope.lets.insert(let_decl.name.clone(), expression);
+                        }
+                        _ => {}
+                    }
+                }
+                self.scopes.push(scope);
                 for declaration in declarations {
                     if let Decl::Field(field) = declaration {
                         let expression = self.lower_expr(&field.value)?;
@@ -226,6 +255,7 @@ impl<'runtime> Compiler<'runtime> {
                         });
                     }
                 }
+                self.scopes.pop();
                 SemanticExpr::Struct(fields)
             }
             Expr::List(items, _) => {
@@ -283,7 +313,10 @@ impl<'runtime> Compiler<'runtime> {
         if is_builtin_kind(name) {
             return SemanticExpr::Base(BaseValue::Builtin(name.to_owned()));
         }
-        if self.scope.contains(name) {
+        if let Some(expression) = self.resolve_let(name) {
+            return SemanticExpr::LetReference { expression };
+        }
+        if self.resolve_field(name) {
             let feature = self.runtime.features.string(name);
             SemanticExpr::FieldReference {
                 feature,
@@ -307,6 +340,20 @@ impl<'runtime> Compiler<'runtime> {
 
     fn feature_for_label(&mut self, label: &Label) -> Feature {
         self.runtime.features.string(label.display_name())
+    }
+
+    fn resolve_let(&self, name: &str) -> Option<ExprId> {
+        self.scopes
+            .iter()
+            .rev()
+            .find_map(|scope| scope.lets.get(name).copied())
+    }
+
+    fn resolve_field(&self, name: &str) -> bool {
+        self.scopes
+            .iter()
+            .rev()
+            .any(|scope| scope.fields.contains(name))
     }
 }
 

@@ -33,7 +33,7 @@ compat-report:
 	@cargo test -p cue-rust --test compatibility -- --ignored --nocapture
 
 bench-smoke:
-	@cargo bench -p cue-rust --bench phase9 -- --sample-size 10 --warm-up-time 0.1 --measurement-time 0.1
+	@cargo bench -p cue-rust --bench phase9 -- --sample-size 10 --warm-up-time 0.1 --measurement-time 0.1 --save-baseline smoke
 
 check: build test fmt-check clippy doc audit deny
 

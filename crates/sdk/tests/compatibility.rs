@@ -2,7 +2,9 @@
 
 use std::{error::Error, path::PathBuf};
 
-use cue_rust::{Context, EncodeOptions, Encoding, ValidateOptions, encode_value};
+use cue_rust::{
+    Context, DecodeOptions, EncodeOptions, Encoding, ValidateOptions, decode_bytes, encode_value,
+};
 use serde::Serialize;
 use tokio::fs;
 
@@ -39,6 +41,26 @@ async fn test_should_generate_compatibility_report() -> Result<(), Box<dyn Error
         pass_status(value.lookup_path(&["y"])?.kind()? == cue_rust::ValueKind::Number),
     ));
 
+    let nested = context.compile_source("nested.cue", "x: 1\ny: { x: 2, z: x }\n")?;
+    cases.push(case(
+        "eval/nested-field-reference",
+        "semantic",
+        pass_status(
+            nested.lookup_path(&["y", "z"])?.evaluate()?
+                == cue_rust::EvaluatedValue::Number("2".to_owned()),
+        ),
+    ));
+
+    let let_value = context.compile_source("let.cue", "let x = 1\ny: x\n")?;
+    cases.push(case(
+        "compile/let-reference",
+        "semantic",
+        pass_status(
+            let_value.lookup_path(&["y"])?.evaluate()?
+                == cue_rust::EvaluatedValue::Number("1".to_owned()),
+        ),
+    ));
+
     let schema = context.compile_source("schema.cue", "name: string\n")?;
     let data = context.compile_source("data.cue", "name: \"cue\"\n")?;
     cases.push(case(
@@ -59,6 +81,24 @@ async fn test_should_generate_compatibility_report() -> Result<(), Box<dyn Error
         "export/json-object",
         "encoding",
         pass_status(encode_value(&export_value, options)?.contains("\"x\": 1")),
+    ));
+
+    let mut limited_decode = DecodeOptions::default();
+    limited_decode.max_depth = 0;
+    cases.push(case(
+        "decode/depth-limit",
+        "security",
+        pass_status(decode_bytes(Encoding::Json, br#"{"x":1}"#, limited_decode).is_err()),
+    ));
+
+    cases.push(case(
+        "compile/import-diagnostic",
+        "loader-gap",
+        pass_status(
+            context
+                .compile_source("import.cue", "import \"strings\"\nx: 1\n")
+                .is_err(),
+        ),
     ));
 
     cases.push(case(

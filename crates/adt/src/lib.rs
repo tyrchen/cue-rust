@@ -237,6 +237,11 @@ pub enum SemanticExpr {
         /// Import path literal.
         path: String,
     },
+    /// Lexical let reference.
+    LetReference {
+        /// Referenced let expression.
+        expression: ExprId,
+    },
     /// Selector expression.
     Selector {
         /// Base expression.

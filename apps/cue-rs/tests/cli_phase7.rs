@@ -4,14 +4,16 @@ use std::{
     error::Error,
     path::PathBuf,
     process::Output,
-    time::{SystemTime, UNIX_EPOCH},
+    sync::atomic::{AtomicU64, Ordering},
 };
 
 use tokio::{fs, process::Command};
 
+static NEXT_FIXTURE_ID: AtomicU64 = AtomicU64::new(0);
+
 async fn fixture_dir() -> Result<PathBuf, Box<dyn Error>> {
-    let nanos = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
-    let path = std::env::temp_dir().join(format!("cue-rust-cli-{nanos}"));
+    let id = NEXT_FIXTURE_ID.fetch_add(1, Ordering::Relaxed);
+    let path = std::env::temp_dir().join(format!("cue-rust-cli-{}-{id}", std::process::id()));
     fs::create_dir_all(&path).await?;
     Ok(path)
 }

@@ -261,6 +261,7 @@ struct Evaluator<'runtime> {
     runtime: &'runtime Runtime,
     diagnostics: DiagnosticReport,
     options: EvalOptions,
+    local_fields: Vec<IndexMap<Feature, ExprId>>,
 }
 
 impl<'runtime> Evaluator<'runtime> {
@@ -269,6 +270,7 @@ impl<'runtime> Evaluator<'runtime> {
             runtime,
             diagnostics: DiagnosticReport::new(),
             options,
+            local_fields: Vec::new(),
         }
     }
 
@@ -356,6 +358,11 @@ impl<'runtime> Evaluator<'runtime> {
             SemanticExpr::Base(base) => value_from_base(base),
             SemanticExpr::Struct(fields) => {
                 let mut values = IndexMap::new();
+                let local_fields = fields
+                    .iter()
+                    .map(|field| (field.feature, field.expression))
+                    .collect();
+                self.local_fields.push(local_fields);
                 for field in fields {
                     let label = self.feature_label(field.feature);
                     let value = self.evaluate_expr_at(field.expression, environment, depth + 1)?;
@@ -365,6 +372,7 @@ impl<'runtime> Evaluator<'runtime> {
                         values.insert(label, value);
                     }
                 }
+                self.local_fields.pop();
                 EvaluatedValue::Struct(values)
             }
             SemanticExpr::List(items) => {
@@ -383,6 +391,9 @@ impl<'runtime> Evaluator<'runtime> {
                 None,
                 true,
             )),
+            SemanticExpr::LetReference { expression } => {
+                self.evaluate_expr_at(*expression, environment, depth + 1)?
+            }
             SemanticExpr::Selector { base, feature } => {
                 let base_value = self.evaluate_expr_at(*base, environment, depth + 1)?;
                 self.select_field(base_value, *feature)
@@ -415,6 +426,16 @@ impl<'runtime> Evaluator<'runtime> {
         up_count: u32,
         depth: u32,
     ) -> Result<EvaluatedValue, EvalError> {
+        if up_count == 0
+            && let Some(expr_id) = self
+                .local_fields
+                .iter()
+                .rev()
+                .find_map(|fields| fields.get(&feature).copied())
+        {
+            return self.evaluate_expr_at(expr_id, environment, depth + 1);
+        }
+
         let mut environment_id = environment;
         for _ in 0..up_count {
             let environment = self.runtime.environment(environment_id)?;

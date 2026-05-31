@@ -12,6 +12,10 @@ use serde_json::{Map as JsonMap, Number as JsonNumber, Value as JsonValue};
 use thiserror::Error;
 use toml::{Table as TomlTable, Value as TomlValue};
 
+const DEFAULT_MAX_DECODE_DEPTH: u32 = 128;
+const DEFAULT_MAX_COLLECTION_ITEMS: usize = 65_536;
+const DEFAULT_MAX_STRING_BYTES: usize = 1_048_576;
+
 /// Supported external data encodings.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[non_exhaustive]
@@ -27,11 +31,28 @@ pub enum Encoding {
 }
 
 /// Options shared by data decoders.
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[non_exhaustive]
 pub struct DecodeOptions {
     /// Source byte limits.
     pub source_limits: SourceLimits,
+    /// Maximum decoded nesting depth.
+    pub max_depth: u32,
+    /// Maximum items in any decoded collection.
+    pub max_collection_items: usize,
+    /// Maximum bytes in any decoded string.
+    pub max_string_bytes: usize,
+}
+
+impl Default for DecodeOptions {
+    fn default() -> Self {
+        Self {
+            source_limits: SourceLimits::default(),
+            max_depth: DEFAULT_MAX_DECODE_DEPTH,
+            max_collection_items: DEFAULT_MAX_COLLECTION_ITEMS,
+            max_string_bytes: DEFAULT_MAX_STRING_BYTES,
+        }
+    }
 }
 
 /// Options shared by data encoders.
@@ -79,6 +100,28 @@ pub enum DecodeError {
     /// The decoded data uses a value unsupported by the CUE core subset.
     #[error("unsupported decoded value: {0}")]
     Unsupported(String),
+    /// Decoded nesting exceeded configured limits.
+    #[error("decoded value exceeds maximum depth {limit}")]
+    MaxDepth {
+        /// Configured depth limit.
+        limit: u32,
+    },
+    /// Decoded collection exceeded configured limits.
+    #[error("decoded collection has {actual} items, exceeding limit {limit}")]
+    MaxCollectionItems {
+        /// Observed item count.
+        actual: usize,
+        /// Configured item limit.
+        limit: usize,
+    },
+    /// Decoded string exceeded configured limits.
+    #[error("decoded string has {actual} bytes, exceeding limit {limit}")]
+    MaxStringBytes {
+        /// Observed byte count.
+        actual: usize,
+        /// Configured byte limit.
+        limit: usize,
+    },
 }
 
 /// Errors produced while encoding CUE values.
@@ -118,15 +161,15 @@ pub fn decode_bytes(
 ) -> Result<Value, DecodeError> {
     validate_size(bytes, options.source_limits)?;
     let evaluated = match encoding {
-        Encoding::Json => json_to_evaluated(serde_json::from_slice(bytes)?)?,
+        Encoding::Json => json_to_evaluated(serde_json::from_slice(bytes)?, options, 0)?,
         Encoding::Yaml => {
             let value: JsonValue =
                 noyalib::from_slice(bytes).map_err(|error| DecodeError::Yaml(error.to_string()))?;
-            json_to_evaluated(value)?
+            json_to_evaluated(value, options, 0)?
         }
         Encoding::Toml => {
             let input = str::from_utf8(bytes)?;
-            toml_to_evaluated(toml::from_str(input)?)?
+            toml_to_evaluated(toml::from_str(input)?, options, 0)?
         }
         Encoding::Cue => {
             return Err(DecodeError::Unsupported(
@@ -176,43 +219,109 @@ fn validate_size(bytes: &[u8], limits: SourceLimits) -> Result<(), DecodeError> 
     Ok(())
 }
 
-fn json_to_evaluated(value: JsonValue) -> Result<EvaluatedValue, DecodeError> {
+fn json_to_evaluated(
+    value: JsonValue,
+    options: DecodeOptions,
+    depth: u32,
+) -> Result<EvaluatedValue, DecodeError> {
+    validate_depth(depth, options)?;
     match value {
         JsonValue::Null => Ok(EvaluatedValue::Null),
         JsonValue::Bool(value) => Ok(EvaluatedValue::Bool(value)),
         JsonValue::Number(value) => Ok(EvaluatedValue::Number(value.to_string())),
-        JsonValue::String(value) => Ok(EvaluatedValue::String(value)),
-        JsonValue::Array(values) => values
-            .into_iter()
-            .map(json_to_evaluated)
-            .collect::<Result<Vec<_>, _>>()
-            .map(EvaluatedValue::List),
-        JsonValue::Object(values) => values
-            .into_iter()
-            .map(|(key, value)| json_to_evaluated(value).map(|value| (key, value)))
-            .collect::<Result<indexmap::IndexMap<_, _>, _>>()
-            .map(EvaluatedValue::Struct),
+        JsonValue::String(value) => {
+            validate_string(&value, options)?;
+            Ok(EvaluatedValue::String(value))
+        }
+        JsonValue::Array(values) => {
+            validate_collection(values.len(), options)?;
+            values
+                .into_iter()
+                .map(|value| json_to_evaluated(value, options, depth.saturating_add(1)))
+                .collect::<Result<Vec<_>, _>>()
+                .map(EvaluatedValue::List)
+        }
+        JsonValue::Object(values) => {
+            validate_collection(values.len(), options)?;
+            values
+                .into_iter()
+                .map(|(key, value)| {
+                    validate_string(&key, options)?;
+                    json_to_evaluated(value, options, depth.saturating_add(1))
+                        .map(|value| (key, value))
+                })
+                .collect::<Result<indexmap::IndexMap<_, _>, _>>()
+                .map(EvaluatedValue::Struct)
+        }
     }
 }
 
-fn toml_to_evaluated(value: TomlValue) -> Result<EvaluatedValue, DecodeError> {
+fn toml_to_evaluated(
+    value: TomlValue,
+    options: DecodeOptions,
+    depth: u32,
+) -> Result<EvaluatedValue, DecodeError> {
+    validate_depth(depth, options)?;
     match value {
-        TomlValue::String(value) => Ok(EvaluatedValue::String(value)),
+        TomlValue::String(value) => {
+            validate_string(&value, options)?;
+            Ok(EvaluatedValue::String(value))
+        }
         TomlValue::Integer(value) => Ok(EvaluatedValue::Number(value.to_string())),
         TomlValue::Float(value) => Ok(EvaluatedValue::Number(value.to_string())),
         TomlValue::Boolean(value) => Ok(EvaluatedValue::Bool(value)),
         TomlValue::Datetime(value) => Ok(EvaluatedValue::String(value.to_string())),
-        TomlValue::Array(values) => values
-            .into_iter()
-            .map(toml_to_evaluated)
-            .collect::<Result<Vec<_>, _>>()
-            .map(EvaluatedValue::List),
-        TomlValue::Table(values) => values
-            .into_iter()
-            .map(|(key, value)| toml_to_evaluated(value).map(|value| (key, value)))
-            .collect::<Result<indexmap::IndexMap<_, _>, _>>()
-            .map(EvaluatedValue::Struct),
+        TomlValue::Array(values) => {
+            validate_collection(values.len(), options)?;
+            values
+                .into_iter()
+                .map(|value| toml_to_evaluated(value, options, depth.saturating_add(1)))
+                .collect::<Result<Vec<_>, _>>()
+                .map(EvaluatedValue::List)
+        }
+        TomlValue::Table(values) => {
+            validate_collection(values.len(), options)?;
+            values
+                .into_iter()
+                .map(|(key, value)| {
+                    validate_string(&key, options)?;
+                    toml_to_evaluated(value, options, depth.saturating_add(1))
+                        .map(|value| (key, value))
+                })
+                .collect::<Result<indexmap::IndexMap<_, _>, _>>()
+                .map(EvaluatedValue::Struct)
+        }
     }
+}
+
+fn validate_depth(depth: u32, options: DecodeOptions) -> Result<(), DecodeError> {
+    if depth > options.max_depth {
+        return Err(DecodeError::MaxDepth {
+            limit: options.max_depth,
+        });
+    }
+    Ok(())
+}
+
+fn validate_collection(actual: usize, options: DecodeOptions) -> Result<(), DecodeError> {
+    if actual > options.max_collection_items {
+        return Err(DecodeError::MaxCollectionItems {
+            actual,
+            limit: options.max_collection_items,
+        });
+    }
+    Ok(())
+}
+
+fn validate_string(value: &str, options: DecodeOptions) -> Result<(), DecodeError> {
+    let actual = value.len();
+    if actual > options.max_string_bytes {
+        return Err(DecodeError::MaxStringBytes {
+            actual,
+            limit: options.max_string_bytes,
+        });
+    }
+    Ok(())
 }
 
 fn evaluated_to_json(value: EvaluatedValue) -> Result<JsonValue, EncodeError> {
@@ -395,5 +504,28 @@ mod tests {
         let output = encode_value(&value, EncodeOptions::default())?;
         assert!(output.contains("\"x\": 1"));
         Ok(())
+    }
+
+    #[test]
+    fn test_should_reject_decoder_depth_limit() {
+        let options = DecodeOptions {
+            max_depth: 0,
+            ..DecodeOptions::default()
+        };
+        let result = decode_bytes(Encoding::Json, br#"{"x":1}"#, options);
+        assert!(matches!(result, Err(super::DecodeError::MaxDepth { .. })));
+    }
+
+    #[test]
+    fn test_should_reject_decoder_string_limit() {
+        let options = DecodeOptions {
+            max_string_bytes: 1,
+            ..DecodeOptions::default()
+        };
+        let result = decode_bytes(Encoding::Json, br#""long""#, options);
+        assert!(matches!(
+            result,
+            Err(super::DecodeError::MaxStringBytes { .. })
+        ));
     }
 }

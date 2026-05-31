@@ -150,7 +150,7 @@ impl Context {
 
 #[cfg(test)]
 mod tests {
-    use super::{Context, ValidateOptions, ValueKind};
+    use super::{Context, CueError, EvaluatedValue, ValidateOptions, ValueKind};
 
     #[test]
     fn test_should_compile_source_and_lookup_value() -> Result<(), Box<dyn std::error::Error>> {
@@ -167,5 +167,31 @@ mod tests {
         let data = context.compile_source("data.cue", "name: \"cue\"\n")?;
         schema.unify(&data)?.validate(ValidateOptions::default())?;
         Ok(())
+    }
+
+    #[test]
+    fn test_should_resolve_nested_field_before_outer_field()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let context = Context::new();
+        let value = context.compile_source("test.cue", "x: 1\ny: { x: 2, z: x }\n")?;
+        let nested = value.lookup_path(&["y", "z"])?;
+        assert_eq!(EvaluatedValue::Number("2".to_owned()), nested.evaluate()?);
+        Ok(())
+    }
+
+    #[test]
+    fn test_should_resolve_let_binding() -> Result<(), Box<dyn std::error::Error>> {
+        let context = Context::new();
+        let value = context.compile_source("test.cue", "let x = 1\ny: x\n")?;
+        let y = value.lookup_path(&["y"])?;
+        assert_eq!(EvaluatedValue::Number("1".to_owned()), y.evaluate()?);
+        Ok(())
+    }
+
+    #[test]
+    fn test_should_report_import_as_compile_diagnostic() {
+        let context = Context::new();
+        let result = context.compile_source("test.cue", "import \"strings\"\nx: 1\n");
+        assert!(matches!(result, Err(CueError::Diagnostics(_))));
     }
 }
