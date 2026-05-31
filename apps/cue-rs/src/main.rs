@@ -14,8 +14,8 @@ use anyhow::{Context as AnyhowContext, Result, anyhow};
 use camino::Utf8PathBuf;
 use clap::{Parser, Subcommand, ValueEnum};
 use cue_rust::{
-    CueError, DecodeOptions, EncodeError, EncodeOptions, Encoding, EvalError, Value, decode_bytes,
-    encode_value,
+    CueError, DecodeOptions, EncodeError, EncodeOptions, Encoding, EvalError, ExportOptions, Value,
+    decode_bytes, encode_value,
 };
 
 /// cue-rust command-line arguments.
@@ -59,6 +59,15 @@ enum Command {
         /// Dot-separated expression path to evaluate.
         #[arg(short = 'e', long = "expr")]
         expressions: Vec<String>,
+        /// Include definition fields such as #Schema.
+        #[arg(long)]
+        show_definitions: bool,
+        /// Include hidden fields such as _scratch.
+        #[arg(long)]
+        show_hidden: bool,
+        /// Include optional field constraints.
+        #[arg(long)]
+        show_optional: bool,
         /// CUE files to evaluate.
         files: Vec<PathBuf>,
     },
@@ -70,6 +79,15 @@ enum Command {
         /// Dot-separated expression path to export.
         #[arg(short = 'e', long = "expr")]
         expressions: Vec<String>,
+        /// Include definition fields such as #Schema.
+        #[arg(long)]
+        show_definitions: bool,
+        /// Include hidden fields such as _scratch.
+        #[arg(long)]
+        show_hidden: bool,
+        /// Include optional field constraints.
+        #[arg(long)]
+        show_optional: bool,
         /// CUE files to export.
         files: Vec<PathBuf>,
     },
@@ -136,14 +154,27 @@ async fn run() -> Result<ExitCode> {
 
     match cli.command {
         Command::Parse { files } => scan_files(&files, &load_options).await,
-        Command::Eval { expressions, files } => {
-            eval_files(&files, &expressions, &load_options).await
+        Command::Eval {
+            expressions,
+            show_definitions,
+            show_hidden,
+            show_optional,
+            files,
+        } => {
+            let export_options = export_options(show_definitions, show_hidden, show_optional);
+            eval_files(&files, &expressions, export_options, &load_options).await
         }
         Command::Export {
             out,
             expressions,
+            show_definitions,
+            show_hidden,
+            show_optional,
             files,
-        } => export_files(out, &files, &expressions, &load_options).await,
+        } => {
+            let export_options = export_options(show_definitions, show_hidden, show_optional);
+            export_files(out, &files, &expressions, export_options, &load_options).await
+        }
         Command::Vet {
             files,
             data,
@@ -223,21 +254,43 @@ fn is_json_number_literal(value: &str) -> bool {
     serde_json::from_str::<serde_json::Number>(value).is_ok()
 }
 
+fn export_options(
+    include_definitions: bool,
+    include_hidden: bool,
+    include_optional: bool,
+) -> ExportOptions {
+    let mut options = ExportOptions::default();
+    options.include_definitions = include_definitions;
+    options.include_hidden = include_hidden;
+    options.include_optional = include_optional;
+    options
+}
+
 async fn eval_files(
     files: &[PathBuf],
     expressions: &[String],
+    export_options: ExportOptions,
     load_options: &CliLoadOptions,
 ) -> Result<ExitCode> {
-    write_encoded_files(files, expressions, OutputFormat::Cue, false, load_options).await
+    write_encoded_files(
+        files,
+        expressions,
+        OutputFormat::Cue,
+        false,
+        export_options,
+        load_options,
+    )
+    .await
 }
 
 async fn export_files(
     out: OutputFormat,
     files: &[PathBuf],
     expressions: &[String],
+    export_options: ExportOptions,
     load_options: &CliLoadOptions,
 ) -> Result<ExitCode> {
-    write_encoded_files(files, expressions, out, true, load_options).await
+    write_encoded_files(files, expressions, out, true, export_options, load_options).await
 }
 
 async fn write_encoded_files(
@@ -245,6 +298,7 @@ async fn write_encoded_files(
     expressions: &[String],
     output_format: OutputFormat,
     concrete: bool,
+    export_options: ExportOptions,
     load_options: &CliLoadOptions,
 ) -> Result<ExitCode> {
     if files.is_empty() {
@@ -257,23 +311,23 @@ async fn write_encoded_files(
     saw_error |= loaded.saw_diagnostics;
     for loaded_value in loaded.values {
         if expressions.is_empty() {
-            saw_error |= write_value(&loaded_value.value, output_format, concrete)?;
+            saw_error |= write_value(&loaded_value.value, output_format, concrete, export_options)?;
             continue;
         }
         for expression in expressions {
             let selected = select_expression(&ctx, &loaded_value, expression)?;
-            saw_error |= write_value(&selected, output_format, concrete)?;
+            saw_error |= write_value(&selected, output_format, concrete, export_options)?;
         }
     }
     for data_file in loaded.data_files {
         let data = read_loaded_data_file(&data_file, load_options.source_limits).await?;
         if expressions.is_empty() {
-            saw_error |= write_value(&data, output_format, concrete)?;
+            saw_error |= write_value(&data, output_format, concrete, export_options)?;
             continue;
         }
         for expression in expressions {
             let selected = select_value_path(&data, expression)?;
-            saw_error |= write_value(&selected, output_format, concrete)?;
+            saw_error |= write_value(&selected, output_format, concrete, export_options)?;
         }
     }
 
@@ -284,11 +338,17 @@ async fn write_encoded_files(
     }
 }
 
-fn write_value(value: &Value, output_format: OutputFormat, concrete: bool) -> Result<bool> {
+fn write_value(
+    value: &Value,
+    output_format: OutputFormat,
+    concrete: bool,
+    export_options: ExportOptions,
+) -> Result<bool> {
     let mut saw_error = false;
     let mut options = EncodeOptions::default();
     options.encoding = output_format.encoding();
     options.concrete = concrete;
+    options.export_options = export_options;
     match encode_value(value, options) {
         Ok(output) => {
             let mut stdout = io::stdout().lock();

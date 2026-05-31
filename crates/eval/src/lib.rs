@@ -6,7 +6,8 @@
 use std::{cmp::Ordering, fmt, num::FpCategory};
 
 use cue_rust_adt::{
-    AdtError, BaseValue, Bottom, EnvironmentId, ExprId, Feature, Runtime, SemanticExpr, VertexId,
+    AdtError, BaseValue, Bottom, EnvironmentId, ExprId, Feature, FieldExpr, FieldMetadata, Runtime,
+    SemanticExpr, VertexId,
 };
 use cue_rust_source::{Diagnostic, DiagnosticReport, Severity, Span};
 use indexmap::IndexMap;
@@ -51,6 +52,18 @@ impl Default for ValidateOptions {
             all_errors: false,
         }
     }
+}
+
+/// Field visibility controls used when producing concrete export trees.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[non_exhaustive]
+pub struct ExportOptions {
+    /// Include definition fields such as `#Schema`.
+    pub include_definitions: bool,
+    /// Include hidden fields such as `_scratch`.
+    pub include_hidden: bool,
+    /// Include optional fields such as `field?: value`.
+    pub include_optional: bool,
 }
 
 /// Errors produced by evaluation and validation.
@@ -112,6 +125,8 @@ pub enum EvaluatedValue {
     Struct(IndexMap<String, EvaluatedValue>),
     /// Closed struct fields in deterministic order.
     ClosedStruct(IndexMap<String, EvaluatedValue>),
+    /// Optional field constraint included by an export profile.
+    OptionalField(Box<EvaluatedValue>),
     /// List items.
     List(Vec<EvaluatedValue>),
     /// Builtin kind constraint.
@@ -147,7 +162,7 @@ impl EvaluatedValue {
             Self::Struct(_) | Self::ClosedStruct(_) => ValueKind::Struct,
             Self::List(_) => ValueKind::List,
             Self::Kind(kind) => *kind,
-            Self::Default(value) => value.kind(),
+            Self::OptionalField(value) | Self::Default(value) => value.kind(),
             Self::Disjunction(disjuncts) => disjunction_kind(disjuncts),
             Self::Bottom(_) => ValueKind::Bottom,
         }
@@ -277,13 +292,38 @@ impl Value {
         evaluator.finish(value)
     }
 
+    /// Evaluates this value with export field visibility rules.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`EvalError`] if ADT lookup fails or evaluation reports diagnostics.
+    pub fn evaluate_export(&self, options: ExportOptions) -> Result<EvaluatedValue, EvalError> {
+        if self.diagnostics.has_errors() {
+            return Err(EvalError::Diagnostics(self.diagnostics.clone()));
+        }
+        if let Some(evaluated) = &self.evaluated {
+            return Ok(evaluated.clone());
+        }
+        let Some(root) = self.root else {
+            return Err(EvalError::Diagnostics(single_diagnostic(
+                "cue.eval.missing_root",
+                "value has no root vertex",
+                None,
+            )));
+        };
+        let mut evaluator =
+            Evaluator::new(&self.runtime, EvalOptions::default()).with_export_options(options);
+        let value = evaluator.evaluate_vertex(root)?;
+        evaluator.finish(value)
+    }
+
     /// Validates this value with the provided options.
     ///
     /// # Errors
     ///
     /// Returns [`EvalError::Diagnostics`] when the value is invalid.
     pub fn validate(&self, options: ValidateOptions) -> Result<(), EvalError> {
-        let value = self.evaluate()?;
+        let value = self.evaluate_export(ExportOptions::default())?;
         let mut report = DiagnosticReport::new();
         validate_value(&value, options, "$", &mut report);
         if report.has_errors() {
@@ -298,8 +338,12 @@ impl Value {
     ///
     /// Returns [`EvalError`] if either value cannot be evaluated.
     pub fn unify(&self, other: &Self) -> Result<Self, EvalError> {
-        let left = self.evaluate()?;
-        let right = other.evaluate()?;
+        let options = ExportOptions {
+            include_optional: true,
+            ..ExportOptions::default()
+        };
+        let left = self.evaluate_export(options)?;
+        let right = other.evaluate_export(options)?;
         let unified = unify_values(left, right, None);
         Ok(Self::from_evaluated(unified))
     }
@@ -313,7 +357,8 @@ impl Value {
         let mut current = self.evaluate()?;
         for segment in path {
             current = current.resolve_defaults();
-            let EvaluatedValue::Struct(fields) = current else {
+            let (EvaluatedValue::Struct(fields) | EvaluatedValue::ClosedStruct(fields)) = current
+            else {
                 return Err(EvalError::Diagnostics(single_diagnostic(
                     "cue.eval.invalid_lookup",
                     format!("cannot select `{segment}` from non-struct value"),
@@ -338,7 +383,14 @@ struct Evaluator<'runtime> {
     runtime: &'runtime Runtime,
     diagnostics: DiagnosticReport,
     options: EvalOptions,
-    local_fields: Vec<IndexMap<Feature, ExprId>>,
+    export_options: Option<ExportOptions>,
+    local_fields: Vec<IndexMap<Feature, LocalField>>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct LocalField {
+    expression: ExprId,
+    metadata: FieldMetadata,
 }
 
 impl<'runtime> Evaluator<'runtime> {
@@ -347,8 +399,14 @@ impl<'runtime> Evaluator<'runtime> {
             runtime,
             diagnostics: DiagnosticReport::new(),
             options,
+            export_options: None,
             local_fields: Vec::new(),
         }
+    }
+
+    fn with_export_options(mut self, options: ExportOptions) -> Self {
+        self.export_options = Some(options);
+        self
     }
 
     fn evaluate_vertex(&mut self, vertex_id: VertexId) -> Result<EvaluatedValue, EvalError> {
@@ -402,8 +460,14 @@ impl<'runtime> Evaluator<'runtime> {
                 }
             };
             for arc in vertex.arcs.values() {
+                if !self.should_emit_field(arc.metadata) {
+                    continue;
+                }
                 let label = self.feature_label(arc.feature);
-                let child = self.evaluate_vertex_at(arc.target, depth + 1)?;
+                let mut child = self.evaluate_vertex_at(arc.target, depth + 1)?;
+                if self.export_options.is_some() && is_optional_constraint(arc.metadata) {
+                    child = EvaluatedValue::OptionalField(Box::new(child));
+                }
                 if let Some(existing) = fields.shift_remove(&label) {
                     fields.insert(label, unify_values(existing, child, None));
                 } else {
@@ -434,23 +498,7 @@ impl<'runtime> Evaluator<'runtime> {
         let value = match self.runtime.expression(expr_id)? {
             SemanticExpr::Base(base) => value_from_base(base),
             SemanticExpr::Struct(fields) => {
-                let mut values = IndexMap::new();
-                let local_fields = fields
-                    .iter()
-                    .map(|field| (field.feature, field.expression))
-                    .collect();
-                self.local_fields.push(local_fields);
-                for field in fields {
-                    let label = self.feature_label(field.feature);
-                    let value = self.evaluate_expr_at(field.expression, environment, depth + 1)?;
-                    if let Some(existing) = values.shift_remove(&label) {
-                        values.insert(label, unify_values(existing, value, field.span));
-                    } else {
-                        values.insert(label, value);
-                    }
-                }
-                self.local_fields.pop();
-                EvaluatedValue::Struct(values)
+                self.evaluate_struct_fields(fields, environment, depth + 1)?
             }
             SemanticExpr::List(items) => {
                 let mut values = Vec::with_capacity(items.len());
@@ -518,6 +566,45 @@ impl<'runtime> Evaluator<'runtime> {
         Ok(value)
     }
 
+    fn evaluate_struct_fields(
+        &mut self,
+        fields: &[FieldExpr],
+        environment: EnvironmentId,
+        depth: u32,
+    ) -> Result<EvaluatedValue, EvalError> {
+        let mut values = IndexMap::new();
+        let local_fields = fields
+            .iter()
+            .map(|field| {
+                (
+                    field.feature,
+                    LocalField {
+                        expression: field.expression,
+                        metadata: field.metadata,
+                    },
+                )
+            })
+            .collect();
+        self.local_fields.push(local_fields);
+        for field in fields {
+            if !self.should_emit_field(field.metadata) {
+                continue;
+            }
+            let label = self.feature_label(field.feature);
+            let mut value = self.evaluate_expr_at(field.expression, environment, depth)?;
+            if self.export_options.is_some() && is_optional_constraint(field.metadata) {
+                value = EvaluatedValue::OptionalField(Box::new(value));
+            }
+            if let Some(existing) = values.shift_remove(&label) {
+                values.insert(label, unify_values(existing, value, field.span));
+            } else {
+                values.insert(label, value);
+            }
+        }
+        self.local_fields.pop();
+        Ok(EvaluatedValue::Struct(values))
+    }
+
     fn evaluate_call(
         &mut self,
         callee: ExprId,
@@ -553,13 +640,17 @@ impl<'runtime> Evaluator<'runtime> {
         depth: u32,
     ) -> Result<EvaluatedValue, EvalError> {
         if up_count == 0
-            && let Some(expr_id) = self
+            && let Some(field) = self
                 .local_fields
                 .iter()
                 .rev()
                 .find_map(|fields| fields.get(&feature).copied())
         {
-            return self.evaluate_expr_at(expr_id, environment, depth + 1);
+            if is_optional_constraint(field.metadata) {
+                let label = self.feature_label(feature);
+                return Ok(optional_reference_bottom(&label));
+            }
+            return self.evaluate_expr_at(field.expression, environment, depth + 1);
         }
 
         let mut environment_id = environment;
@@ -587,6 +678,10 @@ impl<'runtime> Evaluator<'runtime> {
                 true,
             )));
         };
+        if is_optional_constraint(arc.metadata) {
+            let label = self.feature_label(feature);
+            return Ok(optional_reference_bottom(&label));
+        }
         self.evaluate_vertex_at(arc.target, depth + 1)
     }
 
@@ -618,6 +713,35 @@ impl<'runtime> Evaluator<'runtime> {
             .lookup(feature)
             .map_or_else(|| "<unknown>".to_owned(), |interned| interned.label.clone())
     }
+
+    fn should_emit_field(&self, metadata: FieldMetadata) -> bool {
+        let Some(options) = self.export_options else {
+            return true;
+        };
+        if metadata.is_definition() && !options.include_definitions {
+            return false;
+        }
+        if metadata.is_hidden() && !options.include_hidden {
+            return false;
+        }
+        if is_optional_constraint(metadata) && !options.include_optional {
+            return false;
+        }
+        true
+    }
+}
+
+fn is_optional_constraint(metadata: FieldMetadata) -> bool {
+    metadata.is_optional() && !metadata.is_regular() && !metadata.is_required()
+}
+
+fn optional_reference_bottom(label: &str) -> EvaluatedValue {
+    EvaluatedValue::Bottom(Bottom::new(
+        "cue.eval.optional_field_reference",
+        format!("cannot reference optional field `{label}`"),
+        None,
+        false,
+    ))
 }
 
 fn value_from_base(base: &BaseValue) -> EvaluatedValue {
@@ -1022,7 +1146,8 @@ fn values_equal(left: &EvaluatedValue, right: &EvaluatedValue) -> Result<bool, B
                 negated: right_negated,
             },
         ) => Ok(left_pattern == right_pattern && left_negated == right_negated),
-        (EvaluatedValue::Default(left), EvaluatedValue::Default(right)) => {
+        (EvaluatedValue::Default(left), EvaluatedValue::Default(right))
+        | (EvaluatedValue::OptionalField(left), EvaluatedValue::OptionalField(right)) => {
             values_equal(left, right)
         }
         (EvaluatedValue::Disjunction(left), EvaluatedValue::Disjunction(right)) => {
@@ -1195,6 +1320,9 @@ fn resolve_default_value(value: EvaluatedValue) -> EvaluatedValue {
                 .map(|(label, value)| (label, resolve_default_value(value)))
                 .collect(),
         ),
+        EvaluatedValue::OptionalField(value) => {
+            EvaluatedValue::OptionalField(Box::new(resolve_default_value(*value)))
+        }
         EvaluatedValue::List(items) => {
             EvaluatedValue::List(items.into_iter().map(resolve_default_value).collect())
         }
@@ -1817,12 +1945,28 @@ fn unify_structs(
 ) -> IndexMap<String, EvaluatedValue> {
     for (label, right_value) in right {
         if let Some(left_value) = left.shift_remove(&label) {
-            left.insert(label, unify_values(left_value, right_value, span));
+            left.insert(label, unify_field_values(left_value, right_value, span));
         } else {
             left.insert(label, right_value);
         }
     }
+    left.retain(|_, value| !matches!(value, EvaluatedValue::OptionalField(_)));
     left
+}
+
+fn unify_field_values(
+    left: EvaluatedValue,
+    right: EvaluatedValue,
+    span: Option<Span>,
+) -> EvaluatedValue {
+    match (left, right) {
+        (EvaluatedValue::OptionalField(left), EvaluatedValue::OptionalField(right)) => {
+            EvaluatedValue::OptionalField(Box::new(unify_values(*left, *right, span)))
+        }
+        (EvaluatedValue::OptionalField(left), right) => unify_values(*left, right, span),
+        (left, EvaluatedValue::OptionalField(right)) => unify_values(left, *right, span),
+        (left, right) => unify_values(left, right, span),
+    }
 }
 
 fn unify_closed_struct(
@@ -1892,7 +2036,10 @@ fn kind_accepts_value(kind: ValueKind, value: &EvaluatedValue) -> bool {
         (ValueKind::Number, EvaluatedValue::Number(value)) => parse_decimal_number(value).is_some(),
         (ValueKind::Int, EvaluatedValue::Number(value)) => parse_integer(value).is_some(),
         (ValueKind::Float, EvaluatedValue::Number(value)) => parse_float(value).is_some(),
-        (ValueKind::Number, EvaluatedValue::NumericConstraint(_))
+        (
+            ValueKind::Number | ValueKind::Int | ValueKind::Float,
+            EvaluatedValue::NumericConstraint(_),
+        )
         | (ValueKind::Top, _)
         | (ValueKind::Null, EvaluatedValue::Null)
         | (ValueKind::Bool, EvaluatedValue::Bool(_))
@@ -1968,6 +2115,18 @@ fn validate_value(
             bottom.span,
         )),
         EvaluatedValue::Default(value) => validate_value(value, options, path, report),
+        EvaluatedValue::OptionalField(value) => {
+            if options.concrete {
+                report.push(Diagnostic::new(
+                    Severity::Error,
+                    "cue.eval.incomplete_optional",
+                    format!("{path}: optional field constraint is not concrete data"),
+                    None,
+                ));
+            } else {
+                validate_value(value, options, path, report);
+            }
+        }
         EvaluatedValue::Disjunction(disjuncts) => {
             validate_disjunction(disjuncts, options, path, report);
         }

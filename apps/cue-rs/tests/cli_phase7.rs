@@ -103,6 +103,67 @@ async fn test_should_export_selected_expression_json() -> Result<(), Box<dyn Err
 }
 
 #[tokio::test]
+async fn test_should_hide_definitions_hidden_and_optional_fields_by_default()
+-> Result<(), Box<dyn Error>> {
+    let dir = fixture_dir().await?;
+    let cue = dir.join("profile.cue");
+    fs::write(
+        &cue,
+        "#Port: int & >=1\n_hidden: \"scratch\"\noptional?: string\nport: #Port & 8080\n",
+    )
+    .await?;
+    let cue_arg = cue.to_string_lossy().into_owned();
+    let output = run(&["export", "--out", "json", &cue_arg]).await?;
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout)?;
+    assert!(stdout.contains("\"port\": 8080"));
+    assert!(!stdout.contains("#Port"));
+    assert!(!stdout.contains("_hidden"));
+    assert!(!stdout.contains("optional"));
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_should_show_export_profile_fields_when_requested() -> Result<(), Box<dyn Error>> {
+    let dir = fixture_dir().await?;
+    let cue = dir.join("profile.cue");
+    fs::write(
+        &cue,
+        "#Port: 8080\n_hidden: \"scratch\"\noptional?: \"maybe\"\nport: #Port\n",
+    )
+    .await?;
+    let cue_arg = cue.to_string_lossy().into_owned();
+    let output = run(&[
+        "eval",
+        "--show-definitions",
+        "--show-hidden",
+        "--show-optional",
+        &cue_arg,
+    ])
+    .await?;
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout)?;
+    assert!(stdout.contains("#Port: 8080"));
+    assert!(stdout.contains("_hidden: \"scratch\""));
+    assert!(stdout.contains("optional?: \"maybe\""));
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_should_reject_optional_constraints_in_concrete_export() -> Result<(), Box<dyn Error>>
+{
+    let dir = fixture_dir().await?;
+    let cue = dir.join("profile.cue");
+    fs::write(&cue, "optional?: \"maybe\"\n").await?;
+    let cue_arg = cue.to_string_lossy().into_owned();
+    let output = run(&["export", "--show-optional", "--out", "json", &cue_arg]).await?;
+    assert!(!output.status.success());
+    let stderr = String::from_utf8(output.stderr)?;
+    assert!(stderr.contains("optional field constraint is not concrete data"));
+    Ok(())
+}
+
+#[tokio::test]
 async fn test_should_fail_on_missing_selected_expression() -> Result<(), Box<dyn Error>> {
     let dir = fixture_dir().await?;
     let cue = dir.join("basic.cue");

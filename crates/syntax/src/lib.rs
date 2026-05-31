@@ -11,7 +11,9 @@ use cue_rust_source::{
 mod ast;
 mod parser;
 
-pub use ast::{AstFile, Decl, Expr, FieldDecl, ImportDecl, Label, LetDecl, PackageClause};
+pub use ast::{
+    AstFile, Decl, Expr, FieldDecl, FieldMarker, ImportDecl, Label, LetDecl, PackageClause,
+};
 pub use parser::{ParseResult, parse_bytes};
 
 const SCANNER_SOURCE_ID: u32 = 1;
@@ -313,7 +315,7 @@ impl<'src> Scanner<'src> {
                 b',' | b';' => self.scan_explicit_comma(),
                 b'.' => self.scan_dot(),
                 b'*' => self.scan_single(TokenKind::Star),
-                b'+' | b'-' | b'=' | b'!' | b'<' | b'>' | b'&' | b'|' | b'~' => {
+                b'+' | b'-' | b'=' | b'!' | b'<' | b'>' | b'&' | b'|' | b'~' | b'?' => {
                     self.scan_operator();
                 }
                 _ => self.scan_bad_byte(),
@@ -541,7 +543,7 @@ impl<'src> Scanner<'src> {
         self.advance_while(|byte| {
             matches!(
                 byte,
-                b'+' | b'-' | b'=' | b'!' | b'<' | b'>' | b'&' | b'|' | b'~'
+                b'+' | b'-' | b'=' | b'!' | b'<' | b'>' | b'&' | b'|' | b'~' | b'?'
             )
         });
         let text = self.text(start, self.offset).to_owned();

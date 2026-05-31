@@ -3,8 +3,8 @@
 use cue_rust_source::{Diagnostic, DiagnosticReport, Severity, Span};
 
 use crate::{
-    AstFile, Decl, Expr, FieldDecl, ImportDecl, Label, LetDecl, PackageClause, ParseConfig,
-    ScanResult, Token, TokenKind, scan_bytes,
+    AstFile, Decl, Expr, FieldDecl, FieldMarker, ImportDecl, Label, LetDecl, PackageClause,
+    ParseConfig, ScanResult, Token, TokenKind, scan_bytes,
 };
 
 /// Result of parsing source bytes.
@@ -214,6 +214,7 @@ impl<'tokens> Parser<'tokens> {
 
     fn parse_field(&mut self) -> Decl {
         let label = self.parse_label();
+        let marker = self.parse_field_marker();
         self.expect_kind(
             TokenKind::Colon,
             "cue.parse.expected_colon",
@@ -222,7 +223,12 @@ impl<'tokens> Parser<'tokens> {
         let value = self.parse_field_value();
         self.skip_attributes();
         let span = merge_span(label.span(), value.span());
-        Decl::Field(FieldDecl { label, value, span })
+        Decl::Field(FieldDecl {
+            label,
+            marker,
+            value,
+            span,
+        })
     }
 
     fn parse_field_value(&mut self) -> Expr {
@@ -231,6 +237,7 @@ impl<'tokens> Parser<'tokens> {
         }
 
         let label = self.parse_label();
+        let marker = self.parse_field_marker();
         self.expect_kind(
             TokenKind::Colon,
             "cue.parse.expected_colon",
@@ -238,7 +245,15 @@ impl<'tokens> Parser<'tokens> {
         );
         let value = self.parse_field_value();
         let span = merge_span(label.span(), value.span());
-        Expr::Struct(vec![Decl::Field(FieldDecl { label, value, span })], span)
+        Expr::Struct(
+            vec![Decl::Field(FieldDecl {
+                label,
+                marker,
+                value,
+                span,
+            })],
+            span,
+        )
     }
 
     fn parse_label(&mut self) -> Label {
@@ -256,6 +271,18 @@ impl<'tokens> Parser<'tokens> {
         }
         self.error_here("cue.parse.expected_label", "expected field label");
         Label::Bad(self.current_span())
+    }
+
+    fn parse_field_marker(&mut self) -> FieldMarker {
+        if self.at(TokenKind::Operator) && self.peek_text() == Some("?") {
+            self.bump();
+            return FieldMarker::Optional;
+        }
+        if self.at(TokenKind::Operator) && self.peek_text() == Some("!") {
+            self.bump();
+            return FieldMarker::Required;
+        }
+        FieldMarker::Regular
     }
 
     fn parse_expr(&mut self, min_bp: u8) -> Expr {
@@ -646,11 +673,28 @@ impl<'tokens> Parser<'tokens> {
     }
 
     fn at_chained_field_start(&self) -> bool {
-        self.at_label_start()
+        self.label_marker_colon_offset().is_some()
+    }
+
+    fn label_marker_colon_offset(&self) -> Option<usize> {
+        if !self.at_label_start() {
+            return None;
+        }
+        let first_after_label = self.cursor.checked_add(1)?;
+        let next = self.tokens.get(first_after_label)?;
+        if next.kind() == TokenKind::Colon {
+            return Some(first_after_label);
+        }
+        if next.kind() == TokenKind::Operator
+            && matches!(next.text(), "?" | "!")
             && self
                 .tokens
-                .get(self.cursor.saturating_add(1))
+                .get(first_after_label.checked_add(1)?)
                 .is_some_and(|token| token.kind() == TokenKind::Colon)
+        {
+            return first_after_label.checked_add(1);
+        }
+        None
     }
 
     fn at(&self, kind: TokenKind) -> bool {
@@ -715,7 +759,7 @@ fn fallback_span() -> Span {
 #[cfg(test)]
 mod tests {
     use super::parse_bytes;
-    use crate::{Decl, Expr, ParseConfig};
+    use crate::{Decl, Expr, FieldMarker, ParseConfig};
 
     #[test]
     fn test_should_parse_package_and_field() {
@@ -757,6 +801,29 @@ mod tests {
             })
             .unwrap_or(false);
         assert!(is_struct);
+    }
+
+    #[test]
+    fn test_should_parse_field_presence_markers() {
+        let result = parse_bytes(
+            "test.cue",
+            b"optional?: string\nrequired!: int\n",
+            ParseConfig::default(),
+        );
+        assert!(!result.diagnostics().has_errors());
+        let markers = result
+            .ast()
+            .map(|ast| {
+                ast.declarations
+                    .iter()
+                    .filter_map(|declaration| match declaration {
+                        Decl::Field(field) => Some(field.marker),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        assert_eq!(vec![FieldMarker::Optional, FieldMarker::Required], markers);
     }
 
     #[test]

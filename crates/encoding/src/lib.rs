@@ -5,7 +5,7 @@
 
 use std::{str, str::FromStr};
 
-use cue_rust_eval::{EvalError, EvaluatedValue, ValidateOptions, Value};
+use cue_rust_eval::{EvalError, EvaluatedValue, ExportOptions, ValidateOptions, Value};
 use cue_rust_source::SourceLimits;
 use noyalib::{Mapping as YamlMapping, Number as YamlNumber, Value as YamlValue};
 use serde_json::{Map as JsonMap, Number as JsonNumber, Value as JsonValue};
@@ -63,6 +63,8 @@ pub struct EncodeOptions {
     pub encoding: Encoding,
     /// Require concrete values before encoding.
     pub concrete: bool,
+    /// Field visibility options for export.
+    pub export_options: ExportOptions,
 }
 
 impl Default for EncodeOptions {
@@ -70,6 +72,7 @@ impl Default for EncodeOptions {
         Self {
             encoding: Encoding::Json,
             concrete: true,
+            export_options: ExportOptions::default(),
         }
     }
 }
@@ -186,16 +189,16 @@ pub fn decode_bytes(
 ///
 /// Returns [`EncodeError`] when evaluation fails or the value is not concrete.
 pub fn encode_value(value: &Value, options: EncodeOptions) -> Result<String, EncodeError> {
-    if options.concrete {
+    let evaluated = if options.concrete {
         let mut validate_options = ValidateOptions::default();
         validate_options.all_errors = true;
-        value.validate(validate_options)?;
-    }
-
-    let evaluated = if options.concrete {
-        value.evaluate()?.resolve_defaults()
+        let exported = value
+            .evaluate_export(options.export_options)?
+            .resolve_defaults();
+        Value::from_evaluated(exported.clone()).validate(validate_options)?;
+        exported
     } else {
-        value.evaluate()?
+        value.evaluate_export(options.export_options)?
     };
     match options.encoding {
         Encoding::Cue => Ok(format_cue_value(&evaluated)),
@@ -358,6 +361,10 @@ fn evaluated_to_json(value: EvaluatedValue) -> Result<JsonValue, EncodeError> {
             unsupported(Encoding::Json, "incomplete regex constraint")
         }
         EvaluatedValue::Default(value) => evaluated_to_json(*value),
+        EvaluatedValue::OptionalField(_) => unsupported(
+            Encoding::Json,
+            "optional field constraint is not concrete data",
+        ),
         EvaluatedValue::Disjunction(_) => unsupported(Encoding::Json, "incomplete disjunction"),
         EvaluatedValue::Bottom(bottom) => unsupported(Encoding::Json, bottom.message),
         _ => unsupported(Encoding::Json, "unsupported value"),
@@ -392,6 +399,10 @@ fn evaluated_to_toml(value: EvaluatedValue) -> Result<TomlValue, EncodeError> {
             unsupported(Encoding::Toml, "incomplete regex constraint")
         }
         EvaluatedValue::Default(value) => evaluated_to_toml(*value),
+        EvaluatedValue::OptionalField(_) => unsupported(
+            Encoding::Toml,
+            "optional field constraint is not concrete data",
+        ),
         EvaluatedValue::Disjunction(_) => unsupported(Encoding::Toml, "incomplete disjunction"),
         EvaluatedValue::Bottom(bottom) => unsupported(Encoding::Toml, bottom.message),
         _ => unsupported(Encoding::Toml, "unsupported value"),
@@ -426,6 +437,10 @@ fn evaluated_to_yaml(value: EvaluatedValue) -> Result<YamlValue, EncodeError> {
             unsupported(Encoding::Yaml, "incomplete regex constraint")
         }
         EvaluatedValue::Default(value) => evaluated_to_yaml(*value),
+        EvaluatedValue::OptionalField(_) => unsupported(
+            Encoding::Yaml,
+            "optional field constraint is not concrete data",
+        ),
         EvaluatedValue::Disjunction(_) => unsupported(Encoding::Yaml, "incomplete disjunction"),
         EvaluatedValue::Bottom(bottom) => unsupported(Encoding::Yaml, bottom.message),
         _ => unsupported(Encoding::Yaml, "unsupported value"),
@@ -496,6 +511,7 @@ fn format_cue_value(value: &EvaluatedValue) -> String {
             format!("{op}{pattern:?}")
         }
         EvaluatedValue::Default(value) => format!("*{}", format_cue_value(value)),
+        EvaluatedValue::OptionalField(value) => format_cue_value(value),
         EvaluatedValue::Disjunction(disjuncts) => disjuncts
             .iter()
             .map(|disjunct| {
@@ -548,7 +564,13 @@ fn format_cue_struct(fields: &indexmap::IndexMap<String, EvaluatedValue>) -> Str
     }
     let body = fields
         .iter()
-        .map(|(key, value)| format!("{key}: {}", format_cue_value(value)))
+        .map(|(key, value)| {
+            if let EvaluatedValue::OptionalField(value) = value {
+                format!("{key}?: {}", format_cue_value(value))
+            } else {
+                format!("{key}: {}", format_cue_value(value))
+            }
+        })
         .collect::<Vec<_>>()
         .join(", ");
     format!("{{{body}}}")
@@ -569,7 +591,8 @@ mod tests {
                 &value,
                 EncodeOptions {
                     encoding: Encoding::Cue,
-                    concrete: true
+                    concrete: true,
+                    ..EncodeOptions::default()
                 }
             )?
         );
@@ -602,6 +625,7 @@ mod tests {
                 EncodeOptions {
                     encoding: Encoding::Cue,
                     concrete: true,
+                    ..EncodeOptions::default()
                 },
             )?,
         );

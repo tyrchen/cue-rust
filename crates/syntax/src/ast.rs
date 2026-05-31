@@ -101,10 +101,25 @@ impl Decl {
 pub struct FieldDecl {
     /// Field label.
     pub label: Label,
+    /// Field presence marker.
+    pub marker: FieldMarker,
     /// Field value expression.
     pub value: Expr,
     /// Source span.
     pub span: Span,
+}
+
+/// Field presence marker.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[non_exhaustive]
+pub enum FieldMarker {
+    /// A regular field that participates in concrete output.
+    #[default]
+    Regular,
+    /// An optional field constraint, spelled `?:`.
+    Optional,
+    /// A required field constraint, spelled `!:`.
+    Required,
 }
 
 /// Let declaration.

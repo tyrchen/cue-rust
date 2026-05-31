@@ -181,6 +181,52 @@ async fn test_should_run_supported_upstream_core_eval_fixtures() -> TestResult {
     assert_upstream_len(&context, &root).await?;
     assert_upstream_strings_and_bytes(&context, &root).await?;
     assert_upstream_escaping(&context, &root).await?;
+    assert_upstream_definitions_and_export_profiles(&context, &root).await?;
+    Ok(())
+}
+
+async fn assert_upstream_definitions_and_export_profiles(
+    context: &Context,
+    root: &Path,
+) -> TestResult {
+    let definitions =
+        TxtarArchive::read(&root.join("vendors/cue/cue/testdata/definitions/files.txtar")).await?;
+    let value = context.compile_source("definitions/files/in.cue", definitions.file("in.cue")?)?;
+    assert_eq!(
+        EvaluatedValue::String("dark".to_owned()),
+        value.lookup_path(&["dark", "color"])?.evaluate()?,
+    );
+    let output = encode_value(&value, EncodeOptions::default())?;
+    assert!(output.contains("\"dark\""));
+    assert!(output.contains("\"light\""));
+    assert!(!output.contains("#theme"));
+    assert!(!output.contains("#Config"));
+
+    let comparison =
+        TxtarArchive::read(&root.join(
+            "vendors/cue/internal/core/compile/testdata/sync/basicrewrite/016_comparison.txtar",
+        ))
+        .await?;
+    let source = comparison.file("structs.cue")?;
+    assert!(source.contains("b?: 2"));
+    assert!(source.contains("_hidden: 1"));
+    assert!(source.contains("#def: 1"));
+
+    let reduced = context.compile_source(
+        "basicrewrite/016_comparison/reduced.cue",
+        "visible: 1\n_hidden: 1\n#def: 1\noptional?: string\n",
+    )?;
+    let reduced_json = encode_value(&reduced, EncodeOptions::default())?;
+    assert!(reduced_json.contains("\"visible\": 1"));
+    assert!(!reduced_json.contains("_hidden"));
+    assert!(!reduced_json.contains("#def"));
+    assert!(!reduced_json.contains("optional"));
+
+    let optional_reference = context.compile_source(
+        "basicrewrite/016_comparison/optional_reference.cue",
+        "x?: 1\ny: x\n",
+    )?;
+    assert!(encode_value(&optional_reference, EncodeOptions::default()).is_err());
     Ok(())
 }
 

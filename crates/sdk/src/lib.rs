@@ -11,13 +11,13 @@ pub use cue_rust_encoding::{
     DecodeError, DecodeOptions, EncodeError, EncodeOptions, Encoding, decode_bytes, encode_value,
 };
 pub use cue_rust_eval::{
-    EvalError, EvalOptions, EvaluatedValue, ValidateOptions, Value, ValueKind,
+    EvalError, EvalOptions, EvaluatedValue, ExportOptions, ValidateOptions, Value, ValueKind,
 };
 pub use cue_rust_loader::{BuildInstance, LoadConfig, LoadError, Loader, PackageSelector};
 pub use cue_rust_source::{DiagnosticReport, SourceError, SourceFile, SourceLimits};
 pub use cue_rust_syntax::{
-    AstFile, Decl, Expr, FieldDecl, ImportDecl, Label, LetDecl, PackageClause, ParseConfig,
-    ParseMode, ParseResult, ParsedSource, ScanResult, Token, TokenKind,
+    AstFile, Decl, Expr, FieldDecl, FieldMarker, ImportDecl, Label, LetDecl, PackageClause,
+    ParseConfig, ParseMode, ParseResult, ParsedSource, ScanResult, Token, TokenKind,
 };
 use thiserror::Error;
 
@@ -194,8 +194,8 @@ fn single_diagnostic(code: &'static str, message: &'static str) -> DiagnosticRep
 #[cfg(test)]
 mod tests {
     use super::{
-        Context, CueError, EncodeOptions, Encoding, EvaluatedValue, ValidateOptions, ValueKind,
-        encode_value,
+        Context, CueError, DecodeOptions, EncodeOptions, Encoding, EvaluatedValue, ValidateOptions,
+        ValueKind, decode_bytes, encode_value,
     };
 
     #[test]
@@ -690,6 +690,94 @@ mod tests {
                 .validate(ValidateOptions::default())
                 .is_err()
         );
+        Ok(())
+    }
+
+    #[test]
+    fn test_should_export_regular_fields_without_definitions_hidden_or_optional_constraints()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let context = Context::new();
+        let value = context.compile_source(
+            "test.cue",
+            "#Port: int & >=1 & <=65535\n_hidden: \"scratch\"\noptional?: string\nport: #Port & \
+             8080\n",
+        )?;
+        let output = encode_value(&value, EncodeOptions::default())?;
+        assert!(output.contains("\"port\": 8080"));
+        assert!(!output.contains("#Port"));
+        assert!(!output.contains("_hidden"));
+        assert!(!output.contains("optional"));
+        Ok(())
+    }
+
+    #[test]
+    fn test_should_report_required_constraint_missing_from_export()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let context = Context::new();
+        let value = context.compile_source("test.cue", "name!: string\n")?;
+        let result = encode_value(&value, EncodeOptions::default());
+        assert!(result.is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn test_should_export_required_field_when_regular_field_satisfies_it()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let context = Context::new();
+        let value = context.compile_source("test.cue", "name!: string\nname: \"cue\"\n")?;
+        let output = encode_value(&value, EncodeOptions::default())?;
+        assert!(output.contains("\"name\": \"cue\""));
+        Ok(())
+    }
+
+    #[test]
+    fn test_should_reject_optional_field_reference() -> Result<(), Box<dyn std::error::Error>> {
+        let context = Context::new();
+        let value = context.compile_source("test.cue", "x?: 1\ny: x\n")?;
+        let result = encode_value(&value, EncodeOptions::default());
+        assert!(result.is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn test_should_keep_required_constraint_when_optional_constraint_shares_label()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let context = Context::new();
+        let value = context.compile_source("test.cue", "x?: string\nx!: string\n")?;
+        let result = encode_value(&value, EncodeOptions::default());
+        assert!(result.is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn test_should_apply_optional_constraint_when_data_field_is_present()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let context = Context::new();
+        let schema = context.compile_source("schema.cue", "name?: string\n")?;
+        let valid = context.compile_source("valid.cue", "name: \"cue\"\n")?;
+        schema.unify(&valid)?.validate(ValidateOptions::default())?;
+        let invalid = context.compile_source("invalid.cue", "name: 1\n")?;
+        assert!(
+            schema
+                .unify(&invalid)?
+                .validate(ValidateOptions::default())
+                .is_err()
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_should_preserve_external_data_keys_that_look_like_cue_metadata()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let value = decode_bytes(
+            Encoding::Json,
+            br##"{"_keep":1,"#literal":2,"regular":3}"##,
+            DecodeOptions::default(),
+        )?;
+        let output = encode_value(&value, EncodeOptions::default())?;
+        assert!(output.contains("\"_keep\": 1"));
+        assert!(output.contains("\"#literal\": 2"));
+        assert!(output.contains("\"regular\": 3"));
         Ok(())
     }
 

@@ -299,10 +299,108 @@ pub enum SemanticExpr {
 pub struct FieldExpr {
     /// Field feature.
     pub feature: Feature,
+    /// Field metadata controlling presence and export visibility.
+    pub metadata: FieldMetadata,
     /// Field value expression.
     pub expression: ExprId,
     /// Optional source span.
     pub span: Option<Span>,
+}
+
+/// Field metadata shared by struct-literal fields and vertex arcs.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct FieldMetadata {
+    flags: FieldMetadataFlags,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+struct FieldMetadataFlags(u8);
+
+impl FieldMetadataFlags {
+    const OPTIONAL: u8 = 0b0_0001;
+    const REQUIRED: u8 = 0b0_0010;
+    const REGULAR: u8 = 0b0_0100;
+    const DEFINITION: u8 = 0b0_1000;
+    const HIDDEN: u8 = 0b1_0000;
+
+    fn with(mut self, flag: u8) -> Self {
+        self.0 |= flag;
+        self
+    }
+
+    fn contains(self, flag: u8) -> bool {
+        self.0 & flag != 0
+    }
+
+    fn merge(&mut self, other: Self) {
+        self.0 |= other.0;
+    }
+}
+
+impl FieldMetadata {
+    /// Metadata for a regular field.
+    #[must_use]
+    pub fn regular(definition: bool, hidden: bool) -> Self {
+        Self::new(FieldMetadataFlags::REGULAR, definition, hidden)
+    }
+
+    /// Metadata for an optional field constraint.
+    #[must_use]
+    pub fn optional(definition: bool, hidden: bool) -> Self {
+        Self::new(FieldMetadataFlags::OPTIONAL, definition, hidden)
+    }
+
+    /// Metadata for a required field constraint.
+    #[must_use]
+    pub fn required(definition: bool, hidden: bool) -> Self {
+        Self::new(FieldMetadataFlags::REQUIRED, definition, hidden)
+    }
+
+    fn new(presence: u8, definition: bool, hidden: bool) -> Self {
+        let mut flags = FieldMetadataFlags::default().with(presence);
+        if definition {
+            flags = flags.with(FieldMetadataFlags::DEFINITION);
+        }
+        if hidden {
+            flags = flags.with(FieldMetadataFlags::HIDDEN);
+        }
+        Self { flags }
+    }
+
+    /// Returns whether this field is optional.
+    #[must_use]
+    pub fn is_optional(self) -> bool {
+        self.flags.contains(FieldMetadataFlags::OPTIONAL)
+    }
+
+    /// Returns whether this field is required.
+    #[must_use]
+    pub fn is_required(self) -> bool {
+        self.flags.contains(FieldMetadataFlags::REQUIRED)
+    }
+
+    /// Returns whether this field is a regular concrete member.
+    #[must_use]
+    pub fn is_regular(self) -> bool {
+        self.flags.contains(FieldMetadataFlags::REGULAR)
+    }
+
+    /// Returns whether this field is a definition.
+    #[must_use]
+    pub fn is_definition(self) -> bool {
+        self.flags.contains(FieldMetadataFlags::DEFINITION)
+    }
+
+    /// Returns whether this field is hidden.
+    #[must_use]
+    pub fn is_hidden(self) -> bool {
+        self.flags.contains(FieldMetadataFlags::HIDDEN)
+    }
+
+    /// Merges another declaration's metadata into this field.
+    pub fn merge(&mut self, other: Self) {
+        self.flags.merge(other.flags);
+    }
 }
 
 /// Vertex evaluation status.
@@ -325,12 +423,8 @@ pub struct Arc {
     pub feature: Feature,
     /// Child vertex id.
     pub target: VertexId,
-    /// Whether the arc is optional.
-    pub optional: bool,
-    /// Whether the arc is a definition.
-    pub definition: bool,
-    /// Whether the arc is hidden.
-    pub hidden: bool,
+    /// Field metadata for this arc.
+    pub metadata: FieldMetadata,
 }
 
 /// Semantic graph vertex.
@@ -636,8 +730,8 @@ impl Default for Runtime {
 #[cfg(test)]
 mod tests {
     use super::{
-        Arc, BaseValue, Conjunct, Environment, FeatureInterner, Runtime, RuntimeConfig,
-        SemanticExpr, Vertex,
+        Arc, BaseValue, Conjunct, Environment, FeatureInterner, FieldMetadata, Runtime,
+        RuntimeConfig, SemanticExpr, Vertex,
     };
 
     #[test]
@@ -690,9 +784,7 @@ mod tests {
             Arc {
                 feature,
                 target: child,
-                optional: false,
-                definition: false,
-                hidden: false,
+                metadata: FieldMetadata::regular(false, false),
             },
         )?;
         let graph = runtime.debug_graph(root)?;

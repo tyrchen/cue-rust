@@ -6,12 +6,12 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use cue_rust_adt::{
-    AdtError, BaseValue, Bottom, Conjunct, Environment, ExprId, Feature, FieldExpr, Runtime,
-    SemanticExpr, Vertex, VertexId,
+    AdtError, BaseValue, Bottom, Conjunct, Environment, ExprId, Feature, FeatureKind, FieldExpr,
+    FieldMetadata, Runtime, SemanticExpr, Vertex, VertexId,
 };
 use cue_rust_loader::BuildInstance;
 use cue_rust_source::{Diagnostic, DiagnosticReport, Severity, Span};
-use cue_rust_syntax::{AstFile, Decl, Expr, Label};
+use cue_rust_syntax::{AstFile, Decl, Expr, FieldMarker, Label};
 use thiserror::Error;
 
 /// Compiler options shared by lowering passes.
@@ -164,8 +164,9 @@ impl<'runtime> Compiler<'runtime> {
     ) -> Result<(), CompileError> {
         match declaration {
             Decl::Field(field) => {
+                let metadata = Self::metadata_for_field(&field.label, field.marker);
                 let feature = self.feature_for_label(&field.label);
-                let child = self.ensure_child(parent, feature)?;
+                let child = self.ensure_child(parent, feature, metadata)?;
                 let expression = self.lower_expr(&field.value)?;
                 let conjunct = Conjunct {
                     environment,
@@ -195,6 +196,7 @@ impl<'runtime> Compiler<'runtime> {
         &mut self,
         parent: VertexId,
         feature: Feature,
+        metadata: FieldMetadata,
     ) -> Result<VertexId, CompileError> {
         if let Some(existing) = self
             .runtime
@@ -203,6 +205,13 @@ impl<'runtime> Compiler<'runtime> {
             .get(&feature)
             .map(|arc| arc.target)
         {
+            self.runtime
+                .vertex_mut(parent)?
+                .arcs
+                .entry(feature)
+                .and_modify(|arc| {
+                    arc.metadata.merge(metadata);
+                });
             return Ok(existing);
         }
         let child =
@@ -213,9 +222,7 @@ impl<'runtime> Compiler<'runtime> {
             cue_rust_adt::Arc {
                 feature,
                 target: child,
-                optional: false,
-                definition: false,
-                hidden: false,
+                metadata,
             },
         )?;
         Ok(child)
@@ -239,7 +246,7 @@ impl<'runtime> Compiler<'runtime> {
             }
             Expr::Selector { base, field, .. } => {
                 let base = self.lower_expr(base)?;
-                let feature = self.runtime.features.string(field);
+                let feature = self.feature_for_name(field);
                 SemanticExpr::Selector { base, feature }
             }
             Expr::Index { base, index, .. } => {
@@ -329,8 +336,10 @@ impl<'runtime> Compiler<'runtime> {
             if let Decl::Field(field) = declaration {
                 let expression = self.lower_expr(&field.value)?;
                 let feature = self.feature_for_label(&field.label);
+                let metadata = Self::metadata_for_field(&field.label, field.marker);
                 fields.push(FieldExpr {
                     feature,
+                    metadata,
                     expression,
                     span: Some(field.span),
                 });
@@ -345,7 +354,7 @@ impl<'runtime> Compiler<'runtime> {
             return SemanticExpr::LetReference { expression };
         }
         if self.resolve_field(name) {
-            let feature = self.runtime.features.string(name);
+            let feature = self.feature_for_name(name);
             return SemanticExpr::FieldReference {
                 feature,
                 up_count: 0,
@@ -369,7 +378,29 @@ impl<'runtime> Compiler<'runtime> {
     }
 
     fn feature_for_label(&mut self, label: &Label) -> Feature {
-        self.runtime.features.string(&label_name(label))
+        let name = label_name(label);
+        let kind = match label {
+            Label::Identifier(_, _) => feature_kind_for_label(&name),
+            _ => FeatureKind::String,
+        };
+        self.runtime.features.intern(kind, &name)
+    }
+
+    fn feature_for_name(&mut self, name: &str) -> Feature {
+        let kind = feature_kind_for_label(name);
+        self.runtime.features.intern(kind, name)
+    }
+
+    fn metadata_for_field(label: &Label, marker: FieldMarker) -> FieldMetadata {
+        let name = label_name(label);
+        let is_identifier = matches!(label, Label::Identifier(_, _));
+        let hidden = is_identifier && is_hidden_label(&name);
+        let definition = is_identifier && is_definition_label(&name);
+        match marker {
+            FieldMarker::Optional => FieldMetadata::optional(definition, hidden),
+            FieldMarker::Required => FieldMetadata::required(definition, hidden),
+            _ => FieldMetadata::regular(definition, hidden),
+        }
     }
 
     fn resolve_let(&self, name: &str) -> Option<ExprId> {
@@ -402,6 +433,24 @@ fn label_name(label: &Label) -> String {
         Label::Bad(_) => "<bad>".to_owned(),
         _ => label.display_name().to_owned(),
     }
+}
+
+fn feature_kind_for_label(label: &str) -> FeatureKind {
+    if is_hidden_label(label) {
+        FeatureKind::Hidden
+    } else if is_definition_label(label) {
+        FeatureKind::Definition
+    } else {
+        FeatureKind::String
+    }
+}
+
+fn is_definition_label(label: &str) -> bool {
+    label.starts_with('#') || label.starts_with("_#")
+}
+
+fn is_hidden_label(label: &str) -> bool {
+    label.starts_with('_') && label != "_"
 }
 
 fn unquote_bytes(value: &str) -> Vec<u8> {
@@ -477,7 +526,7 @@ fn is_builtin_name(name: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use cue_rust_adt::{BaseValue, Runtime, SemanticExpr};
+    use cue_rust_adt::{BaseValue, FeatureKind, Runtime, SemanticExpr};
     use cue_rust_loader::BuildInstance;
     use cue_rust_syntax::{ParseConfig, parse_bytes};
 
@@ -533,6 +582,74 @@ mod tests {
                 .is_some_and(|expr| matches!(expr, SemanticExpr::Base(BaseValue::Number(value)) if value == "1"))
         });
         assert!(has_number);
+        Ok(())
+    }
+
+    #[test]
+    fn test_should_lower_definition_hidden_and_presence_metadata()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let parsed = parse_bytes(
+            "test.cue",
+            b"#Schema: { optional?: string, required!: int, _hidden: true }\nvalue: #Schema & { required: 2 }\n",
+            ParseConfig::default(),
+        );
+        assert!(!parsed.diagnostics().has_errors());
+        let files = parsed.ast().map_or_else(Vec::new, |ast| vec![ast.clone()]);
+        let instance = BuildInstance::new(None, files);
+        let mut runtime = Runtime::default();
+        let compiled =
+            Compiler::new(&mut runtime).compile_instance(&instance, CompileOptions::default())?;
+        let schema_feature = runtime.features.intern(FeatureKind::Definition, "#Schema");
+        let root = runtime.vertex(compiled.root())?;
+        let schema_arc = root
+            .arcs
+            .get(&schema_feature)
+            .ok_or_else(|| std::io::Error::other("missing #Schema arc"))?;
+        assert!(schema_arc.metadata.is_definition());
+        assert!(schema_arc.metadata.is_regular());
+
+        let schema = runtime.vertex(schema_arc.target)?;
+        let conjunct_id = schema
+            .conjuncts
+            .first()
+            .copied()
+            .ok_or_else(|| std::io::Error::other("missing #Schema conjunct"))?;
+        let schema_expr = runtime.expression(runtime.conjunct(conjunct_id)?.expression)?;
+        let SemanticExpr::Struct(fields) = schema_expr else {
+            return Err(std::io::Error::other("expected #Schema struct expression").into());
+        };
+        let optional = fields
+            .iter()
+            .find(|field| {
+                runtime
+                    .features
+                    .lookup(field.feature)
+                    .is_some_and(|feature| feature.label == "optional")
+            })
+            .ok_or_else(|| std::io::Error::other("missing optional field"))?;
+        assert!(optional.metadata.is_optional());
+        assert!(!optional.metadata.is_regular());
+        let required = fields
+            .iter()
+            .find(|field| {
+                runtime
+                    .features
+                    .lookup(field.feature)
+                    .is_some_and(|feature| feature.label == "required")
+            })
+            .ok_or_else(|| std::io::Error::other("missing required field"))?;
+        assert!(required.metadata.is_required());
+        assert!(!required.metadata.is_regular());
+        let hidden = fields
+            .iter()
+            .find(|field| {
+                runtime
+                    .features
+                    .lookup(field.feature)
+                    .is_some_and(|feature| feature.label == "_hidden")
+            })
+            .ok_or_else(|| std::io::Error::other("missing hidden field"))?;
+        assert!(hidden.metadata.is_hidden());
         Ok(())
     }
 }
