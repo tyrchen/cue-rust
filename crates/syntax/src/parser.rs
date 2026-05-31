@@ -420,7 +420,13 @@ impl<'tokens> Parser<'tokens> {
             ),
             Some(TokenKind::String) => self.bump().map_or_else(
                 || Expr::Bad(self.current_span()),
-                |token| Expr::String(token.text().to_owned(), token.span()),
+                |token| {
+                    if token.text().starts_with('\'') {
+                        Expr::Bytes(token.text().to_owned(), token.span())
+                    } else {
+                        Expr::String(token.text().to_owned(), token.span())
+                    }
+                },
             ),
             Some(TokenKind::LeftBrace) => self.parse_struct(),
             Some(TokenKind::LeftBracket) => self.parse_list(),
@@ -748,6 +754,14 @@ mod tests {
             ),
             tree,
         );
+    }
+
+    #[test]
+    fn test_should_parse_bytes_literal() {
+        let result = parse_bytes("test.cue", b"x: 'abc'\n", ParseConfig::default());
+        assert!(!result.diagnostics().has_errors());
+        let tree = result.ast().map(crate::AstFile::to_debug_tree);
+        assert_eq!(Some("file\n  field x\n    bytes 'abc'".to_owned()), tree);
     }
 
     #[test]

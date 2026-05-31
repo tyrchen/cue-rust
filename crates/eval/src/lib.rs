@@ -637,7 +637,8 @@ fn evaluate_binary(op: &str, left: EvaluatedValue, right: EvaluatedValue) -> Eva
         "==" => evaluate_equality(&left, &right, false),
         "!=" => evaluate_equality(&left, &right, true),
         "+" => evaluate_add(left, right),
-        "-" | "*" | "/" | "<" | "<=" | ">" | ">=" => evaluate_numeric_binary(op, left, right),
+        "*" => evaluate_multiply(left, right),
+        "-" | "/" | "<" | "<=" | ">" | ">=" => evaluate_numeric_binary(op, left, right),
         _ => EvaluatedValue::Bottom(Bottom::new(
             "cue.eval.unsupported_binary",
             format!("unsupported binary operator `{op}`"),
@@ -724,6 +725,10 @@ fn evaluate_add(left: EvaluatedValue, right: EvaluatedValue) -> EvaluatedValue {
         (EvaluatedValue::String(left), EvaluatedValue::String(right)) => {
             EvaluatedValue::String(format!("{left}{right}"))
         }
+        (EvaluatedValue::Bytes(mut left), EvaluatedValue::Bytes(right)) => {
+            left.extend(right);
+            EvaluatedValue::Bytes(left)
+        }
         (EvaluatedValue::Number(left), EvaluatedValue::Number(right)) => {
             match (parse_number(&left), parse_number(&right)) {
                 (Some(left), Some(right)) => EvaluatedValue::Number(format_number(left + right)),
@@ -742,6 +747,59 @@ fn evaluate_add(left: EvaluatedValue, right: EvaluatedValue) -> EvaluatedValue {
             false,
         )),
     }
+}
+
+fn evaluate_multiply(left: EvaluatedValue, right: EvaluatedValue) -> EvaluatedValue {
+    match (left, right) {
+        (EvaluatedValue::Number(left), EvaluatedValue::Number(right)) => {
+            match (parse_number(&left), parse_number(&right)) {
+                (Some(left), Some(right)) => EvaluatedValue::Number(format_number(left * right)),
+                _ => EvaluatedValue::Bottom(Bottom::new(
+                    "cue.eval.invalid_number",
+                    "invalid numeric operand",
+                    None,
+                    false,
+                )),
+            }
+        }
+        (EvaluatedValue::String(value), EvaluatedValue::Number(count))
+        | (EvaluatedValue::Number(count), EvaluatedValue::String(value)) => {
+            repeat_string(&value, &count)
+        }
+        (EvaluatedValue::Bytes(value), EvaluatedValue::Number(count))
+        | (EvaluatedValue::Number(count), EvaluatedValue::Bytes(value)) => {
+            repeat_bytes(&value, &count)
+        }
+        (left, right) => EvaluatedValue::Bottom(Bottom::new(
+            "cue.eval.unsupported_multiply",
+            format!("cannot multiply {} and {}", left.kind(), right.kind()),
+            None,
+            false,
+        )),
+    }
+}
+
+fn repeat_string(value: &str, count: &str) -> EvaluatedValue {
+    let Some(count) = parse_list_index(count) else {
+        return invalid_repeat_count();
+    };
+    EvaluatedValue::String(value.repeat(count))
+}
+
+fn repeat_bytes(value: &[u8], count: &str) -> EvaluatedValue {
+    let Some(count) = parse_list_index(count) else {
+        return invalid_repeat_count();
+    };
+    EvaluatedValue::Bytes(value.repeat(count))
+}
+
+fn invalid_repeat_count() -> EvaluatedValue {
+    EvaluatedValue::Bottom(Bottom::new(
+        "cue.eval.invalid_repeat_count",
+        "repeat count must be a non-negative integer",
+        None,
+        false,
+    ))
 }
 
 fn number_operand(value: EvaluatedValue) -> Result<f64, Bottom> {

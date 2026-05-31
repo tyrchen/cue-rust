@@ -226,6 +226,7 @@ impl<'runtime> Compiler<'runtime> {
             Expr::Identifier(name, span) => self.lower_identifier(name, *span),
             Expr::Number(value, _) => SemanticExpr::Base(BaseValue::Number(value.clone())),
             Expr::String(value, _) => SemanticExpr::Base(BaseValue::String(unquote_string(value))),
+            Expr::Bytes(value, _) => SemanticExpr::Base(BaseValue::Bytes(unquote_bytes(value))),
             Expr::Bool(value, _) => SemanticExpr::Base(BaseValue::Bool(*value)),
             Expr::Null(_) => SemanticExpr::Base(BaseValue::Null),
             Expr::Struct(declarations, _) => self.lower_struct_expr(declarations)?,
@@ -392,6 +393,14 @@ fn unquote_string(value: &str) -> String {
         .strip_prefix('"')
         .and_then(|value| value.strip_suffix('"'))
         .map_or_else(|| value.to_owned(), ToOwned::to_owned)
+}
+
+fn unquote_bytes(value: &str) -> Vec<u8> {
+    let unquoted = value
+        .strip_prefix('\'')
+        .and_then(|value| value.strip_suffix('\''))
+        .unwrap_or(value);
+    unquoted.as_bytes().to_vec()
 }
 
 fn is_builtin_kind(name: &str) -> bool {

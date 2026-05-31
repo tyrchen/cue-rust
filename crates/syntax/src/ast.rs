@@ -159,6 +159,8 @@ pub enum Expr {
     Number(String, Span),
     /// String literal expression.
     String(String, Span),
+    /// Bytes literal expression.
+    Bytes(String, Span),
     /// Boolean literal expression.
     Bool(bool, Span),
     /// Null literal expression.
@@ -241,6 +243,7 @@ impl Expr {
             Self::Identifier(_, span)
             | Self::Number(_, span)
             | Self::String(_, span)
+            | Self::Bytes(_, span)
             | Self::Bool(_, span)
             | Self::Null(span)
             | Self::Struct(_, span)
@@ -263,6 +266,7 @@ impl Expr {
             Self::Identifier(name, _) => lines.push(format!("{indent}ident {name}")),
             Self::Number(value, _) => lines.push(format!("{indent}number {value}")),
             Self::String(value, _) => lines.push(format!("{indent}string {value}")),
+            Self::Bytes(value, _) => lines.push(format!("{indent}bytes {value}")),
             Self::Bool(value, _) => lines.push(format!("{indent}bool {value}")),
             Self::Null(_) => lines.push(format!("{indent}null")),
             Self::Struct(declarations, _) => {

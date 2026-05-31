@@ -282,6 +282,41 @@ mod tests {
     }
 
     #[test]
+    fn test_should_evaluate_string_and_bytes_operators() -> Result<(), Box<dyn std::error::Error>> {
+        let context = Context::new();
+        let value = context.compile_source(
+            "test.cue",
+            "s0: \"foo\" + \"bar\"\ns1: 3 * \"abc\"\ns2: \"abc\" * 2\nb0: 'foo' + 'bar'\nb1: 3 * \
+             'abc'\nb2: 'abc' * 2\n",
+        )?;
+        assert_eq!(
+            EvaluatedValue::String("foobar".to_owned()),
+            value.lookup_path(&["s0"])?.evaluate()?,
+        );
+        assert_eq!(
+            EvaluatedValue::String("abcabcabc".to_owned()),
+            value.lookup_path(&["s1"])?.evaluate()?,
+        );
+        assert_eq!(
+            EvaluatedValue::String("abcabc".to_owned()),
+            value.lookup_path(&["s2"])?.evaluate()?,
+        );
+        assert_eq!(
+            EvaluatedValue::Bytes(b"foobar".to_vec()),
+            value.lookup_path(&["b0"])?.evaluate()?,
+        );
+        assert_eq!(
+            EvaluatedValue::Bytes(b"abcabcabc".to_vec()),
+            value.lookup_path(&["b1"])?.evaluate()?,
+        );
+        assert_eq!(
+            EvaluatedValue::Bytes(b"abcabc".to_vec()),
+            value.lookup_path(&["b2"])?.evaluate()?,
+        );
+        Ok(())
+    }
+
+    #[test]
     fn test_should_report_len_builtin_arity() -> Result<(), Box<dyn std::error::Error>> {
         let context = Context::new();
         let value = context.compile_source("test.cue", "x: len()\n")?;

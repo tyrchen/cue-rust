@@ -442,7 +442,7 @@ fn format_cue_value(value: &EvaluatedValue) -> String {
         EvaluatedValue::Bool(value) => value.to_string(),
         EvaluatedValue::Number(value) => value.clone(),
         EvaluatedValue::String(value) => format!("{value:?}"),
-        EvaluatedValue::Bytes(value) => format!("{value:?}"),
+        EvaluatedValue::Bytes(value) => format_cue_bytes(value),
         EvaluatedValue::Struct(fields) => format_cue_struct(fields),
         EvaluatedValue::List(values) => {
             let rendered = values
@@ -455,6 +455,35 @@ fn format_cue_value(value: &EvaluatedValue) -> String {
         EvaluatedValue::Kind(kind) => kind.to_string(),
         EvaluatedValue::Bottom(bottom) => format!("_|_({:?})", bottom.message),
         _ => "_|_(\"unsupported value\")".to_owned(),
+    }
+}
+
+fn format_cue_bytes(value: &[u8]) -> String {
+    let mut rendered = String::from("'");
+    for byte in value {
+        match *byte {
+            b'\'' => rendered.push_str("\\'"),
+            b'\\' => rendered.push_str("\\\\"),
+            b'\n' => rendered.push_str("\\n"),
+            b'\r' => rendered.push_str("\\r"),
+            b'\t' => rendered.push_str("\\t"),
+            b' '..=b'~' => rendered.push(char::from(*byte)),
+            byte => {
+                rendered.push_str("\\x");
+                rendered.push(hex_digit(byte >> 4));
+                rendered.push(hex_digit(byte & 0x0f));
+            }
+        }
+    }
+    rendered.push('\'');
+    rendered
+}
+
+fn hex_digit(value: u8) -> char {
+    match value {
+        0..=9 => char::from(b'0' + value),
+        10..=15 => char::from(b'a' + (value - 10)),
+        _ => '?',
     }
 }
 
@@ -472,6 +501,8 @@ fn format_cue_struct(fields: &indexmap::IndexMap<String, EvaluatedValue>) -> Str
 
 #[cfg(test)]
 mod tests {
+    use cue_rust_eval::{EvaluatedValue, Value};
+
     use super::{DecodeOptions, EncodeOptions, Encoding, decode_bytes, encode_value};
 
     #[test]
@@ -503,6 +534,22 @@ mod tests {
         let value = decode_bytes(Encoding::Toml, b"x = 1\n", DecodeOptions::default())?;
         let output = encode_value(&value, EncodeOptions::default())?;
         assert!(output.contains("\"x\": 1"));
+        Ok(())
+    }
+
+    #[test]
+    fn test_should_encode_bytes_as_cue_literal() -> Result<(), Box<dyn std::error::Error>> {
+        let value = Value::from_evaluated(EvaluatedValue::Bytes(b"a\n\xff".to_vec()));
+        assert_eq!(
+            "'a\\n\\xff'",
+            encode_value(
+                &value,
+                EncodeOptions {
+                    encoding: Encoding::Cue,
+                    concrete: true,
+                },
+            )?,
+        );
         Ok(())
     }
 

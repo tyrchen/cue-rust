@@ -162,6 +162,15 @@ async fn test_should_run_supported_upstream_cli_script_fixtures() -> TestResult 
 async fn test_should_run_supported_upstream_core_eval_fixtures() -> TestResult {
     let root = workspace_root();
     let context = Context::new();
+    assert_upstream_object_unification(&context, &root).await?;
+    assert_upstream_list_index_and_slice(&context, &root).await?;
+    assert_upstream_arithmetic(&context, &root).await?;
+    assert_upstream_len(&context, &root).await?;
+    assert_upstream_strings_and_bytes(&context, &root).await?;
+    Ok(())
+}
+
+async fn assert_upstream_object_unification(context: &Context, root: &Path) -> TestResult {
     let object_unify =
         TxtarArchive::read(&root.join("vendors/cue/cue/testdata/basicrewrite/013_obj_unify.txtar"))
             .await?;
@@ -188,7 +197,10 @@ async fn test_should_run_supported_upstream_core_eval_fixtures() -> TestResult {
             .validate(ValidateOptions::default())
             .is_err()
     );
+    Ok(())
+}
 
+async fn assert_upstream_list_index_and_slice(context: &Context, root: &Path) -> TestResult {
     let lists =
         TxtarArchive::read(&root.join("vendors/cue/cue/testdata/basicrewrite/010_lists.txtar"))
             .await?;
@@ -223,7 +235,10 @@ async fn test_should_run_supported_upstream_core_eval_fixtures() -> TestResult {
         ]),
         slice_value.lookup_path(&["openStart"])?.evaluate()?,
     );
+    Ok(())
+}
 
+async fn assert_upstream_arithmetic(context: &Context, root: &Path) -> TestResult {
     let arithmetic = TxtarArchive::read(
         &root.join("vendors/cue/cue/testdata/basicrewrite/002_arithmetic.txtar"),
     )
@@ -239,7 +254,10 @@ async fn test_should_run_supported_upstream_core_eval_fixtures() -> TestResult {
         EvaluatedValue::Number("4".to_owned()),
         arithmetic_value.lookup_path(&["div1"])?.evaluate()?,
     );
+    Ok(())
+}
 
+async fn assert_upstream_len(context: &Context, root: &Path) -> TestResult {
     let len_fixture = TxtarArchive::read(
         &root.join("vendors/cue/cue/testdata/fulleval/027_len_of_incomplete_types.txtar"),
     )
@@ -258,6 +276,31 @@ async fn test_should_run_supported_upstream_core_eval_fixtures() -> TestResult {
     assert_eq!(
         EvaluatedValue::Number("1".to_owned()),
         len_value.lookup_path(&["v4"])?.evaluate()?,
+    );
+    Ok(())
+}
+
+async fn assert_upstream_strings_and_bytes(context: &Context, root: &Path) -> TestResult {
+    let strings_bytes = TxtarArchive::read(
+        &root.join("vendors/cue/cue/testdata/basicrewrite/007_strings_and_bytes.txtar"),
+    )
+    .await?;
+    let strings_bytes_source = first_lines(strings_bytes.file("in.cue")?, 7);
+    let strings_bytes_value = context.compile_source(
+        "basicrewrite/007_strings_and_bytes/in.cue",
+        strings_bytes_source,
+    )?;
+    assert_eq!(
+        EvaluatedValue::String("abcabcabc".to_owned()),
+        strings_bytes_value.lookup_path(&["s1"])?.evaluate()?,
+    );
+    assert_eq!(
+        EvaluatedValue::Bytes(b"foobar".to_vec()),
+        strings_bytes_value.lookup_path(&["b0"])?.evaluate()?,
+    );
+    assert_eq!(
+        EvaluatedValue::Bytes(b"abcabc".to_vec()),
+        strings_bytes_value.lookup_path(&["b2"])?.evaluate()?,
     );
     Ok(())
 }
