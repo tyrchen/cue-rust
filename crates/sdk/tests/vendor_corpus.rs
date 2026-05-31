@@ -198,6 +198,31 @@ async fn test_should_run_supported_upstream_core_eval_fixtures() -> TestResult {
         EvaluatedValue::Number("2".to_owned()),
         list_value.lookup_path(&["index"])?.evaluate()?,
     );
+    let slice_value = context.compile_source(
+        "basicrewrite/010_lists/slice.cue",
+        "slice: [1, 2, 3][1:3]\nopenEnd: [1, 2, 3][1:]\nopenStart: [1, 2, 3][:2]\n",
+    )?;
+    assert_eq!(
+        EvaluatedValue::List(vec![
+            EvaluatedValue::Number("2".to_owned()),
+            EvaluatedValue::Number("3".to_owned()),
+        ]),
+        slice_value.lookup_path(&["slice"])?.evaluate()?,
+    );
+    assert_eq!(
+        EvaluatedValue::List(vec![
+            EvaluatedValue::Number("2".to_owned()),
+            EvaluatedValue::Number("3".to_owned()),
+        ]),
+        slice_value.lookup_path(&["openEnd"])?.evaluate()?,
+    );
+    assert_eq!(
+        EvaluatedValue::List(vec![
+            EvaluatedValue::Number("1".to_owned()),
+            EvaluatedValue::Number("2".to_owned()),
+        ]),
+        slice_value.lookup_path(&["openStart"])?.evaluate()?,
+    );
     Ok(())
 }
 

@@ -200,6 +200,27 @@ mod tests {
     }
 
     #[test]
+    fn test_should_evaluate_list_slice_expression() -> Result<(), Box<dyn std::error::Error>> {
+        let context = Context::new();
+        let value = context.compile_source("test.cue", "x: [1, 2, 3][1:]\ny: [1, 2, 3][:2]\n")?;
+        assert_eq!(
+            EvaluatedValue::List(vec![
+                EvaluatedValue::Number("2".to_owned()),
+                EvaluatedValue::Number("3".to_owned()),
+            ]),
+            value.lookup_path(&["x"])?.evaluate()?,
+        );
+        assert_eq!(
+            EvaluatedValue::List(vec![
+                EvaluatedValue::Number("1".to_owned()),
+                EvaluatedValue::Number("2".to_owned()),
+            ]),
+            value.lookup_path(&["y"])?.evaluate()?,
+        );
+        Ok(())
+    }
+
+    #[test]
     fn test_should_report_import_as_compile_diagnostic() {
         let context = Context::new();
         let result = context.compile_source("test.cue", "import \"strings\"\nx: 1\n");

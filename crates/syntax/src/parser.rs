@@ -270,21 +270,7 @@ impl<'tokens> Parser<'tokens> {
             }
 
             if self.at(TokenKind::LeftBracket) {
-                let _left_bracket = self.bump();
-                let index = self.parse_expr(0);
-                let end = self
-                    .expect_kind(
-                        TokenKind::RightBracket,
-                        "cue.parse.expected_index_close",
-                        "expected ']' after index expression",
-                    )
-                    .unwrap_or_else(|| index.span());
-                let span = merge_span(left.span(), end);
-                left = Expr::Index {
-                    base: Box::new(left),
-                    index: Box::new(index),
-                    span,
-                };
+                left = self.parse_index_or_slice(left);
                 continue;
             }
 
@@ -311,6 +297,67 @@ impl<'tokens> Parser<'tokens> {
         }
 
         left
+    }
+
+    fn parse_index_or_slice(&mut self, base: Expr) -> Expr {
+        let left_bracket = self.bump().map_or_else(|| base.span(), Token::span);
+        if self.at(TokenKind::Colon) {
+            self.bump();
+            let end = if self.at(TokenKind::RightBracket) {
+                None
+            } else {
+                Some(Box::new(self.parse_expr(0)))
+            };
+            return self.finish_slice(base, None, end, left_bracket);
+        }
+
+        let index = self.parse_expr(0);
+        if self.at(TokenKind::Colon) {
+            self.bump();
+            let end = if self.at(TokenKind::RightBracket) {
+                None
+            } else {
+                Some(Box::new(self.parse_expr(0)))
+            };
+            return self.finish_slice(base, Some(Box::new(index)), end, left_bracket);
+        }
+
+        let end = self
+            .expect_kind(
+                TokenKind::RightBracket,
+                "cue.parse.expected_index_close",
+                "expected ']' after index expression",
+            )
+            .unwrap_or_else(|| index.span());
+        let span = merge_span(base.span(), end);
+        Expr::Index {
+            base: Box::new(base),
+            index: Box::new(index),
+            span,
+        }
+    }
+
+    fn finish_slice(
+        &mut self,
+        base: Expr,
+        start: Option<Box<Expr>>,
+        end: Option<Box<Expr>>,
+        fallback_end: Span,
+    ) -> Expr {
+        let right_bracket = self
+            .expect_kind(
+                TokenKind::RightBracket,
+                "cue.parse.expected_slice_close",
+                "expected ']' after slice expression",
+            )
+            .unwrap_or(fallback_end);
+        let span = merge_span(base.span(), right_bracket);
+        Expr::Slice {
+            base: Box::new(base),
+            start,
+            end,
+            span,
+        }
     }
 
     fn parse_prefix(&mut self) -> Expr {
@@ -642,6 +689,20 @@ mod tests {
             })
             .unwrap_or(false);
         assert!(is_struct);
+    }
+
+    #[test]
+    fn test_should_parse_slice_expression() {
+        let result = parse_bytes("test.cue", b"x: [1, 2, 3][1:]\n", ParseConfig::default());
+        assert!(!result.diagnostics().has_errors());
+        let tree = result.ast().map(crate::AstFile::to_debug_tree);
+        assert_eq!(
+            Some(
+                "file\n  field x\n    slice\n      list\n        number 1\n        number 2\n        number 3\n      number 1"
+                    .to_owned(),
+            ),
+            tree,
+        );
     }
 
     #[test]

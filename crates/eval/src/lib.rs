@@ -403,6 +403,16 @@ impl<'runtime> Evaluator<'runtime> {
                 let index_value = self.evaluate_expr_at(*index, environment, depth + 1)?;
                 evaluate_index(base_value, index_value)
             }
+            SemanticExpr::Slice { base, start, end } => {
+                let base_value = self.evaluate_expr_at(*base, environment, depth + 1)?;
+                let start_value = start
+                    .map(|start| self.evaluate_expr_at(start, environment, depth + 1))
+                    .transpose()?;
+                let end_value = end
+                    .map(|end| self.evaluate_expr_at(end, environment, depth + 1))
+                    .transpose()?;
+                evaluate_slice(base_value, start_value, end_value)
+            }
             SemanticExpr::Unary { op, expr } => {
                 let value = self.evaluate_expr_at(*expr, environment, depth + 1)?;
                 evaluate_unary(op, value)
@@ -613,6 +623,56 @@ fn evaluate_index(base: EvaluatedValue, index: EvaluatedValue) -> EvaluatedValue
             false,
         ))
     })
+}
+
+fn evaluate_slice(
+    base: EvaluatedValue,
+    start: Option<EvaluatedValue>,
+    end: Option<EvaluatedValue>,
+) -> EvaluatedValue {
+    let EvaluatedValue::List(items) = base else {
+        return EvaluatedValue::Bottom(Bottom::new(
+            "cue.eval.invalid_slice_base",
+            "cannot slice non-list value",
+            None,
+            false,
+        ));
+    };
+    let Some(start) = optional_slice_bound(start, 0) else {
+        return invalid_slice_bound("start");
+    };
+    let Some(end) = optional_slice_bound(end, items.len()) else {
+        return invalid_slice_bound("end");
+    };
+    if start > end || end > items.len() {
+        return EvaluatedValue::Bottom(Bottom::new(
+            "cue.eval.invalid_slice",
+            format!(
+                "slice bounds [{start}:{end}] are invalid for list length {}",
+                items.len()
+            ),
+            None,
+            false,
+        ));
+    }
+    EvaluatedValue::List(items.into_iter().skip(start).take(end - start).collect())
+}
+
+fn optional_slice_bound(bound: Option<EvaluatedValue>, default: usize) -> Option<usize> {
+    match bound {
+        Some(EvaluatedValue::Number(value)) => parse_list_index(&value),
+        Some(_) => None,
+        None => Some(default),
+    }
+}
+
+fn invalid_slice_bound(name: &str) -> EvaluatedValue {
+    EvaluatedValue::Bottom(Bottom::new(
+        "cue.eval.invalid_slice_bound",
+        format!("slice {name} bound must be a non-negative integer"),
+        None,
+        false,
+    ))
 }
 
 fn parse_list_index(index: &str) -> Option<usize> {

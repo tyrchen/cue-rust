@@ -256,6 +256,15 @@ pub enum SemanticExpr {
         /// Index expression.
         index: ExprId,
     },
+    /// Slice expression.
+    Slice {
+        /// Sliced base expression.
+        base: ExprId,
+        /// Optional inclusive start bound.
+        start: Option<ExprId>,
+        /// Optional exclusive end bound.
+        end: Option<ExprId>,
+    },
     /// Unary expression.
     Unary {
         /// Operator text.

@@ -228,36 +228,7 @@ impl<'runtime> Compiler<'runtime> {
             Expr::String(value, _) => SemanticExpr::Base(BaseValue::String(unquote_string(value))),
             Expr::Bool(value, _) => SemanticExpr::Base(BaseValue::Bool(*value)),
             Expr::Null(_) => SemanticExpr::Base(BaseValue::Null),
-            Expr::Struct(declarations, _) => {
-                let mut fields = Vec::new();
-                let mut scope = Scope::default();
-                for declaration in declarations {
-                    match declaration {
-                        Decl::Field(field) => {
-                            scope.fields.insert(field.label.display_name().to_owned());
-                        }
-                        Decl::Let(let_decl) => {
-                            let expression = self.lower_expr(&let_decl.value)?;
-                            scope.lets.insert(let_decl.name.clone(), expression);
-                        }
-                        _ => {}
-                    }
-                }
-                self.scopes.push(scope);
-                for declaration in declarations {
-                    if let Decl::Field(field) = declaration {
-                        let expression = self.lower_expr(&field.value)?;
-                        let feature = self.feature_for_label(&field.label);
-                        fields.push(FieldExpr {
-                            feature,
-                            expression,
-                            span: Some(field.span),
-                        });
-                    }
-                }
-                self.scopes.pop();
-                SemanticExpr::Struct(fields)
-            }
+            Expr::Struct(declarations, _) => self.lower_struct_expr(declarations)?,
             Expr::List(items, _) => {
                 let mut lowered_items = Vec::with_capacity(items.len());
                 for item in items {
@@ -274,6 +245,17 @@ impl<'runtime> Compiler<'runtime> {
                 let base = self.lower_expr(base)?;
                 let index = self.lower_expr(index)?;
                 SemanticExpr::Index { base, index }
+            }
+            Expr::Slice {
+                base, start, end, ..
+            } => {
+                let base = self.lower_expr(base)?;
+                let start = start
+                    .as_ref()
+                    .map(|start| self.lower_expr(start))
+                    .transpose()?;
+                let end = end.as_ref().map(|end| self.lower_expr(end)).transpose()?;
+                SemanticExpr::Slice { base, start, end }
             }
             Expr::Unary { op, expr, .. } => {
                 let expr = self.lower_expr(expr)?;
@@ -312,6 +294,38 @@ impl<'runtime> Compiler<'runtime> {
             )),
         };
         Ok(self.runtime.add_expression(lowered)?)
+    }
+
+    fn lower_struct_expr(&mut self, declarations: &[Decl]) -> Result<SemanticExpr, CompileError> {
+        let mut scope = Scope::default();
+        for declaration in declarations {
+            match declaration {
+                Decl::Field(field) => {
+                    scope.fields.insert(field.label.display_name().to_owned());
+                }
+                Decl::Let(let_decl) => {
+                    let expression = self.lower_expr(&let_decl.value)?;
+                    scope.lets.insert(let_decl.name.clone(), expression);
+                }
+                _ => {}
+            }
+        }
+
+        let mut fields = Vec::new();
+        self.scopes.push(scope);
+        for declaration in declarations {
+            if let Decl::Field(field) = declaration {
+                let expression = self.lower_expr(&field.value)?;
+                let feature = self.feature_for_label(&field.label);
+                fields.push(FieldExpr {
+                    feature,
+                    expression,
+                    span: Some(field.span),
+                });
+            }
+        }
+        self.scopes.pop();
+        Ok(SemanticExpr::Struct(fields))
     }
 
     fn lower_identifier(&mut self, name: &str, span: Span) -> SemanticExpr {

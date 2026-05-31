@@ -185,6 +185,17 @@ pub enum Expr {
         /// Source span.
         span: Span,
     },
+    /// Slice expression.
+    Slice {
+        /// Sliced base expression.
+        base: Box<Expr>,
+        /// Optional inclusive start bound.
+        start: Option<Box<Expr>>,
+        /// Optional exclusive end bound.
+        end: Option<Box<Expr>>,
+        /// Source span.
+        span: Span,
+    },
     /// Unary expression.
     Unary {
         /// Operator text.
@@ -230,6 +241,7 @@ impl Expr {
             | Self::Bad(span)
             | Self::Selector { span, .. }
             | Self::Index { span, .. }
+            | Self::Slice { span, .. }
             | Self::Unary { span, .. }
             | Self::Binary { span, .. } => *span,
         }
@@ -263,6 +275,18 @@ impl Expr {
                 lines.push(format!("{indent}index"));
                 base.push_debug(lines, depth + 1);
                 index.push_debug(lines, depth + 1);
+            }
+            Self::Slice {
+                base, start, end, ..
+            } => {
+                lines.push(format!("{indent}slice"));
+                base.push_debug(lines, depth + 1);
+                if let Some(start) = start {
+                    start.push_debug(lines, depth + 1);
+                }
+                if let Some(end) = end {
+                    end.push_debug(lines, depth + 1);
+                }
             }
             Self::Unary { op, expr, .. } => {
                 lines.push(format!("{indent}unary {op}"));
