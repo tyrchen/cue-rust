@@ -189,7 +189,14 @@ pub enum Expr {
     /// Struct literal expression.
     Struct(Vec<Decl>, Span),
     /// List literal expression.
-    List(Vec<Expr>, Span),
+    List {
+        /// Fixed prefix items.
+        items: Vec<Expr>,
+        /// Optional open-list tail constraint.
+        tail: Option<Box<Expr>>,
+        /// Source span.
+        span: Span,
+    },
     /// Selector expression.
     Selector {
         /// Selected base expression.
@@ -268,10 +275,10 @@ impl Expr {
             | Self::Bool(_, span)
             | Self::Null(span)
             | Self::Struct(_, span)
-            | Self::List(_, span)
             | Self::Default(_, span)
             | Self::Ellipsis(span)
             | Self::Bad(span)
+            | Self::List { span, .. }
             | Self::Selector { span, .. }
             | Self::Index { span, .. }
             | Self::Slice { span, .. }
@@ -296,10 +303,14 @@ impl Expr {
                     declaration.push_debug(lines, depth + 1);
                 }
             }
-            Self::List(items, _) => {
+            Self::List { items, tail, .. } => {
                 lines.push(format!("{indent}list"));
                 for item in items {
                     item.push_debug(lines, depth + 1);
+                }
+                if let Some(tail) = tail {
+                    lines.push(format!("{indent}  ellipsis"));
+                    tail.push_debug(lines, depth + 2);
                 }
             }
             Self::Selector { base, field, .. } => {

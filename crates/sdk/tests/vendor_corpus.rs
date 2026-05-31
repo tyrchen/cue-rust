@@ -8,8 +8,8 @@ use std::{
 };
 
 use cue_rust::{
-    Context, DecodeOptions, EncodeOptions, Encoding, EvaluatedValue, ValidateOptions, ValueKind,
-    decode_bytes, encode_value,
+    Context, DecodeOptions, EncodeOptions, Encoding, EvalError, EvaluatedValue, ValidateOptions,
+    ValueKind, decode_bytes, encode_value,
 };
 use tokio::fs;
 
@@ -482,7 +482,9 @@ async fn assert_upstream_list_index_and_slice(context: &Context, root: &Path) ->
     let lists =
         TxtarArchive::read(&root.join("vendors/cue/cue/testdata/basicrewrite/010_lists.txtar"))
             .await?;
-    let list_source = first_lines(lists.file("in.cue")?, 2);
+    let upstream_source = lists.file("in.cue")?;
+    assert!(upstream_source.contains("...>=4 & <=5"));
+    let list_source = first_lines(upstream_source, 2);
     let list_value = context.compile_source("basicrewrite/010_lists/in.cue", list_source)?;
     assert_eq!(
         EvaluatedValue::Number("2".to_owned()),
@@ -512,6 +514,53 @@ async fn assert_upstream_list_index_and_slice(context: &Context, root: &Path) ->
             EvaluatedValue::Number("2".to_owned()),
         ]),
         slice_value.lookup_path(&["openStart"])?.evaluate()?,
+    );
+
+    let open_value = context.compile_source(
+        "basicrewrite/010_lists/open.cue",
+        "ok: [1, 2, ...>=4 & <=5] & [1, 2, 4, 5]\ne4: [1, 2, ...>=4 & <=5] & [1, 2, 4, 8]\ne5: \
+         [1, 2, 4, 8] & [1, 2, ...>=4 & <=5]\n",
+    )?;
+    assert_eq!(
+        EvaluatedValue::List(vec![
+            EvaluatedValue::Number("1".to_owned()),
+            EvaluatedValue::Number("2".to_owned()),
+            EvaluatedValue::Number("4".to_owned()),
+            EvaluatedValue::Number("5".to_owned()),
+        ]),
+        open_value.lookup_path(&["ok"])?.evaluate()?,
+    );
+    assert_validation_diagnostic_contains(
+        &open_value,
+        "e4",
+        "invalid value 8 for numeric constraint >=4 & <=5",
+    )?;
+    assert_validation_diagnostic_contains(
+        &open_value,
+        "e5",
+        "invalid value 8 for numeric constraint >=4 & <=5",
+    )?;
+    Ok(())
+}
+
+fn assert_validation_diagnostic_contains(
+    value: &cue_rust::Value,
+    path: &str,
+    expected: &str,
+) -> TestResult {
+    let result = value
+        .lookup_path(&[path])?
+        .validate(ValidateOptions::default());
+    let Err(EvalError::Diagnostics(report)) = result else {
+        return Err(format!("expected validation diagnostics for `{path}`").into());
+    };
+    assert!(
+        report
+            .diagnostics()
+            .iter()
+            .any(|diagnostic| diagnostic.message().contains(expected)),
+        "expected `{path}` diagnostic to contain `{expected}`, got {:?}",
+        report.diagnostics(),
     );
     Ok(())
 }

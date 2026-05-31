@@ -223,8 +223,13 @@ pub enum SemanticExpr {
     Base(BaseValue),
     /// Struct expression represented by field expressions.
     Struct(Vec<FieldExpr>),
-    /// List expression represented by item expression ids.
-    List(Vec<ExprId>),
+    /// List expression represented by fixed prefix items and an optional open tail.
+    List {
+        /// Fixed prefix item expressions.
+        items: Vec<ExprId>,
+        /// Optional open-list tail constraint.
+        tail: Option<ExprId>,
+    },
     /// Field reference with lexical up-count.
     FieldReference {
         /// Referenced feature.

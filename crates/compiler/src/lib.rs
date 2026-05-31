@@ -249,12 +249,19 @@ impl<'runtime> Compiler<'runtime> {
             Expr::Bool(value, _) => SemanticExpr::Base(BaseValue::Bool(*value)),
             Expr::Null(_) => SemanticExpr::Base(BaseValue::Null),
             Expr::Struct(declarations, _) => self.lower_struct_expr(declarations)?,
-            Expr::List(items, _) => {
+            Expr::List { items, tail, .. } => {
                 let mut lowered_items = Vec::with_capacity(items.len());
                 for item in items {
                     lowered_items.push(self.lower_expr(item)?);
                 }
-                SemanticExpr::List(lowered_items)
+                let lowered_tail = tail
+                    .as_ref()
+                    .map(|tail| self.lower_list_tail(tail))
+                    .transpose()?;
+                SemanticExpr::List {
+                    items: lowered_items,
+                    tail: lowered_tail,
+                }
             }
             Expr::Selector { base, field, .. } => {
                 if let Some(path) = self.import_path_for_selector_base(base) {
@@ -330,6 +337,15 @@ impl<'runtime> Compiler<'runtime> {
             )),
         };
         Ok(self.runtime.add_expression(lowered)?)
+    }
+
+    fn lower_list_tail(&mut self, tail: &Expr) -> Result<ExprId, CompileError> {
+        match tail {
+            Expr::Ellipsis(_) => Ok(self
+                .runtime
+                .add_expression(SemanticExpr::Base(BaseValue::Top))?),
+            _ => self.lower_expr(tail),
+        }
     }
 
     fn lower_struct_expr(&mut self, declarations: &[Decl]) -> Result<SemanticExpr, CompileError> {

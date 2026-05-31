@@ -168,6 +168,26 @@ fn push_semantic_cases(
             .validate(ValidateOptions::default())
             .is_ok(),
     ));
+
+    let open_list = context.compile_source(
+        "open-list.cue",
+        "ok: [1, 2, ...>=4 & <=5] & [1, 2, 4, 5]\nbad: [1, 2, ...>=4 & <=5] & [1, 2, 4, 8]\n",
+    )?;
+    cases.push(supported_case(
+        "eval/open-list-ellipsis",
+        "semantic",
+        open_list.lookup_path(&["ok"])?.evaluate()?
+            == cue_rust::EvaluatedValue::List(vec![
+                cue_rust::EvaluatedValue::Number("1".to_owned()),
+                cue_rust::EvaluatedValue::Number("2".to_owned()),
+                cue_rust::EvaluatedValue::Number("4".to_owned()),
+                cue_rust::EvaluatedValue::Number("5".to_owned()),
+            ])
+            && open_list
+                .lookup_path(&["bad"])?
+                .validate(ValidateOptions::default())
+                .is_err(),
+    ));
     Ok(())
 }
 
@@ -282,11 +302,6 @@ fn push_known_gap_cases(context: &Context, cases: &mut Vec<CompatibilityCase>) {
         "compile/aliases",
         "compiler-gap",
         "alias declarations and alias labels are not lowered into lexical references yet",
-    ));
-    cases.push(expected_gap_case(
-        "eval/open-list-ellipsis",
-        "semantic-gap",
-        "ellipsis list tails are parsed as expressions instead of open-list constraints",
     ));
     cases.push(expected_gap_case(
         "eval/cycle-scheduler",

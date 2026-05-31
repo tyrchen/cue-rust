@@ -131,6 +131,13 @@ pub enum EvaluatedValue {
     OptionalField(Box<EvaluatedValue>),
     /// List items.
     List(Vec<EvaluatedValue>),
+    /// Open list with fixed prefix items and a tail constraint for remaining elements.
+    OpenList {
+        /// Fixed prefix items.
+        items: Vec<EvaluatedValue>,
+        /// Tail constraint for all remaining elements.
+        tail: Box<EvaluatedValue>,
+    },
     /// Builtin kind constraint.
     Kind(ValueKind),
     /// Numeric comparison constraint.
@@ -162,7 +169,7 @@ impl EvaluatedValue {
             Self::String(_) | Self::RegexConstraint { .. } => ValueKind::String,
             Self::Bytes(_) => ValueKind::Bytes,
             Self::Struct(_) | Self::ClosedStruct(_) => ValueKind::Struct,
-            Self::List(_) => ValueKind::List,
+            Self::List(_) | Self::OpenList { .. } => ValueKind::List,
             Self::Kind(kind) => *kind,
             Self::OptionalField(value) | Self::Default(value) => value.kind(),
             Self::Disjunction(disjuncts) => disjunction_kind(disjuncts),
@@ -502,12 +509,19 @@ impl<'runtime> Evaluator<'runtime> {
             SemanticExpr::Struct(fields) => {
                 self.evaluate_struct_fields(fields, environment, depth + 1)?
             }
-            SemanticExpr::List(items) => {
+            SemanticExpr::List { items, tail } => {
                 let mut values = Vec::with_capacity(items.len());
                 for item in items {
                     values.push(self.evaluate_expr_at(*item, environment, depth + 1)?);
                 }
-                EvaluatedValue::List(values)
+                if let Some(tail) = tail {
+                    EvaluatedValue::OpenList {
+                        items: values,
+                        tail: Box::new(self.evaluate_expr_at(*tail, environment, depth + 1)?),
+                    }
+                } else {
+                    EvaluatedValue::List(values)
+                }
             }
             SemanticExpr::FieldReference { feature, up_count } => {
                 self.evaluate_field_reference(environment, *feature, *up_count, depth + 1)?
@@ -1517,6 +1531,22 @@ fn values_equal(left: &EvaluatedValue, right: &EvaluatedValue) -> Result<bool, B
             EvaluatedValue::Struct(right) | EvaluatedValue::ClosedStruct(right),
         ) => structs_equal(left, right),
         (EvaluatedValue::List(left), EvaluatedValue::List(right)) => lists_equal(left, right),
+        (
+            EvaluatedValue::OpenList {
+                items: left_items,
+                tail: left_tail,
+            },
+            EvaluatedValue::OpenList {
+                items: right_items,
+                tail: right_tail,
+            },
+        ) => lists_equal(left_items, right_items).and_then(|equal| {
+            if equal {
+                values_equal(left_tail, right_tail)
+            } else {
+                Ok(false)
+            }
+        }),
         (EvaluatedValue::Top, EvaluatedValue::Top)
         | (EvaluatedValue::Null, EvaluatedValue::Null) => Ok(true),
         (EvaluatedValue::Bool(left), EvaluatedValue::Bool(right)) => Ok(left == right),
@@ -1716,6 +1746,10 @@ fn resolve_default_value(value: EvaluatedValue) -> EvaluatedValue {
         EvaluatedValue::List(items) => {
             EvaluatedValue::List(items.into_iter().map(resolve_default_value).collect())
         }
+        EvaluatedValue::OpenList { items, tail } => EvaluatedValue::OpenList {
+            items: items.into_iter().map(resolve_default_value).collect(),
+            tail: Box::new(resolve_default_value(*tail)),
+        },
         EvaluatedValue::Disjunction(disjuncts) => {
             let defaults = disjuncts
                 .iter()
@@ -2062,6 +2096,7 @@ fn number_satisfies_bounds(value: &str, bounds: &[NumericBound]) -> Result<bool,
 fn evaluate_index(base: EvaluatedValue, index: EvaluatedValue) -> EvaluatedValue {
     match base {
         EvaluatedValue::List(items) => evaluate_list_index(&items, index),
+        EvaluatedValue::OpenList { items, tail } => evaluate_open_list_index(&items, &tail, index),
         EvaluatedValue::Struct(fields) | EvaluatedValue::ClosedStruct(fields) => {
             evaluate_struct_index(&fields, index)
         }
@@ -2101,6 +2136,30 @@ fn evaluate_list_index(items: &[EvaluatedValue], index: EvaluatedValue) -> Evalu
     })
 }
 
+fn evaluate_open_list_index(
+    items: &[EvaluatedValue],
+    tail: &EvaluatedValue,
+    index: EvaluatedValue,
+) -> EvaluatedValue {
+    let EvaluatedValue::Number(index_text) = index else {
+        return EvaluatedValue::Bottom(Bottom::new(
+            "cue.eval.invalid_index",
+            "list index must be a non-negative integer",
+            None,
+            false,
+        ));
+    };
+    let Some(index) = parse_list_index(&index_text) else {
+        return EvaluatedValue::Bottom(Bottom::new(
+            "cue.eval.invalid_index",
+            format!("invalid list index `{index_text}`"),
+            None,
+            false,
+        ));
+    };
+    items.get(index).cloned().unwrap_or_else(|| tail.clone())
+}
+
 fn evaluate_struct_index(
     fields: &IndexMap<String, EvaluatedValue>,
     index: EvaluatedValue,
@@ -2128,13 +2187,24 @@ fn evaluate_slice(
     start: Option<EvaluatedValue>,
     end: Option<EvaluatedValue>,
 ) -> EvaluatedValue {
-    let EvaluatedValue::List(items) = base else {
-        return EvaluatedValue::Bottom(Bottom::new(
-            "cue.eval.invalid_slice_base",
-            "cannot slice non-list value",
-            None,
-            false,
-        ));
+    let items = match base {
+        EvaluatedValue::List(items) => items,
+        EvaluatedValue::OpenList { .. } => {
+            return EvaluatedValue::Bottom(Bottom::new(
+                "cue.eval.unsupported_open_list_slice",
+                "cannot slice open list values",
+                None,
+                false,
+            ));
+        }
+        _ => {
+            return EvaluatedValue::Bottom(Bottom::new(
+                "cue.eval.invalid_slice_base",
+                "cannot slice non-list value",
+                None,
+                false,
+            ));
+        }
     };
     let Some(start) = optional_slice_bound(start, 0) else {
         return invalid_slice_bound("start");
@@ -2261,16 +2331,93 @@ fn unify_values(left: EvaluatedValue, right: EvaluatedValue, span: Option<Span>)
         (EvaluatedValue::Struct(left), EvaluatedValue::Struct(right)) => {
             EvaluatedValue::Struct(unify_structs(left, right, span))
         }
-        (EvaluatedValue::List(left), EvaluatedValue::List(right)) if left.len() == right.len() => {
-            EvaluatedValue::List(
-                left.into_iter()
-                    .zip(right)
-                    .map(|(left, right)| unify_values(left, right, span))
-                    .collect(),
-            )
+        (EvaluatedValue::List(left), EvaluatedValue::List(right)) => {
+            unify_closed_lists(left, right, span)
         }
+        (EvaluatedValue::OpenList { items, tail }, EvaluatedValue::List(closed))
+        | (EvaluatedValue::List(closed), EvaluatedValue::OpenList { items, tail }) => {
+            unify_open_with_closed_list(&items, &tail, closed, span)
+        }
+        (
+            EvaluatedValue::OpenList {
+                items: left_items,
+                tail: left_tail,
+            },
+            EvaluatedValue::OpenList {
+                items: right_items,
+                tail: right_tail,
+            },
+        ) => unify_open_lists(&left_items, &left_tail, &right_items, &right_tail, span),
         (left, right) => conflict_bottom(left.kind(), right.kind(), span, "cue.eval.conflict"),
     }
+}
+
+fn unify_closed_lists(
+    left: Vec<EvaluatedValue>,
+    right: Vec<EvaluatedValue>,
+    span: Option<Span>,
+) -> EvaluatedValue {
+    if left.len() != right.len() {
+        return list_length_conflict(span);
+    }
+    EvaluatedValue::List(
+        left.into_iter()
+            .zip(right)
+            .map(|(left, right)| unify_values(left, right, span))
+            .collect(),
+    )
+}
+
+fn unify_open_with_closed_list(
+    items: &[EvaluatedValue],
+    tail: &EvaluatedValue,
+    closed: Vec<EvaluatedValue>,
+    span: Option<Span>,
+) -> EvaluatedValue {
+    if closed.len() < items.len() {
+        return list_length_conflict(span);
+    }
+    let mut unified = Vec::with_capacity(closed.len());
+    for (index, value) in closed.into_iter().enumerate() {
+        let constraint = items.get(index).cloned().unwrap_or_else(|| tail.clone());
+        unified.push(unify_values(constraint, value, span));
+    }
+    EvaluatedValue::List(unified)
+}
+
+fn unify_open_lists(
+    left_items: &[EvaluatedValue],
+    left_tail: &EvaluatedValue,
+    right_items: &[EvaluatedValue],
+    right_tail: &EvaluatedValue,
+    span: Option<Span>,
+) -> EvaluatedValue {
+    let prefix_len = left_items.len().max(right_items.len());
+    let mut items = Vec::with_capacity(prefix_len);
+    for index in 0..prefix_len {
+        let left = left_items
+            .get(index)
+            .cloned()
+            .unwrap_or_else(|| left_tail.clone());
+        let right = right_items
+            .get(index)
+            .cloned()
+            .unwrap_or_else(|| right_tail.clone());
+        items.push(unify_values(left, right, span));
+    }
+    EvaluatedValue::OpenList {
+        items,
+        tail: Box::new(unify_values(left_tail.clone(), right_tail.clone(), span)),
+    }
+}
+
+fn list_length_conflict(span: Option<Span>) -> EvaluatedValue {
+    EvaluatedValue::Bottom(Bottom::new(
+        "cue.eval.list_length_conflict",
+        "incompatible list lengths",
+        span,
+        false,
+    ))
 }
 
 fn unify_disjunctions(
@@ -2320,12 +2467,23 @@ fn unify_numeric_constraint(value: String, bounds: &[NumericBound]) -> Evaluated
         Ok(true) => EvaluatedValue::Number(value),
         Ok(false) => EvaluatedValue::Bottom(Bottom::new(
             "cue.eval.numeric_bound_mismatch",
-            format!("invalid value {value} for numeric constraint"),
+            format!(
+                "invalid value {value} for numeric constraint {}",
+                format_numeric_bounds(bounds),
+            ),
             None,
             false,
         )),
         Err(bottom) => EvaluatedValue::Bottom(bottom),
     }
+}
+
+fn format_numeric_bounds(bounds: &[NumericBound]) -> String {
+    bounds
+        .iter()
+        .map(|bound| format!("{}{}", bound.op.as_str(), bound.value))
+        .collect::<Vec<_>>()
+        .join(" & ")
 }
 
 fn unify_structs(
@@ -2436,7 +2594,7 @@ fn kind_accepts_value(kind: ValueKind, value: &EvaluatedValue) -> bool {
         | (ValueKind::String, EvaluatedValue::String(_) | EvaluatedValue::RegexConstraint { .. })
         | (ValueKind::Bytes, EvaluatedValue::Bytes(_))
         | (ValueKind::Struct, EvaluatedValue::Struct(_) | EvaluatedValue::ClosedStruct(_))
-        | (ValueKind::List, EvaluatedValue::List(_))
+        | (ValueKind::List, EvaluatedValue::List(_) | EvaluatedValue::OpenList { .. })
         | (ValueKind::Bottom, EvaluatedValue::Bottom(_)) => true,
         _ => false,
     }
@@ -2536,6 +2694,31 @@ fn validate_value(
                 if report.has_errors() && !options.all_errors {
                     return;
                 }
+            }
+        }
+        EvaluatedValue::OpenList { items, tail } => {
+            let inner_options = ValidateOptions {
+                concrete: false,
+                ..options
+            };
+            for (index, item) in items.iter().enumerate() {
+                let item_path = format!("{path}[{index}]");
+                validate_value(item, inner_options, &item_path, report);
+                if report.has_errors() && !options.all_errors {
+                    return;
+                }
+            }
+            validate_value(tail, inner_options, path, report);
+            if report.has_errors() && !options.all_errors {
+                return;
+            }
+            if options.concrete {
+                report.push(Diagnostic::new(
+                    Severity::Error,
+                    "cue.eval.incomplete_open_list",
+                    format!("{path}: open list is not concrete data"),
+                    None,
+                ));
             }
         }
         _ => {}

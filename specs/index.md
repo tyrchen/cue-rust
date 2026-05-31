@@ -28,4 +28,5 @@ Reference research: [CUE architecture study](../docs/research/study-cue-architec
 3. [Roadmap](90-cue-rust-roadmap.md)
 4. [Implementation plan](91-cue-rust-impl-plan.md)
 5. [Phase 9 parity gap implementation plan](92-phase9-parity-gap-impl-plan.md)
-6. [Key decisions](99-cue-rust-key-decisions.md)
+6. [Phase 9 open list implementation plan](93-phase9-open-list-impl-plan.md)
+7. [Key decisions](99-cue-rust-key-decisions.md)

@@ -553,10 +553,23 @@ impl<'tokens> Parser<'tokens> {
             None => return Expr::Bad(self.current_span()),
         };
         let mut items = Vec::new();
+        let mut tail = None;
         while !self.at(TokenKind::RightBracket) && !self.at(TokenKind::Eof) {
             self.skip_separators();
             if !self.at(TokenKind::RightBracket) {
-                items.push(self.parse_expr(0));
+                if self.at(TokenKind::Ellipsis) {
+                    tail = Some(Box::new(self.parse_list_tail()));
+                    self.skip_separators();
+                    if !self.at(TokenKind::RightBracket) {
+                        self.error_here(
+                            "cue.parse.list_ellipsis_not_final",
+                            "list ellipsis must be the final element",
+                        );
+                        self.recover_to_separator();
+                    }
+                } else {
+                    items.push(self.parse_expr(0));
+                }
             }
             self.skip_separators();
         }
@@ -567,7 +580,25 @@ impl<'tokens> Parser<'tokens> {
                 "expected ']' after list",
             )
             .unwrap_or(start);
-        Expr::List(items, merge_span(start, end))
+        Expr::List {
+            items,
+            tail,
+            span: merge_span(start, end),
+        }
+    }
+
+    fn parse_list_tail(&mut self) -> Expr {
+        let ellipsis = match self.bump() {
+            Some(token) => token.span(),
+            None => return Expr::Bad(self.current_span()),
+        };
+        if matches!(
+            self.peek_kind(),
+            Some(TokenKind::Comma | TokenKind::RightBracket | TokenKind::Eof)
+        ) {
+            return Expr::Ellipsis(ellipsis);
+        }
+        self.parse_expr(0)
     }
 
     fn parse_parenthesized(&mut self) -> Expr {
@@ -848,6 +879,24 @@ mod tests {
             })
             .unwrap_or(false);
         assert!(is_struct);
+    }
+
+    #[test]
+    fn test_should_parse_open_list_tail() {
+        let result = parse_bytes(
+            "test.cue",
+            b"x: [1, 2, ...>=4 & <=5]\ny: [...]\n",
+            ParseConfig::default(),
+        );
+        assert!(!result.diagnostics().has_errors());
+        let tree = result.ast().map(crate::AstFile::to_debug_tree);
+        assert_eq!(
+            Some(
+                "file\n  field x\n    list\n      number 1\n      number 2\n      ellipsis\n        binary &\n          unary >=\n            number 4\n          unary <=\n            number 5\n  field y\n    list\n      ellipsis\n        ellipsis"
+                    .to_owned(),
+            ),
+            tree,
+        );
     }
 
     #[test]

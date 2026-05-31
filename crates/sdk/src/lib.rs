@@ -194,8 +194,8 @@ fn single_diagnostic(code: &'static str, message: &'static str) -> DiagnosticRep
 #[cfg(test)]
 mod tests {
     use super::{
-        Context, CueError, DecodeOptions, EncodeOptions, Encoding, EvaluatedValue, ValidateOptions,
-        ValueKind, decode_bytes, encode_value,
+        Context, CueError, DecodeOptions, EncodeOptions, Encoding, EvalError, EvaluatedValue,
+        ValidateOptions, ValueKind, decode_bytes, encode_value,
     };
 
     #[test]
@@ -853,6 +853,88 @@ mod tests {
                 EvaluatedValue::Number("3".to_owned()),
             ]),
             value.lookup_path(&["concatenated"])?.evaluate()?,
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_should_evaluate_open_list_ellipsis_constraints()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let context = Context::new();
+        let value = context.compile_source(
+            "open-list.cue",
+            "ok: [1, 2, ...>=4 & <=5] & [1, 2, 4, 5]\nany: [1, ...] & [1, \"a\", true]\nbad: [1, \
+             2, ...>=4 & <=5] & [1, 2, 4, 8]\ntail: [1, ...int][3]\nschema: [1, ...int] & [_, 2, \
+             ...number]\n",
+        )?;
+
+        assert_eq!(
+            EvaluatedValue::List(vec![
+                EvaluatedValue::Number("1".to_owned()),
+                EvaluatedValue::Number("2".to_owned()),
+                EvaluatedValue::Number("4".to_owned()),
+                EvaluatedValue::Number("5".to_owned()),
+            ]),
+            value.lookup_path(&["ok"])?.evaluate()?,
+        );
+        assert_eq!(
+            EvaluatedValue::List(vec![
+                EvaluatedValue::Number("1".to_owned()),
+                EvaluatedValue::String("a".to_owned()),
+                EvaluatedValue::Bool(true),
+            ]),
+            value.lookup_path(&["any"])?.evaluate()?,
+        );
+        assert!(
+            value
+                .lookup_path(&["bad"])?
+                .validate(ValidateOptions::default())
+                .is_err()
+        );
+        assert_eq!(ValueKind::Int, value.lookup_path(&["tail"])?.kind()?);
+        assert_eq!(
+            EvaluatedValue::OpenList {
+                items: vec![
+                    EvaluatedValue::Number("1".to_owned()),
+                    EvaluatedValue::Number("2".to_owned()),
+                ],
+                tail: Box::new(EvaluatedValue::Kind(ValueKind::Int)),
+            },
+            value.lookup_path(&["schema"])?.evaluate()?,
+        );
+
+        let mut cue_options = EncodeOptions::default();
+        cue_options.encoding = Encoding::Cue;
+        cue_options.concrete = false;
+        assert_eq!(
+            "[1, 2, ...int]",
+            encode_value(&value.lookup_path(&["schema"])?, cue_options)?,
+        );
+        for encoding in [Encoding::Json, Encoding::Yaml, Encoding::Toml] {
+            cue_options.encoding = encoding;
+            assert!(encode_value(&value.lookup_path(&["schema"])?, cue_options).is_err());
+        }
+
+        let invalid_schema = context.compile_source(
+            "open-list-invalid.cue",
+            "schema: [1, ...int] & [_, \"x\", ...int]\n",
+        )?;
+        let result = invalid_schema
+            .lookup_path(&["schema"])?
+            .validate(ValidateOptions::default());
+        let Err(EvalError::Diagnostics(report)) = result else {
+            return Err("expected open list validation diagnostics".into());
+        };
+        let first = report
+            .diagnostics()
+            .first()
+            .ok_or("expected at least one diagnostic")?;
+        assert_eq!("cue.eval.bottom", first.code());
+        assert!(first.message().contains("$[1]"));
+        assert!(
+            first
+                .message()
+                .contains("conflicting values int and string")
         );
         Ok(())
     }

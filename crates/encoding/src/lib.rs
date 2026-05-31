@@ -353,6 +353,7 @@ fn evaluated_to_json(value: EvaluatedValue) -> Result<JsonValue, EncodeError> {
             .map(evaluated_to_json)
             .collect::<Result<Vec<_>, _>>()
             .map(JsonValue::Array),
+        EvaluatedValue::OpenList { .. } => unsupported(Encoding::Json, "incomplete open list"),
         EvaluatedValue::Kind(_) => unsupported(Encoding::Json, "incomplete kind constraint"),
         EvaluatedValue::NumericConstraint(_) => {
             unsupported(Encoding::Json, "incomplete numeric constraint")
@@ -391,6 +392,7 @@ fn evaluated_to_toml(value: EvaluatedValue) -> Result<TomlValue, EncodeError> {
             .map(evaluated_to_toml)
             .collect::<Result<Vec<_>, _>>()
             .map(TomlValue::Array),
+        EvaluatedValue::OpenList { .. } => unsupported(Encoding::Toml, "incomplete open list"),
         EvaluatedValue::Kind(_) => unsupported(Encoding::Toml, "incomplete kind constraint"),
         EvaluatedValue::NumericConstraint(_) => {
             unsupported(Encoding::Toml, "incomplete numeric constraint")
@@ -429,6 +431,7 @@ fn evaluated_to_yaml(value: EvaluatedValue) -> Result<YamlValue, EncodeError> {
             .map(evaluated_to_yaml)
             .collect::<Result<Vec<_>, _>>()
             .map(YamlValue::Sequence),
+        EvaluatedValue::OpenList { .. } => unsupported(Encoding::Yaml, "incomplete open list"),
         EvaluatedValue::Kind(_) => unsupported(Encoding::Yaml, "incomplete kind constraint"),
         EvaluatedValue::NumericConstraint(_) => {
             unsupported(Encoding::Yaml, "incomplete numeric constraint")
@@ -497,6 +500,7 @@ fn format_cue_value(value: &EvaluatedValue) -> String {
                 .join(", ");
             format!("[{rendered}]")
         }
+        EvaluatedValue::OpenList { items, tail } => format_cue_open_list(items, tail),
         EvaluatedValue::Kind(kind) => kind.to_string(),
         EvaluatedValue::NumericConstraint(bounds) => bounds
             .iter()
@@ -527,6 +531,16 @@ fn format_cue_value(value: &EvaluatedValue) -> String {
         EvaluatedValue::Bottom(bottom) => format!("_|_({:?})", bottom.message),
         _ => "_|_(\"unsupported value\")".to_owned(),
     }
+}
+
+fn format_cue_open_list(items: &[EvaluatedValue], tail: &EvaluatedValue) -> String {
+    let mut rendered = items.iter().map(format_cue_value).collect::<Vec<_>>();
+    if matches!(tail, EvaluatedValue::Top) {
+        rendered.push("...".to_owned());
+    } else {
+        rendered.push(format!("...{}", format_cue_value(tail)));
+    }
+    format!("[{}]", rendered.join(", "))
 }
 
 fn format_cue_bytes(value: &[u8]) -> String {
