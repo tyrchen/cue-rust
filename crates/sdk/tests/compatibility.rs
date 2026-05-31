@@ -1,6 +1,6 @@
 //! Compatibility dashboard generation.
 
-use std::{error::Error, path::PathBuf};
+use std::{collections::BTreeMap, error::Error, path::PathBuf};
 
 use cue_rust::{
     Context, DecodeOptions, EncodeOptions, Encoding, ValidateOptions, decode_bytes, encode_value,
@@ -11,14 +11,25 @@ use tokio::fs;
 #[derive(Debug, Serialize)]
 struct CompatibilityReport {
     version: &'static str,
+    summary: CompatibilitySummary,
     cases: Vec<CompatibilityCase>,
+}
+
+#[derive(Debug, Serialize)]
+struct CompatibilitySummary {
+    total: usize,
+    by_category: BTreeMap<&'static str, usize>,
+    by_status: BTreeMap<&'static str, usize>,
 }
 
 #[derive(Debug, Serialize)]
 struct CompatibilityCase {
     name: &'static str,
     category: &'static str,
+    expected: &'static str,
+    actual: &'static str,
     status: &'static str,
+    reason: Option<&'static str>,
 }
 
 #[tokio::test]
@@ -31,9 +42,11 @@ async fn test_should_generate_compatibility_report() -> Result<(), Box<dyn Error
     push_encoding_cases(&context, &mut cases)?;
     push_security_cases(&mut cases);
     push_known_gap_cases(&context, &mut cases);
+    assert_supported_cases_pass(&cases)?;
 
     let report = CompatibilityReport {
         version: cue_rust::VERSION,
+        summary: summarize_cases(&cases),
         cases,
     };
     let output = serde_json::to_vec_pretty(&report)?;
@@ -43,12 +56,26 @@ async fn test_should_generate_compatibility_report() -> Result<(), Box<dyn Error
     Ok(())
 }
 
+fn summarize_cases(cases: &[CompatibilityCase]) -> CompatibilitySummary {
+    let mut by_category = BTreeMap::new();
+    let mut by_status = BTreeMap::new();
+    for case in cases {
+        *by_category.entry(case.category).or_insert(0) += 1;
+        *by_status.entry(case.status).or_insert(0) += 1;
+    }
+    CompatibilitySummary {
+        total: cases.len(),
+        by_category,
+        by_status,
+    }
+}
+
 fn push_parser_cases(context: &Context, cases: &mut Vec<CompatibilityCase>) {
     let parsed = context.parse_source("syntax.cue", "package p\nx: 1\n");
-    cases.push(case(
+    cases.push(supported_case(
         "syntax/package-field",
         "parser",
-        pass_status(!parsed.diagnostics().has_errors()),
+        !parsed.diagnostics().has_errors(),
     ));
 }
 
@@ -57,72 +84,87 @@ fn push_semantic_cases(
     cases: &mut Vec<CompatibilityCase>,
 ) -> Result<(), Box<dyn Error>> {
     let value = context.compile_source("eval.cue", "x: 1\ny: x\n")?;
-    cases.push(case(
+    cases.push(supported_case(
         "eval/top-level-reference",
         "semantic",
-        pass_status(value.lookup_path(&["y"])?.kind()? == cue_rust::ValueKind::Number),
+        value.lookup_path(&["y"])?.kind()? == cue_rust::ValueKind::Number,
     ));
 
     let nested = context.compile_source("nested.cue", "x: 1\ny: { x: 2, z: x }\n")?;
-    cases.push(case(
+    cases.push(supported_case(
         "eval/nested-field-reference",
         "semantic",
-        pass_status(
-            nested.lookup_path(&["y", "z"])?.evaluate()?
-                == cue_rust::EvaluatedValue::Number("2".to_owned()),
-        ),
+        nested.lookup_path(&["y", "z"])?.evaluate()?
+            == cue_rust::EvaluatedValue::Number("2".to_owned()),
     ));
 
     let let_value = context.compile_source("let.cue", "let x = 1\ny: x\n")?;
-    cases.push(case(
+    cases.push(supported_case(
         "compile/let-reference",
         "semantic",
-        pass_status(
-            let_value.lookup_path(&["y"])?.evaluate()?
-                == cue_rust::EvaluatedValue::Number("1".to_owned()),
-        ),
+        let_value.lookup_path(&["y"])?.evaluate()?
+            == cue_rust::EvaluatedValue::Number("1".to_owned()),
     ));
 
     let call_value = context.compile_source("call.cue", "x: len([1, 2, 3])\n")?;
-    cases.push(case(
+    cases.push(supported_case(
         "eval/builtin-len-call",
         "semantic",
-        pass_status(
-            call_value.lookup_path(&["x"])?.evaluate()?
-                == cue_rust::EvaluatedValue::Number("3".to_owned()),
-        ),
+        call_value.lookup_path(&["x"])?.evaluate()?
+            == cue_rust::EvaluatedValue::Number("3".to_owned()),
     ));
 
     let bytes_value = context.compile_source("bytes.cue", "x: 2 * 'ab'\n")?;
-    cases.push(case(
+    cases.push(supported_case(
         "eval/bytes-repeat",
         "semantic",
-        pass_status(
-            bytes_value.lookup_path(&["x"])?.evaluate()?
-                == cue_rust::EvaluatedValue::Bytes(b"abab".to_vec()),
-        ),
+        bytes_value.lookup_path(&["x"])?.evaluate()?
+            == cue_rust::EvaluatedValue::Bytes(b"abab".to_vec()),
     ));
 
     let integer_builtin = context.compile_source("integer.cue", "x: div(-5, 2)\n")?;
-    cases.push(case(
+    cases.push(supported_case(
         "eval/integer-div-builtin",
         "semantic",
-        pass_status(
-            integer_builtin.lookup_path(&["x"])?.evaluate()?
-                == cue_rust::EvaluatedValue::Number("-3".to_owned()),
-        ),
+        integer_builtin.lookup_path(&["x"])?.evaluate()?
+            == cue_rust::EvaluatedValue::Number("-3".to_owned()),
     ));
+
+    let disjunction = context.compile_source(
+        "disjunction.cue",
+        "x: (1 | 2 | 3) & (>=2 & <=2)\ny: *5 | string\nz: or([2, 1, 1, 2]) & 1\n",
+    )?;
+    cases.push(supported_case(
+        "eval/disjunction-bound-intersection",
+        "semantic",
+        disjunction.lookup_path(&["x"])?.evaluate()?
+            == cue_rust::EvaluatedValue::Number("2".to_owned()),
+    ));
+    cases.push(supported_case(
+        "eval/default-disjunction-selection",
+        "semantic",
+        disjunction
+            .lookup_path(&["y"])?
+            .evaluate()?
+            .resolve_defaults()
+            == cue_rust::EvaluatedValue::Number("5".to_owned()),
+    ));
+    cases.push(supported_case(
+        "eval/builtin-or-call",
+        "semantic",
+        disjunction.lookup_path(&["z"])?.evaluate()?
+            == cue_rust::EvaluatedValue::Number("1".to_owned()),
+    ));
+
     let schema = context.compile_source("schema.cue", "name: string\n")?;
     let data = context.compile_source("data.cue", "name: \"cue\"\n")?;
-    cases.push(case(
+    cases.push(supported_case(
         "vet/string-kind",
         "semantic",
-        pass_status(
-            schema
-                .unify(&data)?
-                .validate(ValidateOptions::default())
-                .is_ok(),
-        ),
+        schema
+            .unify(&data)?
+            .validate(ValidateOptions::default())
+            .is_ok(),
     ));
     Ok(())
 }
@@ -134,10 +176,10 @@ fn push_encoding_cases(
     let export_value = context.compile_source("export.cue", "x: 1\n")?;
     let mut options = EncodeOptions::default();
     options.encoding = Encoding::Json;
-    cases.push(case(
+    cases.push(supported_case(
         "export/json-object",
         "encoding",
-        pass_status(encode_value(&export_value, options)?.contains("\"x\": 1")),
+        encode_value(&export_value, options)?.contains("\"x\": 1"),
     ));
     Ok(())
 }
@@ -145,41 +187,69 @@ fn push_encoding_cases(
 fn push_security_cases(cases: &mut Vec<CompatibilityCase>) {
     let mut limited_decode = DecodeOptions::default();
     limited_decode.max_depth = 0;
-    cases.push(case(
+    cases.push(supported_case(
         "decode/depth-limit",
         "security",
-        pass_status(decode_bytes(Encoding::Json, br#"{"x":1}"#, limited_decode).is_err()),
+        decode_bytes(Encoding::Json, br#"{"x":1}"#, limited_decode).is_err(),
     ));
 }
 
 fn push_known_gap_cases(context: &Context, cases: &mut Vec<CompatibilityCase>) {
-    cases.push(case(
+    cases.push(supported_case(
         "compile/import-diagnostic",
         "loader-gap",
-        pass_status(
-            context
-                .compile_source("import.cue", "import \"strings\"\nx: 1\n")
-                .is_err(),
-        ),
+        context
+            .compile_source("import.cue", "import \"strings\"\nx: 1\n")
+            .is_err(),
     ));
 
-    cases.push(case(
+    cases.push(expected_gap_case(
         "loader/import-registry",
         "loader-gap",
-        "expected-fail",
+        "registry imports are outside the Phase 9 local-loader compatibility subset",
     ));
 }
 
-fn case(name: &'static str, category: &'static str, status: &'static str) -> CompatibilityCase {
+fn supported_case(name: &'static str, category: &'static str, passed: bool) -> CompatibilityCase {
     CompatibilityCase {
         name,
         category,
-        status,
+        expected: "pass",
+        actual: actual_status(passed),
+        status: if passed { "pass" } else { "regression" },
+        reason: None,
     }
 }
 
-fn pass_status(passed: bool) -> &'static str {
-    if passed { "pass" } else { "expected-fail" }
+fn expected_gap_case(
+    name: &'static str,
+    category: &'static str,
+    reason: &'static str,
+) -> CompatibilityCase {
+    CompatibilityCase {
+        name,
+        category,
+        expected: "expected-fail",
+        actual: "fail",
+        status: "expected-fail",
+        reason: Some(reason),
+    }
+}
+
+fn actual_status(passed: bool) -> &'static str {
+    if passed { "pass" } else { "fail" }
+}
+
+fn assert_supported_cases_pass(cases: &[CompatibilityCase]) -> Result<(), Box<dyn Error>> {
+    let regressions = cases
+        .iter()
+        .filter(|case| case.expected == "pass" && case.actual != "pass")
+        .map(|case| case.name)
+        .collect::<Vec<_>>();
+    if regressions.is_empty() {
+        return Ok(());
+    }
+    Err(format!("supported compatibility cases regressed: {regressions:?}").into())
 }
 
 fn workspace_target_dir() -> PathBuf {

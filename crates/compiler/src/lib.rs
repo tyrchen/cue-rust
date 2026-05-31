@@ -118,7 +118,7 @@ impl<'runtime> Compiler<'runtime> {
         for file in files {
             for declaration in &file.declarations {
                 if let Decl::Field(field) = declaration {
-                    scope.fields.insert(field.label.display_name().to_owned());
+                    scope.fields.insert(label_name(&field.label));
                 }
             }
         }
@@ -313,7 +313,7 @@ impl<'runtime> Compiler<'runtime> {
         for declaration in declarations {
             match declaration {
                 Decl::Field(field) => {
-                    scope.fields.insert(field.label.display_name().to_owned());
+                    scope.fields.insert(label_name(&field.label));
                 }
                 Decl::Let(let_decl) => {
                     let expression = self.lower_expr(&let_decl.value)?;
@@ -341,36 +341,35 @@ impl<'runtime> Compiler<'runtime> {
     }
 
     fn lower_identifier(&mut self, name: &str, span: Span) -> SemanticExpr {
-        if is_builtin_name(name) {
-            return SemanticExpr::Base(BaseValue::Builtin(name.to_owned()));
-        }
         if let Some(expression) = self.resolve_let(name) {
             return SemanticExpr::LetReference { expression };
         }
         if self.resolve_field(name) {
             let feature = self.runtime.features.string(name);
-            SemanticExpr::FieldReference {
+            return SemanticExpr::FieldReference {
                 feature,
                 up_count: 0,
-            }
-        } else {
-            self.diagnostics.push(Diagnostic::new(
-                Severity::Error,
-                "cue.compile.unresolved_identifier",
-                format!("unresolved identifier `{name}`"),
-                Some(span),
-            ));
-            SemanticExpr::Bottom(Bottom::new(
-                "cue.compile.unresolved_identifier",
-                format!("unresolved identifier `{name}`"),
-                Some(span),
-                false,
-            ))
+            };
         }
+        if is_builtin_name(name) {
+            return SemanticExpr::Base(BaseValue::Builtin(name.to_owned()));
+        }
+        self.diagnostics.push(Diagnostic::new(
+            Severity::Error,
+            "cue.compile.unresolved_identifier",
+            format!("unresolved identifier `{name}`"),
+            Some(span),
+        ));
+        SemanticExpr::Bottom(Bottom::new(
+            "cue.compile.unresolved_identifier",
+            format!("unresolved identifier `{name}`"),
+            Some(span),
+            false,
+        ))
     }
 
     fn feature_for_label(&mut self, label: &Label) -> Feature {
-        self.runtime.features.string(label.display_name())
+        self.runtime.features.string(&label_name(label))
     }
 
     fn resolve_let(&self, name: &str) -> Option<ExprId> {
@@ -394,6 +393,15 @@ fn unquote_string(value: &str) -> String {
         .and_then(|value| value.strip_suffix('"'))
         .unwrap_or(value);
     String::from_utf8_lossy(&unescape_literal_bytes(unquoted)).into_owned()
+}
+
+fn label_name(label: &Label) -> String {
+    match label {
+        Label::Identifier(name, _) => name.clone(),
+        Label::String(name, _) => unquote_string(name),
+        Label::Bad(_) => "<bad>".to_owned(),
+        _ => label.display_name().to_owned(),
+    }
 }
 
 fn unquote_bytes(value: &str) -> Vec<u8> {
@@ -460,7 +468,11 @@ fn is_builtin_kind(name: &str) -> bool {
 }
 
 fn is_builtin_name(name: &str) -> bool {
-    is_builtin_kind(name) || matches!(name, "div" | "len" | "mod" | "quo" | "rem")
+    is_builtin_kind(name)
+        || matches!(
+            name,
+            "and" | "close" | "div" | "len" | "mod" | "or" | "quo" | "rem"
+        )
 }
 
 #[cfg(test)]

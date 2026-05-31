@@ -146,11 +146,57 @@ impl Context {
         }
         Ok(Value::new(runtime, compiled.root(), diagnostics))
     }
+
+    /// Compiles an expression in the lexical context of an existing build instance.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CueError`] when the expression cannot be parsed, compiled, or selected.
+    pub fn compile_instance_expression(
+        &self,
+        instance: &BuildInstance,
+        expression: &str,
+    ) -> Result<Value, CueError> {
+        let expression = expression.trim();
+        if expression.is_empty() {
+            return Err(CueError::Diagnostics(single_diagnostic(
+                "cue.sdk.empty_expression",
+                "expression must not be empty",
+            )));
+        }
+        let source = format!("__cue_rs_expr: ({expression})\n");
+        let parsed = self.parse_source("__cue_rs_expr.cue", source);
+        if parsed.diagnostics().has_errors() {
+            return Err(CueError::Diagnostics(parsed.diagnostics().clone()));
+        }
+        let mut files = instance.files().to_vec();
+        if let Some(ast) = parsed.ast() {
+            files.push(ast.clone());
+        }
+        let extended = BuildInstance::new(instance.package_name().map(ToOwned::to_owned), files);
+        self.build_instance(&extended)?
+            .lookup_path(&["__cue_rs_expr"])
+            .map_err(CueError::from)
+    }
+}
+
+fn single_diagnostic(code: &'static str, message: &'static str) -> DiagnosticReport {
+    let mut report = DiagnosticReport::new();
+    report.push(cue_rust_source::Diagnostic::new(
+        cue_rust_source::Severity::Error,
+        code,
+        message,
+        None,
+    ));
+    report
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{Context, CueError, EvaluatedValue, ValidateOptions, ValueKind};
+    use super::{
+        Context, CueError, EncodeOptions, Encoding, EvaluatedValue, ValidateOptions, ValueKind,
+        encode_value,
+    };
 
     #[test]
     fn test_should_compile_source_and_lookup_value() -> Result<(), Box<dyn std::error::Error>> {
@@ -166,6 +212,29 @@ mod tests {
         let schema = context.compile_source("schema.cue", "name: string\n")?;
         let data = context.compile_source("data.cue", "name: \"cue\"\n")?;
         schema.unify(&data)?.validate(ValidateOptions::default())?;
+        Ok(())
+    }
+
+    #[test]
+    fn test_should_unify_equivalent_numeric_literals() -> Result<(), Box<dyn std::error::Error>> {
+        let context = Context::new();
+        let value = context.compile_source(
+            "test.cue",
+            "x: 2\nx: 2.0\nlarge: 9007199254740993 == 9007199254740992\nbound: 9007199254740993 & \
+             >9007199254740992\n",
+        )?;
+        assert_eq!(
+            EvaluatedValue::Number("2".to_owned()),
+            value.lookup_path(&["x"])?.evaluate()?,
+        );
+        assert_eq!(
+            EvaluatedValue::Bool(false),
+            value.lookup_path(&["large"])?.evaluate()?,
+        );
+        assert_eq!(
+            EvaluatedValue::Number("9007199254740993".to_owned()),
+            value.lookup_path(&["bound"])?.evaluate()?,
+        );
         Ok(())
     }
 
@@ -268,6 +337,95 @@ mod tests {
     }
 
     #[test]
+    fn test_should_evaluate_disjunction_defaults_bounds_and_aggregate_builtins()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let context = Context::new();
+        let value = context.compile_source(
+            "test.cue",
+            "narrow: (1 | 2 | 3) & (>=2 & <=2)\nchosen: *5 | string\nnested: {chosen: *5 | \
+             string}\nlenDefault: len(*[1, 2, 3] | 0)\nandValue: and([1, 1])\norValue: or([2, 1, \
+             1, 2]) & 1\nclosed: close(*{} | 0)\n",
+        )?;
+        assert_eq!(
+            EvaluatedValue::Number("2".to_owned()),
+            value.lookup_path(&["narrow"])?.evaluate()?,
+        );
+        assert_eq!(
+            EvaluatedValue::Number("5".to_owned()),
+            value
+                .lookup_path(&["chosen"])?
+                .evaluate()?
+                .resolve_defaults(),
+        );
+        assert_eq!(
+            EvaluatedValue::Number("3".to_owned()),
+            value.lookup_path(&["lenDefault"])?.evaluate()?,
+        );
+        assert_eq!(
+            EvaluatedValue::Number("1".to_owned()),
+            value.lookup_path(&["andValue"])?.evaluate()?,
+        );
+        assert_eq!(
+            EvaluatedValue::Number("1".to_owned()),
+            value.lookup_path(&["orValue"])?.evaluate()?,
+        );
+        let EvaluatedValue::ClosedStruct(fields) = value.lookup_path(&["closed"])?.evaluate()?
+        else {
+            return Err("expected closed struct".into());
+        };
+        assert!(fields.is_empty());
+
+        let mut options = EncodeOptions::default();
+        options.encoding = Encoding::Json;
+        let json = encode_value(&value.lookup_path(&["chosen"])?, options)?;
+        assert_eq!("5", json);
+        let nested_json = encode_value(&value.lookup_path(&["nested"])?, options)?;
+        assert!(nested_json.contains("\"chosen\": 5"));
+        Ok(())
+    }
+
+    #[test]
+    fn test_should_reject_extra_fields_for_closed_struct() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let context = Context::new();
+        let value = context.compile_source("test.cue", "x: close({a: int}) & {a: 1, b: 2}\n")?;
+        assert!(
+            value
+                .lookup_path(&["x"])?
+                .validate(ValidateOptions::default())
+                .is_err()
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_should_allow_fields_to_shadow_predeclared_builtins()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let context = Context::new();
+        let value = context.compile_source("test.cue", "or: 1\nand: 2\nx: or + and\n")?;
+        assert_eq!(
+            EvaluatedValue::Number("3".to_owned()),
+            value.lookup_path(&["x"])?.evaluate()?,
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_should_select_field_through_default_struct() -> Result<(), Box<dyn std::error::Error>> {
+        let context = Context::new();
+        let value = context.compile_source("test.cue", "x: *{a: 1} | string\ny: x.a\n")?;
+        assert_eq!(
+            EvaluatedValue::Number("1".to_owned()),
+            value.lookup_path(&["y"])?.evaluate()?,
+        );
+        assert_eq!(
+            EvaluatedValue::Number("1".to_owned()),
+            value.lookup_path(&["x", "a"])?.evaluate()?,
+        );
+        Ok(())
+    }
+
+    #[test]
     fn test_should_resolve_nested_field_before_outer_field()
     -> Result<(), Box<dyn std::error::Error>> {
         let context = Context::new();
@@ -322,10 +480,17 @@ mod tests {
     fn test_should_evaluate_struct_string_index_expression()
     -> Result<(), Box<dyn std::error::Error>> {
         let context = Context::new();
-        let value = context.compile_source("test.cue", "x: {a: 1, b: {c: 2}}[\"b\"][\"c\"]\n")?;
+        let value = context.compile_source(
+            "test.cue",
+            "x: {a: 1, b: {c: 2}}[\"b\"][\"c\"]\ny: {\"quoted\": 3}.quoted\n",
+        )?;
         assert_eq!(
             EvaluatedValue::Number("2".to_owned()),
             value.lookup_path(&["x"])?.evaluate()?,
+        );
+        assert_eq!(
+            EvaluatedValue::Number("3".to_owned()),
+            value.lookup_path(&["y"])?.evaluate()?,
         );
         Ok(())
     }

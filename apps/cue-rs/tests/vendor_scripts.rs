@@ -121,6 +121,51 @@ async fn test_should_reject_upstream_json_syntax_errors() -> TestResult {
     Ok(())
 }
 
+#[tokio::test]
+async fn test_should_export_upstream_expression_fixture() -> TestResult {
+    let archive = TxtarArchive::read(
+        &workspace_root().join("vendors/cue/cmd/cue/cmd/testdata/script/export_expr.txtar"),
+    )
+    .await?;
+    let dir = fixture_dir().await?;
+    let simple = dir.join("data.cue");
+    fs::write(&simple, archive.file("simple/data.cue")?).await?;
+
+    let output = run(&[
+        "export",
+        "--out",
+        "yaml",
+        "--expr",
+        "a+c",
+        "--expr",
+        "d.e.f",
+        path_arg(&simple)?.as_str(),
+    ])
+    .await?;
+    assert_success(&output)?;
+    let stdout = String::from_utf8(output.stdout)?;
+    assert!(stdout.contains('4'));
+    assert!(stdout.contains("jam"));
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_should_eval_upstream_expression_selection_fixture() -> TestResult {
+    let archive = TxtarArchive::read(
+        &workspace_root().join("vendors/cue/cmd/cue/cmd/testdata/script/eval_expr.txtar"),
+    )
+    .await?;
+    let dir = fixture_dir().await?;
+    let partial = dir.join("partial.cue");
+    fs::write(&partial, archive.file("partial.cue")?).await?;
+
+    let output = run(&["eval", "--expr", "b.a.b", path_arg(&partial)?.as_str()]).await?;
+    assert_success(&output)?;
+    let stdout = String::from_utf8(output.stdout)?;
+    assert!(stdout.contains('4'));
+    Ok(())
+}
+
 async fn fixture_dir() -> Result<PathBuf, Box<dyn Error>> {
     let id = NEXT_FIXTURE_ID.fetch_add(1, Ordering::Relaxed);
     let path = std::env::temp_dir().join(format!("cue-rust-vendor-{}-{id}", std::process::id()));

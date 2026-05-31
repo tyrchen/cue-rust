@@ -192,7 +192,11 @@ pub fn encode_value(value: &Value, options: EncodeOptions) -> Result<String, Enc
         value.validate(validate_options)?;
     }
 
-    let evaluated = value.evaluate()?;
+    let evaluated = if options.concrete {
+        value.evaluate()?.resolve_defaults()
+    } else {
+        value.evaluate()?
+    };
     match options.encoding {
         Encoding::Cue => Ok(format_cue_value(&evaluated)),
         Encoding::Json => Ok(serde_json::to_string_pretty(&evaluated_to_json(
@@ -334,7 +338,7 @@ fn evaluated_to_json(value: EvaluatedValue) -> Result<JsonValue, EncodeError> {
             .map_err(|_| unsupported_error(Encoding::Json, "invalid JSON number")),
         EvaluatedValue::String(value) => Ok(JsonValue::String(value)),
         EvaluatedValue::Bytes(_) => unsupported(Encoding::Json, "bytes require binary encoding"),
-        EvaluatedValue::Struct(values) => {
+        EvaluatedValue::Struct(values) | EvaluatedValue::ClosedStruct(values) => {
             let mut object = JsonMap::new();
             for (key, value) in values {
                 object.insert(key, evaluated_to_json(value)?);
@@ -347,9 +351,14 @@ fn evaluated_to_json(value: EvaluatedValue) -> Result<JsonValue, EncodeError> {
             .collect::<Result<Vec<_>, _>>()
             .map(JsonValue::Array),
         EvaluatedValue::Kind(_) => unsupported(Encoding::Json, "incomplete kind constraint"),
+        EvaluatedValue::NumericConstraint(_) => {
+            unsupported(Encoding::Json, "incomplete numeric constraint")
+        }
         EvaluatedValue::RegexConstraint { .. } => {
             unsupported(Encoding::Json, "incomplete regex constraint")
         }
+        EvaluatedValue::Default(value) => evaluated_to_json(*value),
+        EvaluatedValue::Disjunction(_) => unsupported(Encoding::Json, "incomplete disjunction"),
         EvaluatedValue::Bottom(bottom) => unsupported(Encoding::Json, bottom.message),
         _ => unsupported(Encoding::Json, "unsupported value"),
     }
@@ -363,7 +372,7 @@ fn evaluated_to_toml(value: EvaluatedValue) -> Result<TomlValue, EncodeError> {
         EvaluatedValue::Number(value) => number_to_toml(&value),
         EvaluatedValue::String(value) => Ok(TomlValue::String(value)),
         EvaluatedValue::Bytes(_) => unsupported(Encoding::Toml, "bytes require binary encoding"),
-        EvaluatedValue::Struct(values) => {
+        EvaluatedValue::Struct(values) | EvaluatedValue::ClosedStruct(values) => {
             let mut table = TomlTable::new();
             for (key, value) in values {
                 table.insert(key, evaluated_to_toml(value)?);
@@ -376,9 +385,14 @@ fn evaluated_to_toml(value: EvaluatedValue) -> Result<TomlValue, EncodeError> {
             .collect::<Result<Vec<_>, _>>()
             .map(TomlValue::Array),
         EvaluatedValue::Kind(_) => unsupported(Encoding::Toml, "incomplete kind constraint"),
+        EvaluatedValue::NumericConstraint(_) => {
+            unsupported(Encoding::Toml, "incomplete numeric constraint")
+        }
         EvaluatedValue::RegexConstraint { .. } => {
             unsupported(Encoding::Toml, "incomplete regex constraint")
         }
+        EvaluatedValue::Default(value) => evaluated_to_toml(*value),
+        EvaluatedValue::Disjunction(_) => unsupported(Encoding::Toml, "incomplete disjunction"),
         EvaluatedValue::Bottom(bottom) => unsupported(Encoding::Toml, bottom.message),
         _ => unsupported(Encoding::Toml, "unsupported value"),
     }
@@ -392,7 +406,7 @@ fn evaluated_to_yaml(value: EvaluatedValue) -> Result<YamlValue, EncodeError> {
         EvaluatedValue::Number(value) => number_to_yaml(&value),
         EvaluatedValue::String(value) => Ok(YamlValue::String(value)),
         EvaluatedValue::Bytes(_) => unsupported(Encoding::Yaml, "bytes require binary encoding"),
-        EvaluatedValue::Struct(values) => {
+        EvaluatedValue::Struct(values) | EvaluatedValue::ClosedStruct(values) => {
             let entries = values
                 .into_iter()
                 .map(|(key, value)| evaluated_to_yaml(value).map(|value| (key, value)))
@@ -405,9 +419,14 @@ fn evaluated_to_yaml(value: EvaluatedValue) -> Result<YamlValue, EncodeError> {
             .collect::<Result<Vec<_>, _>>()
             .map(YamlValue::Sequence),
         EvaluatedValue::Kind(_) => unsupported(Encoding::Yaml, "incomplete kind constraint"),
+        EvaluatedValue::NumericConstraint(_) => {
+            unsupported(Encoding::Yaml, "incomplete numeric constraint")
+        }
         EvaluatedValue::RegexConstraint { .. } => {
             unsupported(Encoding::Yaml, "incomplete regex constraint")
         }
+        EvaluatedValue::Default(value) => evaluated_to_yaml(*value),
+        EvaluatedValue::Disjunction(_) => unsupported(Encoding::Yaml, "incomplete disjunction"),
         EvaluatedValue::Bottom(bottom) => unsupported(Encoding::Yaml, bottom.message),
         _ => unsupported(Encoding::Yaml, "unsupported value"),
     }
@@ -452,7 +471,9 @@ fn format_cue_value(value: &EvaluatedValue) -> String {
         EvaluatedValue::Number(value) => value.clone(),
         EvaluatedValue::String(value) => format!("{value:?}"),
         EvaluatedValue::Bytes(value) => format_cue_bytes(value),
-        EvaluatedValue::Struct(fields) => format_cue_struct(fields),
+        EvaluatedValue::Struct(fields) | EvaluatedValue::ClosedStruct(fields) => {
+            format_cue_struct(fields)
+        }
         EvaluatedValue::List(values) => {
             let rendered = values
                 .iter()
@@ -462,10 +483,31 @@ fn format_cue_value(value: &EvaluatedValue) -> String {
             format!("[{rendered}]")
         }
         EvaluatedValue::Kind(kind) => kind.to_string(),
+        EvaluatedValue::NumericConstraint(bounds) => bounds
+            .iter()
+            .map(|bound| {
+                let op = bound.op.as_str();
+                format!("{op}{}", bound.value)
+            })
+            .collect::<Vec<_>>()
+            .join(" & "),
         EvaluatedValue::RegexConstraint { pattern, negated } => {
             let op = if *negated { "!~" } else { "=~" };
             format!("{op}{pattern:?}")
         }
+        EvaluatedValue::Default(value) => format!("*{}", format_cue_value(value)),
+        EvaluatedValue::Disjunction(disjuncts) => disjuncts
+            .iter()
+            .map(|disjunct| {
+                let value = format_cue_value(&disjunct.value);
+                if disjunct.default {
+                    format!("*{value}")
+                } else {
+                    value
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(" | "),
         EvaluatedValue::Bottom(bottom) => format!("_|_({:?})", bottom.message),
         _ => "_|_(\"unsupported value\")".to_owned(),
     }

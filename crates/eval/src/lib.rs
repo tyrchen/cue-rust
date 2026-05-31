@@ -110,10 +110,14 @@ pub enum EvaluatedValue {
     Bytes(Vec<u8>),
     /// Struct fields in deterministic order.
     Struct(IndexMap<String, EvaluatedValue>),
+    /// Closed struct fields in deterministic order.
+    ClosedStruct(IndexMap<String, EvaluatedValue>),
     /// List items.
     List(Vec<EvaluatedValue>),
     /// Builtin kind constraint.
     Kind(ValueKind),
+    /// Numeric comparison constraint.
+    NumericConstraint(Vec<NumericBound>),
     /// Regular-expression string constraint.
     RegexConstraint {
         /// Regex pattern text.
@@ -121,6 +125,10 @@ pub enum EvaluatedValue {
         /// Whether the pattern is negated.
         negated: bool,
     },
+    /// Default-marked value inside a disjunction.
+    Default(Box<EvaluatedValue>),
+    /// Disjunction alternatives.
+    Disjunction(Vec<Disjunct>),
     /// Semantic bottom.
     Bottom(Bottom),
 }
@@ -133,15 +141,68 @@ impl EvaluatedValue {
             Self::Top => ValueKind::Top,
             Self::Null => ValueKind::Null,
             Self::Bool(_) => ValueKind::Bool,
-            Self::Number(_) => ValueKind::Number,
+            Self::Number(_) | Self::NumericConstraint(_) => ValueKind::Number,
             Self::String(_) | Self::RegexConstraint { .. } => ValueKind::String,
             Self::Bytes(_) => ValueKind::Bytes,
-            Self::Struct(_) => ValueKind::Struct,
+            Self::Struct(_) | Self::ClosedStruct(_) => ValueKind::Struct,
             Self::List(_) => ValueKind::List,
             Self::Kind(kind) => *kind,
+            Self::Default(value) => value.kind(),
+            Self::Disjunction(disjuncts) => disjunction_kind(disjuncts),
             Self::Bottom(_) => ValueKind::Bottom,
         }
     }
+
+    /// Resolves a value to its default alternative when exactly one default is available.
+    #[must_use]
+    pub fn resolve_defaults(self) -> Self {
+        resolve_default_value(self)
+    }
+}
+
+/// Numeric comparison operator used by a bound constraint.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[non_exhaustive]
+pub enum NumericBoundOp {
+    /// Less than.
+    LessThan,
+    /// Less than or equal.
+    LessThanOrEqual,
+    /// Greater than.
+    GreaterThan,
+    /// Greater than or equal.
+    GreaterThanOrEqual,
+}
+
+impl NumericBoundOp {
+    /// Returns the CUE operator spelling.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::LessThan => "<",
+            Self::LessThanOrEqual => "<=",
+            Self::GreaterThan => ">",
+            Self::GreaterThanOrEqual => ">=",
+        }
+    }
+}
+
+/// One numeric comparison bound.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct NumericBound {
+    /// Comparison operator.
+    pub op: NumericBoundOp,
+    /// Bound number literal text.
+    pub value: String,
+}
+
+/// One disjunction alternative.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Disjunct {
+    /// Alternative value.
+    pub value: Box<EvaluatedValue>,
+    /// Whether this alternative is marked as a default.
+    pub default: bool,
 }
 
 /// Immutable handle to a compiled CUE value.
@@ -251,6 +312,7 @@ impl Value {
     pub fn lookup_path(&self, path: &[&str]) -> Result<Self, EvalError> {
         let mut current = self.evaluate()?;
         for segment in path {
+            current = current.resolve_defaults();
             let EvaluatedValue::Struct(fields) = current else {
                 return Err(EvalError::Diagnostics(single_diagnostic(
                     "cue.eval.invalid_lookup",
@@ -442,7 +504,9 @@ impl<'runtime> Evaluator<'runtime> {
                 let right = self.evaluate_expr_at(*right, environment, depth + 1)?;
                 evaluate_binary(op, left, right)
             }
-            SemanticExpr::Default(expr) => self.evaluate_expr_at(*expr, environment, depth + 1)?,
+            SemanticExpr::Default(expr) => EvaluatedValue::Default(Box::new(
+                self.evaluate_expr_at(*expr, environment, depth + 1)?,
+            )),
             SemanticExpr::Bottom(bottom) => EvaluatedValue::Bottom(bottom.clone()),
             _ => EvaluatedValue::Bottom(Bottom::new(
                 "cue.eval.unsupported_expr",
@@ -528,15 +592,17 @@ impl<'runtime> Evaluator<'runtime> {
 
     fn select_field(&self, base: EvaluatedValue, feature: Feature) -> EvaluatedValue {
         let label = self.feature_label(feature);
-        match base {
-            EvaluatedValue::Struct(fields) => fields.get(&label).cloned().unwrap_or_else(|| {
-                EvaluatedValue::Bottom(Bottom::new(
-                    "cue.eval.missing_field",
-                    format!("field `{label}` does not exist"),
-                    None,
-                    true,
-                ))
-            }),
+        match base.resolve_defaults() {
+            EvaluatedValue::Struct(fields) | EvaluatedValue::ClosedStruct(fields) => {
+                fields.get(&label).cloned().unwrap_or_else(|| {
+                    EvaluatedValue::Bottom(Bottom::new(
+                        "cue.eval.missing_field",
+                        format!("field `{label}` does not exist"),
+                        None,
+                        true,
+                    ))
+                })
+            }
             other => EvaluatedValue::Bottom(Bottom::new(
                 "cue.eval.invalid_selector",
                 format!("cannot select `{label}` from {}", other.kind()),
@@ -578,7 +644,7 @@ fn value_from_base(base: &BaseValue) -> EvaluatedValue {
 
 fn into_fields(value: EvaluatedValue) -> IndexMap<String, EvaluatedValue> {
     match value {
-        EvaluatedValue::Struct(fields) => fields,
+        EvaluatedValue::Struct(fields) | EvaluatedValue::ClosedStruct(fields) => fields,
         _ => IndexMap::new(),
     }
 }
@@ -596,6 +662,13 @@ fn evaluate_unary(op: &str, value: EvaluatedValue) -> EvaluatedValue {
             pattern,
             negated: op == "!~",
         },
+        ("<" | "<=" | ">" | ">=", EvaluatedValue::Number(value)) => {
+            if let Some(op) = numeric_bound_op(op) {
+                EvaluatedValue::NumericConstraint(vec![NumericBound { op, value }])
+            } else {
+                invalid_unary(op, &EvaluatedValue::Number(value))
+            }
+        }
         (op, value) => EvaluatedValue::Bottom(Bottom::new(
             "cue.eval.invalid_unary",
             format!("cannot apply unary `{op}` to {}", value.kind()),
@@ -605,10 +678,22 @@ fn evaluate_unary(op: &str, value: EvaluatedValue) -> EvaluatedValue {
     }
 }
 
+fn invalid_unary(op: &str, value: &EvaluatedValue) -> EvaluatedValue {
+    EvaluatedValue::Bottom(Bottom::new(
+        "cue.eval.invalid_unary",
+        format!("cannot apply unary `{op}` to {}", value.kind()),
+        None,
+        false,
+    ))
+}
+
 fn evaluate_builtin_call(name: &str, args: Vec<EvaluatedValue>) -> EvaluatedValue {
     match name {
+        "and" => evaluate_and(args),
+        "close" => evaluate_close(args),
         "div" | "mod" | "quo" | "rem" => evaluate_integer_builtin(name, args),
         "len" => evaluate_len(args),
+        "or" => evaluate_or(args),
         _ => EvaluatedValue::Bottom(Bottom::new(
             "cue.eval.unsupported_builtin",
             format!("unsupported builtin `{name}`"),
@@ -619,6 +704,10 @@ fn evaluate_builtin_call(name: &str, args: Vec<EvaluatedValue>) -> EvaluatedValu
 }
 
 fn evaluate_integer_builtin(name: &str, args: Vec<EvaluatedValue>) -> EvaluatedValue {
+    let args = args
+        .into_iter()
+        .map(resolve_default_value)
+        .collect::<Vec<_>>();
     if args.len() != 2 {
         return EvaluatedValue::Bottom(Bottom::new(
             "cue.eval.invalid_builtin_arity",
@@ -667,6 +756,77 @@ fn evaluate_integer_builtin(name: &str, args: Vec<EvaluatedValue>) -> EvaluatedV
     )
 }
 
+fn evaluate_and(args: Vec<EvaluatedValue>) -> EvaluatedValue {
+    let Some(items) = single_list_arg(args) else {
+        return invalid_list_builtin_arg("and");
+    };
+    items.into_iter().fold(EvaluatedValue::Top, |left, right| {
+        unify_values(left, right, None)
+    })
+}
+
+fn evaluate_or(args: Vec<EvaluatedValue>) -> EvaluatedValue {
+    let Some(items) = single_list_arg(args) else {
+        return invalid_list_builtin_arg("or");
+    };
+    items.into_iter().reduce(evaluate_disjunction).map_or(
+        EvaluatedValue::Bottom(Bottom::new(
+            "cue.eval.empty_disjunction",
+            "or requires at least one alternative",
+            None,
+            false,
+        )),
+        collapse_disjunction,
+    )
+}
+
+fn evaluate_close(args: Vec<EvaluatedValue>) -> EvaluatedValue {
+    if args.len() != 1 {
+        return EvaluatedValue::Bottom(Bottom::new(
+            "cue.eval.invalid_builtin_arity",
+            format!("close expects 1 argument, got {}", args.len()),
+            None,
+            false,
+        ));
+    }
+    args.into_iter().next().map_or_else(
+        || {
+            EvaluatedValue::Bottom(Bottom::new(
+                "cue.eval.invalid_builtin_arity",
+                "close expects 1 argument, got 0",
+                None,
+                false,
+            ))
+        },
+        |value| match resolve_default_value(value) {
+            EvaluatedValue::Struct(fields) | EvaluatedValue::ClosedStruct(fields) => {
+                EvaluatedValue::ClosedStruct(fields)
+            }
+            value => value,
+        },
+    )
+}
+
+fn single_list_arg(args: Vec<EvaluatedValue>) -> Option<Vec<EvaluatedValue>> {
+    if args.len() != 1 {
+        return None;
+    }
+    let value = args.into_iter().next().map(resolve_default_value)?;
+    match value {
+        EvaluatedValue::List(items) => Some(items),
+        _ => None,
+    }
+}
+
+fn invalid_list_builtin_arg(name: &str) -> EvaluatedValue {
+    EvaluatedValue::Bottom(Bottom::new(
+        "cue.eval.invalid_builtin_arg",
+        format!("{name} expects a single list argument"),
+        None,
+        false,
+    ))
+}
+
 fn floor_div(left: i128, right: i128) -> Option<i128> {
     let divisor = right.checked_abs()?;
     let quotient = left.checked_div(divisor)?;
@@ -700,6 +860,10 @@ fn invalid_integer_builtin_arg(name: &str) -> EvaluatedValue {
 }
 
 fn evaluate_len(args: Vec<EvaluatedValue>) -> EvaluatedValue {
+    let args = args
+        .into_iter()
+        .map(resolve_default_value)
+        .collect::<Vec<_>>();
     if args.len() != 1 {
         return EvaluatedValue::Bottom(Bottom::new(
             "cue.eval.invalid_builtin_arity",
@@ -734,8 +898,10 @@ fn evaluate_len(args: Vec<EvaluatedValue>) -> EvaluatedValue {
 
 fn evaluate_binary(op: &str, left: EvaluatedValue, right: EvaluatedValue) -> EvaluatedValue {
     match op {
-        "&" | "&&" => unify_values(left, right, None),
-        "|" | "||" => choose_disjunction(left, right),
+        "&&" => evaluate_bool_binary("&&", left, right),
+        "||" => evaluate_bool_binary("||", left, right),
+        "&" => unify_values(left, right, None),
+        "|" => evaluate_disjunction(left, right),
         "==" => evaluate_equality(&left, &right, false),
         "!=" => evaluate_equality(&left, &right, true),
         "=~" => evaluate_regex_binary(left, right, false),
@@ -746,6 +912,27 @@ fn evaluate_binary(op: &str, left: EvaluatedValue, right: EvaluatedValue) -> Eva
         _ => EvaluatedValue::Bottom(Bottom::new(
             "cue.eval.unsupported_binary",
             format!("unsupported binary operator `{op}`"),
+            None,
+            false,
+        )),
+    }
+}
+
+fn evaluate_bool_binary(op: &str, left: EvaluatedValue, right: EvaluatedValue) -> EvaluatedValue {
+    match (op, left, right) {
+        ("&&", EvaluatedValue::Bool(left), EvaluatedValue::Bool(right)) => {
+            EvaluatedValue::Bool(left && right)
+        }
+        ("||", EvaluatedValue::Bool(left), EvaluatedValue::Bool(right)) => {
+            EvaluatedValue::Bool(left || right)
+        }
+        (op, left, right) => EvaluatedValue::Bottom(Bottom::new(
+            "cue.eval.invalid_bool_operand",
+            format!(
+                "operator `{op}` cannot accept {} and {}",
+                left.kind(),
+                right.kind()
+            ),
             None,
             false,
         )),
@@ -811,7 +998,10 @@ fn values_equal(left: &EvaluatedValue, right: &EvaluatedValue) -> Result<bool, B
         (EvaluatedValue::Number(left), EvaluatedValue::Number(right)) => {
             Ok(equal_numbers(left, right))
         }
-        (EvaluatedValue::Struct(left), EvaluatedValue::Struct(right)) => structs_equal(left, right),
+        (
+            EvaluatedValue::Struct(left) | EvaluatedValue::ClosedStruct(left),
+            EvaluatedValue::Struct(right) | EvaluatedValue::ClosedStruct(right),
+        ) => structs_equal(left, right),
         (EvaluatedValue::List(left), EvaluatedValue::List(right)) => lists_equal(left, right),
         (EvaluatedValue::Top, EvaluatedValue::Top)
         | (EvaluatedValue::Null, EvaluatedValue::Null) => Ok(true),
@@ -819,6 +1009,9 @@ fn values_equal(left: &EvaluatedValue, right: &EvaluatedValue) -> Result<bool, B
         (EvaluatedValue::String(left), EvaluatedValue::String(right)) => Ok(left == right),
         (EvaluatedValue::Bytes(left), EvaluatedValue::Bytes(right)) => Ok(left == right),
         (EvaluatedValue::Kind(left), EvaluatedValue::Kind(right)) => Ok(left == right),
+        (EvaluatedValue::NumericConstraint(left), EvaluatedValue::NumericConstraint(right)) => {
+            Ok(left == right)
+        }
         (
             EvaluatedValue::RegexConstraint {
                 pattern: left_pattern,
@@ -829,13 +1022,19 @@ fn values_equal(left: &EvaluatedValue, right: &EvaluatedValue) -> Result<bool, B
                 negated: right_negated,
             },
         ) => Ok(left_pattern == right_pattern && left_negated == right_negated),
+        (EvaluatedValue::Default(left), EvaluatedValue::Default(right)) => {
+            values_equal(left, right)
+        }
+        (EvaluatedValue::Disjunction(left), EvaluatedValue::Disjunction(right)) => {
+            disjunctions_equal(left, right)
+        }
         _ => Ok(false),
     }
 }
 
 fn equal_numbers(left: &str, right: &str) -> bool {
-    match (parse_number(left), parse_number(right)) {
-        (Some(left), Some(right)) => compare_numbers(left, right, Ordering::Equal),
+    match (parse_decimal_number(left), parse_decimal_number(right)) {
+        (Some(left), Some(right)) => compare_decimal_numbers(&left, &right) == Ordering::Equal,
         _ => left == right,
     }
 }
@@ -870,6 +1069,27 @@ fn structs_equal(
     Ok(true)
 }
 
+fn disjunctions_equal(left: &[Disjunct], right: &[Disjunct]) -> Result<bool, Bottom> {
+    if left.len() != right.len() {
+        return Ok(false);
+    }
+    for left_disjunct in left {
+        let mut matched = false;
+        for right_disjunct in right {
+            if left_disjunct.default == right_disjunct.default
+                && values_equal(&left_disjunct.value, &right_disjunct.value)?
+            {
+                matched = true;
+                break;
+            }
+        }
+        if !matched {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
 fn compare_numbers(left: f64, right: f64, ordering: Ordering) -> bool {
     left.partial_cmp(&right)
         .is_some_and(|actual_ordering| actual_ordering == ordering)
@@ -879,9 +1099,117 @@ fn is_zero(value: f64) -> bool {
     matches!(value.classify(), FpCategory::Zero)
 }
 
-fn choose_disjunction(left: EvaluatedValue, right: EvaluatedValue) -> EvaluatedValue {
-    match left {
-        EvaluatedValue::Bottom(_) => right,
+#[derive(Debug, Eq, PartialEq)]
+struct DecimalNumber {
+    sign: i8,
+    digits: String,
+    scale: i64,
+}
+
+impl DecimalNumber {
+    fn zero() -> Self {
+        Self {
+            sign: 0,
+            digits: "0".to_owned(),
+            scale: 0,
+        }
+    }
+}
+
+fn evaluate_disjunction(left: EvaluatedValue, right: EvaluatedValue) -> EvaluatedValue {
+    collapse_disjunction(EvaluatedValue::Disjunction(unique_disjuncts(
+        disjuncts_from(left)
+            .into_iter()
+            .chain(disjuncts_from(right))
+            .collect(),
+    )))
+}
+
+fn disjuncts_from(value: EvaluatedValue) -> Vec<Disjunct> {
+    match value {
+        EvaluatedValue::Bottom(_) => Vec::new(),
+        EvaluatedValue::Disjunction(disjuncts) => disjuncts,
+        EvaluatedValue::Default(value) => vec![Disjunct {
+            value,
+            default: true,
+        }],
+        value => vec![Disjunct {
+            value: Box::new(value),
+            default: false,
+        }],
+    }
+}
+
+fn unique_disjuncts(disjuncts: Vec<Disjunct>) -> Vec<Disjunct> {
+    let mut unique: Vec<Disjunct> = Vec::new();
+    'outer: for disjunct in disjuncts {
+        for existing in &mut unique {
+            if values_equal(existing.value.as_ref(), disjunct.value.as_ref()).unwrap_or(false) {
+                existing.default |= disjunct.default;
+                continue 'outer;
+            }
+        }
+        unique.push(disjunct);
+    }
+    unique
+}
+
+fn collapse_disjunction(value: EvaluatedValue) -> EvaluatedValue {
+    let EvaluatedValue::Disjunction(disjuncts) = value else {
+        return value;
+    };
+    match disjuncts.len() {
+        0 => EvaluatedValue::Bottom(Bottom::new(
+            "cue.eval.empty_disjunction",
+            "disjunction has no valid alternatives",
+            None,
+            false,
+        )),
+        1 => disjuncts.into_iter().next().map_or_else(
+            || {
+                EvaluatedValue::Bottom(Bottom::new(
+                    "cue.eval.empty_disjunction",
+                    "disjunction has no valid alternatives",
+                    None,
+                    false,
+                ))
+            },
+            |disjunct| *disjunct.value,
+        ),
+        _ => EvaluatedValue::Disjunction(disjuncts),
+    }
+}
+
+fn resolve_default_value(value: EvaluatedValue) -> EvaluatedValue {
+    match value {
+        EvaluatedValue::Default(value) => resolve_default_value(*value),
+        EvaluatedValue::Struct(fields) => EvaluatedValue::Struct(
+            fields
+                .into_iter()
+                .map(|(label, value)| (label, resolve_default_value(value)))
+                .collect(),
+        ),
+        EvaluatedValue::ClosedStruct(fields) => EvaluatedValue::ClosedStruct(
+            fields
+                .into_iter()
+                .map(|(label, value)| (label, resolve_default_value(value)))
+                .collect(),
+        ),
+        EvaluatedValue::List(items) => {
+            EvaluatedValue::List(items.into_iter().map(resolve_default_value).collect())
+        }
+        EvaluatedValue::Disjunction(disjuncts) => {
+            let defaults = disjuncts
+                .iter()
+                .filter(|disjunct| disjunct.default)
+                .collect::<Vec<_>>();
+            if defaults.len() == 1
+                && let Some(disjunct) = defaults.first()
+            {
+                return resolve_default_value((*disjunct.value).clone());
+            }
+            EvaluatedValue::Disjunction(disjuncts)
+        }
         value => value,
     }
 }
@@ -954,7 +1282,7 @@ fn evaluate_add(left: EvaluatedValue, right: EvaluatedValue) -> EvaluatedValue {
             EvaluatedValue::Bytes(left)
         }
         (EvaluatedValue::Number(left), EvaluatedValue::Number(right)) => {
-            match (parse_number(&left), parse_number(&right)) {
+            match (parse_finite_f64(&left), parse_finite_f64(&right)) {
                 (Some(left), Some(right)) => EvaluatedValue::Number(format_number(left + right)),
                 _ => EvaluatedValue::Bottom(Bottom::new(
                     "cue.eval.invalid_number",
@@ -976,7 +1304,7 @@ fn evaluate_add(left: EvaluatedValue, right: EvaluatedValue) -> EvaluatedValue {
 fn evaluate_multiply(left: EvaluatedValue, right: EvaluatedValue) -> EvaluatedValue {
     match (left, right) {
         (EvaluatedValue::Number(left), EvaluatedValue::Number(right)) => {
-            match (parse_number(&left), parse_number(&right)) {
+            match (parse_finite_f64(&left), parse_finite_f64(&right)) {
                 (Some(left), Some(right)) => EvaluatedValue::Number(format_number(left * right)),
                 _ => EvaluatedValue::Bottom(Bottom::new(
                     "cue.eval.invalid_number",
@@ -1035,7 +1363,7 @@ fn number_operand(value: EvaluatedValue) -> Result<f64, Bottom> {
             false,
         ));
     };
-    parse_number(&value).ok_or_else(|| {
+    parse_finite_f64(&value).ok_or_else(|| {
         Bottom::new(
             "cue.eval.invalid_number",
             format!("invalid numeric operand `{value}`"),
@@ -1045,7 +1373,7 @@ fn number_operand(value: EvaluatedValue) -> Result<f64, Bottom> {
     })
 }
 
-fn parse_number(value: &str) -> Option<f64> {
+fn parse_finite_f64(value: &str) -> Option<f64> {
     value
         .replace('_', "")
         .parse::<f64>()
@@ -1064,7 +1392,100 @@ fn parse_float(value: &str) -> Option<f64> {
     if !value.contains(['.', 'e', 'E']) {
         return None;
     }
-    parse_number(value)
+    parse_finite_f64(value)
+}
+
+fn parse_decimal_number(value: &str) -> Option<DecimalNumber> {
+    let value = value.replace('_', "");
+    let (sign, unsigned) = value
+        .strip_prefix('-')
+        .map_or((1, value.as_str()), |value| (-1, value));
+    let unsigned = unsigned.strip_prefix('+').unwrap_or(unsigned);
+    let (mantissa, exponent) = split_exponent(unsigned)?;
+    let (whole, fractional) = mantissa
+        .split_once('.')
+        .map_or((mantissa, ""), |(whole, fractional)| (whole, fractional));
+    if whole.is_empty() && fractional.is_empty() {
+        return None;
+    }
+    if !whole
+        .bytes()
+        .chain(fractional.bytes())
+        .all(|byte| byte.is_ascii_digit())
+    {
+        return None;
+    }
+    let mut digits = String::with_capacity(whole.len().saturating_add(fractional.len()));
+    digits.push_str(whole);
+    digits.push_str(fractional);
+    let mut digits = digits.trim_start_matches('0').to_owned();
+    if digits.is_empty() {
+        return Some(DecimalNumber::zero());
+    }
+    let fractional_len = i64::try_from(fractional.len()).ok()?;
+    let mut scale = fractional_len.checked_sub(exponent)?;
+    while digits.ends_with('0') {
+        digits.pop();
+        scale = scale.checked_sub(1)?;
+    }
+    Some(DecimalNumber {
+        sign,
+        digits,
+        scale,
+    })
+}
+
+fn split_exponent(value: &str) -> Option<(&str, i64)> {
+    let Some(index) = value.find(['e', 'E']) else {
+        return Some((value, 0));
+    };
+    let mantissa = value.get(..index)?;
+    let exponent = value.get(index.saturating_add(1)..)?.parse::<i64>().ok()?;
+    Some((mantissa, exponent))
+}
+
+fn compare_decimal_numbers(left: &DecimalNumber, right: &DecimalNumber) -> Ordering {
+    match left.sign.cmp(&right.sign) {
+        Ordering::Equal if left.sign == 0 => Ordering::Equal,
+        Ordering::Equal if left.sign > 0 => compare_decimal_magnitude(left, right),
+        Ordering::Equal => compare_decimal_magnitude(right, left),
+        ordering => ordering,
+    }
+}
+
+fn compare_decimal_magnitude(left: &DecimalNumber, right: &DecimalNumber) -> Ordering {
+    let left_magnitude = decimal_magnitude(left);
+    let right_magnitude = decimal_magnitude(right);
+    match left_magnitude.cmp(&right_magnitude) {
+        Ordering::Equal => compare_scaled_digits(left, right),
+        ordering => ordering,
+    }
+}
+
+fn decimal_magnitude(value: &DecimalNumber) -> i64 {
+    i64::try_from(value.digits.len())
+        .ok()
+        .and_then(|len| len.checked_sub(value.scale))
+        .unwrap_or(i64::MAX)
+}
+
+fn compare_scaled_digits(left: &DecimalNumber, right: &DecimalNumber) -> Ordering {
+    let common_scale = left.scale.max(right.scale);
+    let left_scaled = scaled_digits(left, common_scale);
+    let right_scaled = scaled_digits(right, common_scale);
+    match (left_scaled, right_scaled) {
+        (Some(left), Some(right)) => left.cmp(&right),
+        _ => left.digits.cmp(&right.digits),
+    }
+}
+
+fn scaled_digits(value: &DecimalNumber, common_scale: i64) -> Option<String> {
+    let zeros = common_scale.checked_sub(value.scale)?;
+    let zeros = usize::try_from(zeros).ok()?;
+    let mut digits = String::with_capacity(value.digits.len().checked_add(zeros)?);
+    digits.push_str(&value.digits);
+    digits.extend(std::iter::repeat_n('0', zeros));
+    Some(digits)
 }
 
 fn format_number(value: f64) -> String {
@@ -1074,10 +1495,58 @@ fn format_number(value: f64) -> String {
     value.to_string()
 }
 
+fn numeric_bound_op(op: &str) -> Option<NumericBoundOp> {
+    match op {
+        "<" => Some(NumericBoundOp::LessThan),
+        "<=" => Some(NumericBoundOp::LessThanOrEqual),
+        ">" => Some(NumericBoundOp::GreaterThan),
+        ">=" => Some(NumericBoundOp::GreaterThanOrEqual),
+        _ => None,
+    }
+}
+
+fn number_satisfies_bounds(value: &str, bounds: &[NumericBound]) -> Result<bool, Bottom> {
+    let Some(number) = parse_decimal_number(value) else {
+        return Err(Bottom::new(
+            "cue.eval.invalid_number",
+            format!("invalid numeric operand `{value}`"),
+            None,
+            false,
+        ));
+    };
+    for bound in bounds {
+        let Some(limit) = parse_decimal_number(&bound.value) else {
+            return Err(Bottom::new(
+                "cue.eval.invalid_number",
+                format!("invalid numeric bound `{}`", bound.value),
+                None,
+                false,
+            ));
+        };
+        let ordering = compare_decimal_numbers(&number, &limit);
+        let satisfied = match bound.op {
+            NumericBoundOp::LessThan => ordering == Ordering::Less,
+            NumericBoundOp::LessThanOrEqual => {
+                ordering == Ordering::Less || ordering == Ordering::Equal
+            }
+            NumericBoundOp::GreaterThan => ordering == Ordering::Greater,
+            NumericBoundOp::GreaterThanOrEqual => {
+                ordering == Ordering::Greater || ordering == Ordering::Equal
+            }
+        };
+        if !satisfied {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
 fn evaluate_index(base: EvaluatedValue, index: EvaluatedValue) -> EvaluatedValue {
     match base {
         EvaluatedValue::List(items) => evaluate_list_index(&items, index),
-        EvaluatedValue::Struct(fields) => evaluate_struct_index(&fields, index),
+        EvaluatedValue::Struct(fields) | EvaluatedValue::ClosedStruct(fields) => {
+            evaluate_struct_index(&fields, index)
+        }
         _ => EvaluatedValue::Bottom(Bottom::new(
             "cue.eval.invalid_index_base",
             "cannot index non-list or non-struct value",
@@ -1210,6 +1679,23 @@ fn unify_values(left: EvaluatedValue, right: EvaluatedValue, span: Option<Span>)
         (EvaluatedValue::Bottom(bottom), _) | (_, EvaluatedValue::Bottom(bottom)) => {
             EvaluatedValue::Bottom(bottom)
         }
+        (EvaluatedValue::Default(left), right) => unify_values(*left, right, span),
+        (left, EvaluatedValue::Default(right)) => unify_values(left, *right, span),
+        (EvaluatedValue::Disjunction(left), EvaluatedValue::Disjunction(right)) => {
+            unify_disjunctions(left, &right, span)
+        }
+        (EvaluatedValue::Disjunction(disjuncts), value)
+        | (value, EvaluatedValue::Disjunction(disjuncts)) => {
+            unify_disjunction_with_value(disjuncts, &value, span)
+        }
+        (EvaluatedValue::NumericConstraint(mut left), EvaluatedValue::NumericConstraint(right)) => {
+            left.extend(right);
+            EvaluatedValue::NumericConstraint(left)
+        }
+        (EvaluatedValue::NumericConstraint(bounds), EvaluatedValue::Number(value))
+        | (EvaluatedValue::Number(value), EvaluatedValue::NumericConstraint(bounds)) => {
+            unify_numeric_constraint(value, &bounds)
+        }
         (
             EvaluatedValue::RegexConstraint { pattern, negated },
             value @ (EvaluatedValue::String(_) | EvaluatedValue::Bytes(_)),
@@ -1236,7 +1722,9 @@ fn unify_values(left: EvaluatedValue, right: EvaluatedValue, span: Option<Span>)
         (EvaluatedValue::Bool(left), EvaluatedValue::Bool(right)) if left == right => {
             EvaluatedValue::Bool(left)
         }
-        (EvaluatedValue::Number(left), EvaluatedValue::Number(right)) if left == right => {
+        (EvaluatedValue::Number(left), EvaluatedValue::Number(right))
+            if equal_numbers(&left, &right) =>
+        {
             EvaluatedValue::Number(left)
         }
         (EvaluatedValue::String(left), EvaluatedValue::String(right)) if left == right => {
@@ -1244,6 +1732,13 @@ fn unify_values(left: EvaluatedValue, right: EvaluatedValue, span: Option<Span>)
         }
         (EvaluatedValue::Bytes(left), EvaluatedValue::Bytes(right)) if left == right => {
             EvaluatedValue::Bytes(left)
+        }
+        (EvaluatedValue::ClosedStruct(left), EvaluatedValue::ClosedStruct(right)) => {
+            unify_closed_structs(left, right, span)
+        }
+        (EvaluatedValue::ClosedStruct(left), EvaluatedValue::Struct(right))
+        | (EvaluatedValue::Struct(right), EvaluatedValue::ClosedStruct(left)) => {
+            unify_closed_struct(left, right, span)
         }
         (EvaluatedValue::Struct(left), EvaluatedValue::Struct(right)) => {
             EvaluatedValue::Struct(unify_structs(left, right, span))
@@ -1260,6 +1755,61 @@ fn unify_values(left: EvaluatedValue, right: EvaluatedValue, span: Option<Span>)
     }
 }
 
+fn unify_disjunctions(
+    left: Vec<Disjunct>,
+    right: &[Disjunct],
+    span: Option<Span>,
+) -> EvaluatedValue {
+    let mut unified = Vec::new();
+    for left_disjunct in left {
+        for right_disjunct in right {
+            let value = unify_values(
+                (*left_disjunct.value).clone(),
+                (*right_disjunct.value).clone(),
+                span,
+            );
+            if !matches!(value, EvaluatedValue::Bottom(_)) {
+                unified.push(Disjunct {
+                    value: Box::new(value),
+                    default: left_disjunct.default || right_disjunct.default,
+                });
+            }
+        }
+    }
+    collapse_disjunction(EvaluatedValue::Disjunction(unique_disjuncts(unified)))
+}
+
+fn unify_disjunction_with_value(
+    disjuncts: Vec<Disjunct>,
+    value: &EvaluatedValue,
+    span: Option<Span>,
+) -> EvaluatedValue {
+    let mut unified = Vec::new();
+    for disjunct in disjuncts {
+        let value = unify_values((*disjunct.value).clone(), value.clone(), span);
+        if !matches!(value, EvaluatedValue::Bottom(_)) {
+            unified.push(Disjunct {
+                value: Box::new(value),
+                default: disjunct.default,
+            });
+        }
+    }
+    collapse_disjunction(EvaluatedValue::Disjunction(unique_disjuncts(unified)))
+}
+
+fn unify_numeric_constraint(value: String, bounds: &[NumericBound]) -> EvaluatedValue {
+    match number_satisfies_bounds(&value, bounds) {
+        Ok(true) => EvaluatedValue::Number(value),
+        Ok(false) => EvaluatedValue::Bottom(Bottom::new(
+            "cue.eval.numeric_bound_mismatch",
+            format!("invalid value {value} for numeric constraint"),
+            None,
+            false,
+        )),
+        Err(bottom) => EvaluatedValue::Bottom(bottom),
+    }
+}
+
 fn unify_structs(
     mut left: IndexMap<String, EvaluatedValue>,
     right: IndexMap<String, EvaluatedValue>,
@@ -1273,6 +1823,41 @@ fn unify_structs(
         }
     }
     left
+}
+
+fn unify_closed_struct(
+    mut closed: IndexMap<String, EvaluatedValue>,
+    open: IndexMap<String, EvaluatedValue>,
+    span: Option<Span>,
+) -> EvaluatedValue {
+    for (label, right_value) in open {
+        let Some(left_value) = closed.shift_remove(&label) else {
+            return EvaluatedValue::Bottom(Bottom::new(
+                "cue.eval.closed_struct",
+                format!("field `{label}` not allowed in closed struct"),
+                span,
+                false,
+            ));
+        };
+        closed.insert(label, unify_values(left_value, right_value, span));
+    }
+    EvaluatedValue::ClosedStruct(closed)
+}
+
+fn unify_closed_structs(
+    left: IndexMap<String, EvaluatedValue>,
+    right: IndexMap<String, EvaluatedValue>,
+    span: Option<Span>,
+) -> EvaluatedValue {
+    if left.len() != right.len() || left.keys().any(|label| !right.contains_key(label)) {
+        return EvaluatedValue::Bottom(Bottom::new(
+            "cue.eval.closed_struct",
+            "closed structs have incompatible fields",
+            span,
+            false,
+        ));
+    }
+    EvaluatedValue::ClosedStruct(unify_structs(left, right, span))
 }
 
 fn conflict_bottom(
@@ -1304,18 +1889,34 @@ fn intersect_kinds(left: ValueKind, right: ValueKind) -> Option<ValueKind> {
 
 fn kind_accepts_value(kind: ValueKind, value: &EvaluatedValue) -> bool {
     match (kind, value) {
-        (ValueKind::Number, EvaluatedValue::Number(value)) => parse_number(value).is_some(),
+        (ValueKind::Number, EvaluatedValue::Number(value)) => parse_decimal_number(value).is_some(),
         (ValueKind::Int, EvaluatedValue::Number(value)) => parse_integer(value).is_some(),
         (ValueKind::Float, EvaluatedValue::Number(value)) => parse_float(value).is_some(),
-        (ValueKind::Top, _)
+        (ValueKind::Number, EvaluatedValue::NumericConstraint(_))
+        | (ValueKind::Top, _)
         | (ValueKind::Null, EvaluatedValue::Null)
         | (ValueKind::Bool, EvaluatedValue::Bool(_))
         | (ValueKind::String, EvaluatedValue::String(_) | EvaluatedValue::RegexConstraint { .. })
         | (ValueKind::Bytes, EvaluatedValue::Bytes(_))
-        | (ValueKind::Struct, EvaluatedValue::Struct(_))
+        | (ValueKind::Struct, EvaluatedValue::Struct(_) | EvaluatedValue::ClosedStruct(_))
         | (ValueKind::List, EvaluatedValue::List(_))
         | (ValueKind::Bottom, EvaluatedValue::Bottom(_)) => true,
         _ => false,
+    }
+}
+
+fn disjunction_kind(disjuncts: &[Disjunct]) -> ValueKind {
+    let mut kinds = disjuncts
+        .iter()
+        .map(|disjunct| disjunct.value.kind())
+        .filter(|kind| *kind != ValueKind::Bottom);
+    let Some(first) = kinds.next() else {
+        return ValueKind::Bottom;
+    };
+    if kinds.all(|kind| kind == first) {
+        first
+    } else {
+        ValueKind::Top
     }
 }
 
@@ -1347,7 +1948,10 @@ fn validate_value(
     report: &mut DiagnosticReport,
 ) {
     match value {
-        EvaluatedValue::Top | EvaluatedValue::Kind(_) | EvaluatedValue::RegexConstraint { .. }
+        EvaluatedValue::Top
+        | EvaluatedValue::Kind(_)
+        | EvaluatedValue::NumericConstraint(_)
+        | EvaluatedValue::RegexConstraint { .. }
             if options.concrete =>
         {
             report.push(Diagnostic::new(
@@ -1363,7 +1967,11 @@ fn validate_value(
             format!("{path}: {}", bottom.message),
             bottom.span,
         )),
-        EvaluatedValue::Struct(fields) => {
+        EvaluatedValue::Default(value) => validate_value(value, options, path, report),
+        EvaluatedValue::Disjunction(disjuncts) => {
+            validate_disjunction(disjuncts, options, path, report);
+        }
+        EvaluatedValue::Struct(fields) | EvaluatedValue::ClosedStruct(fields) => {
             for (label, field) in fields {
                 let field_path = format!("{path}.{label}");
                 validate_value(field, options, &field_path, report);
@@ -1383,6 +1991,33 @@ fn validate_value(
         }
         _ => {}
     }
+}
+
+fn validate_disjunction(
+    disjuncts: &[Disjunct],
+    options: ValidateOptions,
+    path: &str,
+    report: &mut DiagnosticReport,
+) {
+    if !options.concrete {
+        return;
+    }
+    let defaults = disjuncts
+        .iter()
+        .filter(|disjunct| disjunct.default)
+        .collect::<Vec<_>>();
+    if defaults.len() == 1
+        && let Some(disjunct) = defaults.first()
+    {
+        validate_value(&disjunct.value, options, path, report);
+        return;
+    }
+    report.push(Diagnostic::new(
+        Severity::Error,
+        "cue.eval.incomplete",
+        format!("{path}: incomplete disjunction"),
+        None,
+    ));
 }
 
 fn builtin_kind(name: &str) -> Option<ValueKind> {

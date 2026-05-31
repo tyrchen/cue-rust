@@ -219,10 +219,26 @@ impl<'tokens> Parser<'tokens> {
             "cue.parse.expected_colon",
             "expected ':' after field label",
         );
-        let value = self.parse_expr(0);
+        let value = self.parse_field_value();
         self.skip_attributes();
         let span = merge_span(label.span(), value.span());
         Decl::Field(FieldDecl { label, value, span })
+    }
+
+    fn parse_field_value(&mut self) -> Expr {
+        if !self.at_chained_field_start() {
+            return self.parse_expr(0);
+        }
+
+        let label = self.parse_label();
+        self.expect_kind(
+            TokenKind::Colon,
+            "cue.parse.expected_colon",
+            "expected ':' after chained field label",
+        );
+        let value = self.parse_field_value();
+        let span = merge_span(label.span(), value.span());
+        Expr::Struct(vec![Decl::Field(FieldDecl { label, value, span })], span)
     }
 
     fn parse_label(&mut self) -> Label {
@@ -397,7 +413,10 @@ impl<'tokens> Parser<'tokens> {
             return Expr::Default(Box::new(expr), star);
         }
         if self.at(TokenKind::Operator)
-            && matches!(self.peek_text(), Some("-" | "+" | "!" | "=~" | "!~"))
+            && matches!(
+                self.peek_text(),
+                Some("-" | "+" | "!" | "=~" | "!~" | "<" | "<=" | ">" | ">=")
+            )
         {
             let Some(operator) = self.bump() else {
                 return Expr::Bad(self.current_span());
@@ -626,6 +645,14 @@ impl<'tokens> Parser<'tokens> {
         )
     }
 
+    fn at_chained_field_start(&self) -> bool {
+        self.at_label_start()
+            && self
+                .tokens
+                .get(self.cursor.saturating_add(1))
+                .is_some_and(|token| token.kind() == TokenKind::Colon)
+    }
+
     fn at(&self, kind: TokenKind) -> bool {
         self.peek_kind() == Some(kind)
     }
@@ -733,6 +760,21 @@ mod tests {
     }
 
     #[test]
+    fn test_should_parse_chained_field_shorthand() {
+        let result = parse_bytes("test.cue", b"d: e: f: \"jam\"\n", ParseConfig::default());
+        assert!(!result.diagnostics().has_errors());
+        let tree = result.ast().map(crate::AstFile::to_debug_tree);
+        assert_eq!(
+            Some(
+                "file\n  field d\n    struct\n      field e\n        struct\n          field f\n            \
+                 string \"jam\""
+                    .to_owned(),
+            ),
+            tree,
+        );
+    }
+
+    #[test]
     fn test_should_parse_slice_expression() {
         let result = parse_bytes("test.cue", b"x: [1, 2, 3][1:]\n", ParseConfig::default());
         assert!(!result.diagnostics().has_errors());
@@ -775,6 +817,26 @@ constraint: =~"[a-z]+"
             Some(
                 "file\n  field match\n    binary =~\n      string \"foo\"\n      string \
                  \"[a-z]+\"\n  field constraint\n    unary =~\n      string \"[a-z]+\""
+                    .to_owned(),
+            ),
+            tree,
+        );
+    }
+
+    #[test]
+    fn test_should_parse_numeric_bound_expressions() {
+        let result = parse_bytes(
+            "test.cue",
+            br"x: >=2 & <=3
+",
+            ParseConfig::default(),
+        );
+        assert!(!result.diagnostics().has_errors());
+        let tree = result.ast().map(crate::AstFile::to_debug_tree);
+        assert_eq!(
+            Some(
+                "file\n  field x\n    binary &\n      unary >=\n        number 2\n      unary \
+                 <=\n        number 3"
                     .to_owned(),
             ),
             tree,

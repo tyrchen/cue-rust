@@ -41,7 +41,7 @@ bench-smoke:
 
 check: build test fmt-check clippy doc audit deny
 
-ci: check check-agent-sync
+ci: check check-agent-sync fuzz-smoke
 
 check-agent-sync:
 	@cmp -s CLAUDE.md AGENTS.md || { \

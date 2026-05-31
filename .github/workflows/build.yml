@@ -43,6 +43,8 @@ jobs:
         uses: taiki-e/install-action@cargo-llvm-cov
       - name: install nextest
         uses: taiki-e/install-action@nextest
+      - name: Install cargo-fuzz
+        uses: taiki-e/install-action@cargo-fuzz
       - uses: Swatinem/rust-cache@v2
       # - name: Install Protoc
       #   uses: arduino/setup-protoc@v2
@@ -54,6 +56,8 @@ jobs:
         run: cargo clippy --all-targets --all-features --tests --benches -- -D warnings
       - name: Execute rust tests
         run: cargo nextest run --all-features
+      - name: Run fuzz smoke targets
+        run: make fuzz-smoke
       - name: Generate a changelog
         uses: orhun/git-cliff-action@v4
         id: git-cliff

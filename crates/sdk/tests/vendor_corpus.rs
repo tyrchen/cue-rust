@@ -164,6 +164,8 @@ async fn test_should_run_supported_upstream_core_eval_fixtures() -> TestResult {
     let context = Context::new();
     assert_upstream_references(&context, &root).await?;
     assert_upstream_regex(&context, &root).await?;
+    assert_upstream_disjunctions_and_defaults(&context, &root).await?;
+    assert_upstream_aggregate_builtins(&context, &root).await?;
     assert_upstream_object_unification(&context, &root).await?;
     assert_upstream_list_index_and_slice(&context, &root).await?;
     assert_upstream_selecting(&context, &root).await?;
@@ -267,6 +269,97 @@ async fn assert_upstream_regex(context: &Context, root: &Path) -> TestResult {
             .lookup_path(&["b3"])?
             .validate(ValidateOptions::default())
             .is_err(),
+    );
+    Ok(())
+}
+
+async fn assert_upstream_disjunctions_and_defaults(context: &Context, root: &Path) -> TestResult {
+    let disjunctions = TxtarArchive::read(
+        &root.join("vendors/cue/cue/testdata/basicrewrite/014_disjunctions.txtar"),
+    )
+    .await?;
+    let value = context.compile_source(
+        "basicrewrite/014_disjunctions/in.cue",
+        disjunctions.file("in.cue")?,
+    )?;
+    for (path, expected) in [("o2", "1"), ("o3", "2"), ("i1", "\"c\"")] {
+        let evaluated = value.lookup_path(&[path])?.evaluate()?.resolve_defaults();
+        match expected {
+            "\"c\"" => assert_eq!(EvaluatedValue::String("c".to_owned()), evaluated),
+            number => assert_eq!(EvaluatedValue::Number(number.to_owned()), evaluated),
+        }
+    }
+    assert_eq!(ValueKind::Number, value.lookup_path(&["o7"])?.kind()?);
+    assert_eq!(
+        EvaluatedValue::Number("2".to_owned()),
+        value.lookup_path(&["m1"])?.evaluate()?.resolve_defaults(),
+    );
+
+    let default_builtins =
+        TxtarArchive::read(&root.join("vendors/cue/cue/testdata/builtins/default.txtar")).await?;
+    let default_value = context.compile_source(
+        "builtins/default/in.cue",
+        selected_lines(
+            default_builtins.file("in.cue")?,
+            &[
+                "Len:", "Close:", "And:", "Or:", "Div:", "Mod:", "Quo:", "Rem:",
+            ],
+        ),
+    )?;
+    for (path, expected) in [
+        ("Len", "3"),
+        ("And", "1"),
+        ("Or", "1"),
+        ("Div", "2"),
+        ("Mod", "1"),
+        ("Quo", "2"),
+        ("Rem", "1"),
+    ] {
+        assert_eq!(
+            EvaluatedValue::Number(expected.to_owned()),
+            default_value.lookup_path(&[path])?.evaluate()?,
+        );
+    }
+    let EvaluatedValue::ClosedStruct(fields) = default_value.lookup_path(&["Close"])?.evaluate()?
+    else {
+        return Err("expected close default to resolve to an empty struct".into());
+    };
+    assert!(fields.is_empty());
+    Ok(())
+}
+
+async fn assert_upstream_aggregate_builtins(context: &Context, root: &Path) -> TestResult {
+    let and_fixture =
+        TxtarArchive::read(&root.join("vendors/cue/cue/testdata/builtins/and.txtar")).await?;
+    let and_value = context.compile_source(
+        "builtins/and/in.cue",
+        selected_lines(and_fixture.file("in.cue")?, &["merge:"]),
+    )?;
+    assert_eq!(
+        EvaluatedValue::Number("1".to_owned()),
+        and_value.lookup_path(&["merge"])?.evaluate()?,
+    );
+
+    let or_fixture =
+        TxtarArchive::read(&root.join("vendors/cue/cue/testdata/builtins/or.txtar")).await?;
+    let or_value = context.compile_source(
+        "builtins/or/in.cue",
+        selected_lines(
+            or_fixture.file("in.cue")?,
+            &["unwrap:", "unique1:", "unique2:"],
+        ),
+    )?;
+    assert_eq!(
+        EvaluatedValue::Number("1".to_owned()),
+        or_value.lookup_path(&["unwrap"])?.evaluate()?,
+    );
+    assert_eq!(
+        ValueKind::Number,
+        or_value.lookup_path(&["unique1"])?.kind()?
+    );
+    assert_eq!(
+        ValueKind::Struct,
+        or_value.lookup_path(&["unique2"])?.kind()?
     );
     Ok(())
 }

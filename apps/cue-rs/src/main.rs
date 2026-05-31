@@ -166,13 +166,13 @@ async fn write_encoded_files(
     let mut saw_error = false;
     let loaded = compile_cue_args(&ctx, files).await?;
     saw_error |= loaded.saw_diagnostics;
-    for value in loaded.values {
+    for loaded_value in loaded.values {
         if expressions.is_empty() {
-            saw_error |= write_value(&value, output_format, concrete)?;
+            saw_error |= write_value(&loaded_value.value, output_format, concrete)?;
             continue;
         }
         for expression in expressions {
-            let selected = select_expression(&value, expression)?;
+            let selected = select_expression(&ctx, &loaded_value, expression)?;
             saw_error |= write_value(&selected, output_format, concrete)?;
         }
     }
@@ -203,10 +203,20 @@ fn write_value(value: &Value, output_format: OutputFormat, concrete: bool) -> Re
     Ok(saw_error)
 }
 
-fn select_expression(value: &Value, expression: &str) -> Result<Value> {
-    let path = parse_expression_path(expression)?;
-    value
-        .lookup_path(&path)
+fn select_expression(
+    ctx: &cue_rust::Context,
+    loaded_value: &LoadedValue,
+    expression: &str,
+) -> Result<Value> {
+    if expression.trim().is_empty() {
+        return Err(anyhow!("expression path must not be empty"));
+    }
+    if let Ok(path) = parse_expression_path(expression)
+        && let Ok(selected) = loaded_value.value.lookup_path(&path)
+    {
+        return Ok(selected);
+    }
+    ctx.compile_instance_expression(&loaded_value.instance, expression)
         .map_err(|error| anyhow!("failed to select expression `{expression}`: {error}"))
 }
 
@@ -241,7 +251,7 @@ async fn vet_files(
     if loaded.saw_diagnostics {
         return Ok(ExitCode::from(1));
     }
-    let Some(schema) = unify_all(loaded.values)? else {
+    let Some(schema) = unify_all(loaded.values.into_iter().map(|loaded| loaded.value))? else {
         return Ok(ExitCode::from(1));
     };
 
@@ -276,8 +286,14 @@ async fn vet_files(
 
 #[derive(Debug)]
 struct LoadedValues {
-    values: Vec<Value>,
+    values: Vec<LoadedValue>,
     saw_diagnostics: bool,
+}
+
+#[derive(Debug)]
+struct LoadedValue {
+    instance: cue_rust::BuildInstance,
+    value: Value,
 }
 
 async fn compile_cue_args(ctx: &cue_rust::Context, files: &[PathBuf]) -> Result<LoadedValues> {
@@ -288,7 +304,7 @@ async fn compile_cue_args(ctx: &cue_rust::Context, files: &[PathBuf]) -> Result<
     let mut saw_diagnostics = false;
     for instance in instances {
         match ctx.build_instance(&instance) {
-            Ok(value) => values.push(value),
+            Ok(value) => values.push(LoadedValue { instance, value }),
             Err(CueError::Diagnostics(report)) => {
                 write_diagnostics(&report)?;
                 saw_diagnostics = true;
@@ -330,7 +346,7 @@ fn paths_to_utf8(files: &[PathBuf]) -> Result<Vec<Utf8PathBuf>> {
         .collect()
 }
 
-fn unify_all(values: Vec<Value>) -> Result<Option<Value>> {
+fn unify_all(values: impl IntoIterator<Item = Value>) -> Result<Option<Value>> {
     let mut values = values.into_iter();
     let Some(mut unified) = values.next() else {
         return Ok(None);
