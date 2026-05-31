@@ -347,6 +347,9 @@ fn evaluated_to_json(value: EvaluatedValue) -> Result<JsonValue, EncodeError> {
             .collect::<Result<Vec<_>, _>>()
             .map(JsonValue::Array),
         EvaluatedValue::Kind(_) => unsupported(Encoding::Json, "incomplete kind constraint"),
+        EvaluatedValue::RegexConstraint { .. } => {
+            unsupported(Encoding::Json, "incomplete regex constraint")
+        }
         EvaluatedValue::Bottom(bottom) => unsupported(Encoding::Json, bottom.message),
         _ => unsupported(Encoding::Json, "unsupported value"),
     }
@@ -373,6 +376,9 @@ fn evaluated_to_toml(value: EvaluatedValue) -> Result<TomlValue, EncodeError> {
             .collect::<Result<Vec<_>, _>>()
             .map(TomlValue::Array),
         EvaluatedValue::Kind(_) => unsupported(Encoding::Toml, "incomplete kind constraint"),
+        EvaluatedValue::RegexConstraint { .. } => {
+            unsupported(Encoding::Toml, "incomplete regex constraint")
+        }
         EvaluatedValue::Bottom(bottom) => unsupported(Encoding::Toml, bottom.message),
         _ => unsupported(Encoding::Toml, "unsupported value"),
     }
@@ -399,6 +405,9 @@ fn evaluated_to_yaml(value: EvaluatedValue) -> Result<YamlValue, EncodeError> {
             .collect::<Result<Vec<_>, _>>()
             .map(YamlValue::Sequence),
         EvaluatedValue::Kind(_) => unsupported(Encoding::Yaml, "incomplete kind constraint"),
+        EvaluatedValue::RegexConstraint { .. } => {
+            unsupported(Encoding::Yaml, "incomplete regex constraint")
+        }
         EvaluatedValue::Bottom(bottom) => unsupported(Encoding::Yaml, bottom.message),
         _ => unsupported(Encoding::Yaml, "unsupported value"),
     }
@@ -453,6 +462,10 @@ fn format_cue_value(value: &EvaluatedValue) -> String {
             format!("[{rendered}]")
         }
         EvaluatedValue::Kind(kind) => kind.to_string(),
+        EvaluatedValue::RegexConstraint { pattern, negated } => {
+            let op = if *negated { "!~" } else { "=~" };
+            format!("{op}{pattern:?}")
+        }
         EvaluatedValue::Bottom(bottom) => format!("_|_({:?})", bottom.message),
         _ => "_|_(\"unsupported value\")".to_owned(),
     }

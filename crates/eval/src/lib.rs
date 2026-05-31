@@ -10,9 +10,13 @@ use cue_rust_adt::{
 };
 use cue_rust_source::{Diagnostic, DiagnosticReport, Severity, Span};
 use indexmap::IndexMap;
+use regex::{Regex, RegexBuilder};
 use thiserror::Error;
 
 const DEFAULT_MAX_EVALUATION_DEPTH: u32 = 128;
+const MAX_REGEX_PATTERN_BYTES: usize = 4 * 1024;
+const REGEX_SIZE_LIMIT_BYTES: usize = 1024 * 1024;
+const REGEX_DFA_SIZE_LIMIT_BYTES: usize = 1024 * 1024;
 
 /// Evaluation options for a single value operation.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -110,6 +114,13 @@ pub enum EvaluatedValue {
     List(Vec<EvaluatedValue>),
     /// Builtin kind constraint.
     Kind(ValueKind),
+    /// Regular-expression string constraint.
+    RegexConstraint {
+        /// Regex pattern text.
+        pattern: String,
+        /// Whether the pattern is negated.
+        negated: bool,
+    },
     /// Semantic bottom.
     Bottom(Bottom),
 }
@@ -123,7 +134,7 @@ impl EvaluatedValue {
             Self::Null => ValueKind::Null,
             Self::Bool(_) => ValueKind::Bool,
             Self::Number(_) => ValueKind::Number,
-            Self::String(_) => ValueKind::String,
+            Self::String(_) | Self::RegexConstraint { .. } => ValueKind::String,
             Self::Bytes(_) => ValueKind::Bytes,
             Self::Struct(_) => ValueKind::Struct,
             Self::List(_) => ValueKind::List,
@@ -581,6 +592,10 @@ fn evaluate_unary(op: &str, value: EvaluatedValue) -> EvaluatedValue {
         }
         ("-", EvaluatedValue::Number(value)) => EvaluatedValue::Number(format!("-{value}")),
         ("!", EvaluatedValue::Bool(value)) => EvaluatedValue::Bool(!value),
+        ("=~" | "!~", EvaluatedValue::String(pattern)) => EvaluatedValue::RegexConstraint {
+            pattern,
+            negated: op == "!~",
+        },
         (op, value) => EvaluatedValue::Bottom(Bottom::new(
             "cue.eval.invalid_unary",
             format!("cannot apply unary `{op}` to {}", value.kind()),
@@ -723,6 +738,8 @@ fn evaluate_binary(op: &str, left: EvaluatedValue, right: EvaluatedValue) -> Eva
         "|" | "||" => choose_disjunction(left, right),
         "==" => evaluate_equality(&left, &right, false),
         "!=" => evaluate_equality(&left, &right, true),
+        "=~" => evaluate_regex_binary(left, right, false),
+        "!~" => evaluate_regex_binary(left, right, true),
         "+" => evaluate_add(left, right),
         "*" => evaluate_multiply(left, right),
         "-" | "/" | "<" | "<=" | ">" | ">=" => evaluate_numeric_binary(op, left, right),
@@ -802,6 +819,16 @@ fn values_equal(left: &EvaluatedValue, right: &EvaluatedValue) -> Result<bool, B
         (EvaluatedValue::String(left), EvaluatedValue::String(right)) => Ok(left == right),
         (EvaluatedValue::Bytes(left), EvaluatedValue::Bytes(right)) => Ok(left == right),
         (EvaluatedValue::Kind(left), EvaluatedValue::Kind(right)) => Ok(left == right),
+        (
+            EvaluatedValue::RegexConstraint {
+                pattern: left_pattern,
+                negated: left_negated,
+            },
+            EvaluatedValue::RegexConstraint {
+                pattern: right_pattern,
+                negated: right_negated,
+            },
+        ) => Ok(left_pattern == right_pattern && left_negated == right_negated),
         _ => Ok(false),
     }
 }
@@ -857,6 +884,64 @@ fn choose_disjunction(left: EvaluatedValue, right: EvaluatedValue) -> EvaluatedV
         EvaluatedValue::Bottom(_) => right,
         value => value,
     }
+}
+
+fn evaluate_regex_binary(
+    left: EvaluatedValue,
+    right: EvaluatedValue,
+    negated: bool,
+) -> EvaluatedValue {
+    let EvaluatedValue::String(pattern) = right else {
+        return EvaluatedValue::Bottom(Bottom::new(
+            "cue.eval.invalid_regex_pattern",
+            "regex operator requires a string pattern",
+            None,
+            false,
+        ));
+    };
+    let Some(input) = regex_input(left) else {
+        return EvaluatedValue::Bottom(Bottom::new(
+            "cue.eval.invalid_regex_input",
+            "regex operator requires string or bytes input",
+            None,
+            false,
+        ));
+    };
+    match compile_regex(&pattern) {
+        Ok(regex) => EvaluatedValue::Bool(regex.is_match(&input) != negated),
+        Err(bottom) => EvaluatedValue::Bottom(bottom),
+    }
+}
+
+fn regex_input(value: EvaluatedValue) -> Option<String> {
+    match value {
+        EvaluatedValue::String(value) => Some(value),
+        EvaluatedValue::Bytes(value) => String::from_utf8(value).ok(),
+        _ => None,
+    }
+}
+
+fn compile_regex(pattern: &str) -> Result<Regex, Bottom> {
+    if pattern.len() > MAX_REGEX_PATTERN_BYTES {
+        return Err(Bottom::new(
+            "cue.eval.regex_too_large",
+            format!("regex pattern exceeds {MAX_REGEX_PATTERN_BYTES} byte limit"),
+            None,
+            false,
+        ));
+    }
+    RegexBuilder::new(pattern)
+        .size_limit(REGEX_SIZE_LIMIT_BYTES)
+        .dfa_size_limit(REGEX_DFA_SIZE_LIMIT_BYTES)
+        .build()
+        .map_err(|error| {
+            Bottom::new(
+                "cue.eval.invalid_regex",
+                format!("invalid regex pattern: {error}"),
+                None,
+                false,
+            )
+        })
 }
 
 fn evaluate_add(left: EvaluatedValue, right: EvaluatedValue) -> EvaluatedValue {
@@ -1125,6 +1210,14 @@ fn unify_values(left: EvaluatedValue, right: EvaluatedValue, span: Option<Span>)
         (EvaluatedValue::Bottom(bottom), _) | (_, EvaluatedValue::Bottom(bottom)) => {
             EvaluatedValue::Bottom(bottom)
         }
+        (
+            EvaluatedValue::RegexConstraint { pattern, negated },
+            value @ (EvaluatedValue::String(_) | EvaluatedValue::Bytes(_)),
+        )
+        | (
+            value @ (EvaluatedValue::String(_) | EvaluatedValue::Bytes(_)),
+            EvaluatedValue::RegexConstraint { pattern, negated },
+        ) => unify_regex_constraint(value, &pattern, negated),
         (EvaluatedValue::Kind(left), EvaluatedValue::Kind(right)) => {
             if let Some(kind) = intersect_kinds(left, right) {
                 EvaluatedValue::Kind(kind)
@@ -1217,12 +1310,33 @@ fn kind_accepts_value(kind: ValueKind, value: &EvaluatedValue) -> bool {
         (ValueKind::Top, _)
         | (ValueKind::Null, EvaluatedValue::Null)
         | (ValueKind::Bool, EvaluatedValue::Bool(_))
-        | (ValueKind::String, EvaluatedValue::String(_))
+        | (ValueKind::String, EvaluatedValue::String(_) | EvaluatedValue::RegexConstraint { .. })
         | (ValueKind::Bytes, EvaluatedValue::Bytes(_))
         | (ValueKind::Struct, EvaluatedValue::Struct(_))
         | (ValueKind::List, EvaluatedValue::List(_))
         | (ValueKind::Bottom, EvaluatedValue::Bottom(_)) => true,
         _ => false,
+    }
+}
+
+fn unify_regex_constraint(value: EvaluatedValue, pattern: &str, negated: bool) -> EvaluatedValue {
+    let Some(input) = regex_input(value.clone()) else {
+        return EvaluatedValue::Bottom(Bottom::new(
+            "cue.eval.invalid_regex_input",
+            "regex constraint requires string or bytes input",
+            None,
+            false,
+        ));
+    };
+    match compile_regex(pattern) {
+        Ok(regex) if regex.is_match(&input) != negated => value,
+        Ok(_) => EvaluatedValue::Bottom(Bottom::new(
+            "cue.eval.regex_mismatch",
+            format!("invalid value {input:?} for regex constraint"),
+            None,
+            false,
+        )),
+        Err(bottom) => EvaluatedValue::Bottom(bottom),
     }
 }
 
@@ -1233,7 +1347,9 @@ fn validate_value(
     report: &mut DiagnosticReport,
 ) {
     match value {
-        EvaluatedValue::Top | EvaluatedValue::Kind(_) if options.concrete => {
+        EvaluatedValue::Top | EvaluatedValue::Kind(_) | EvaluatedValue::RegexConstraint { .. }
+            if options.concrete =>
+        {
             report.push(Diagnostic::new(
                 Severity::Error,
                 "cue.eval.incomplete",

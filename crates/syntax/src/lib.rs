@@ -313,7 +313,9 @@ impl<'src> Scanner<'src> {
                 b',' | b';' => self.scan_explicit_comma(),
                 b'.' => self.scan_dot(),
                 b'*' => self.scan_single(TokenKind::Star),
-                b'+' | b'-' | b'=' | b'!' | b'<' | b'>' | b'&' | b'|' => self.scan_operator(),
+                b'+' | b'-' | b'=' | b'!' | b'<' | b'>' | b'&' | b'|' | b'~' => {
+                    self.scan_operator();
+                }
                 _ => self.scan_bad_byte(),
             }
         }
@@ -537,7 +539,10 @@ impl<'src> Scanner<'src> {
     fn scan_operator(&mut self) {
         let start = self.offset;
         self.advance_while(|byte| {
-            matches!(byte, b'+' | b'-' | b'=' | b'!' | b'<' | b'>' | b'&' | b'|')
+            matches!(
+                byte,
+                b'+' | b'-' | b'=' | b'!' | b'<' | b'>' | b'&' | b'|' | b'~'
+            )
         });
         let text = self.text(start, self.offset).to_owned();
         self.push_token(TokenKind::Operator, start, self.offset, text, false);
@@ -666,6 +671,26 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(vec!["1", "2", "1e-2"], number_texts);
         assert!(tokens.iter().any(|token| token.text() == "+"));
+    }
+
+    #[test]
+    fn test_should_scan_regex_operators() {
+        let result = scan_bytes(
+            "test.cue",
+            br#"x: "foo" =~ "f.*"
+y: !~"bar"
+"#,
+            ParseConfig::default(),
+        );
+        assert!(!result.diagnostics().has_errors());
+        let operators = result
+            .tokens()
+            .iter()
+            .filter(|token| token.kind() == TokenKind::Operator)
+            .map(Token::text)
+            .collect::<Vec<_>>();
+        assert!(operators.contains(&"=~"));
+        assert!(operators.contains(&"!~"));
     }
 
     #[test]

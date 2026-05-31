@@ -361,6 +361,7 @@ dependencies = [
  "cue-rust-adt",
  "cue-rust-source",
  "indexmap",
+ "regex",
  "thiserror",
 ]
 

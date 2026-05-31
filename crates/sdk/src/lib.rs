@@ -238,6 +238,36 @@ mod tests {
     }
 
     #[test]
+    fn test_should_evaluate_regex_match_and_constraints() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let context = Context::new();
+        let value = context.compile_source(
+            "test.cue",
+            "match: \"foo\" =~ \"[a-z]{3}\"\nnotMatch: \"foo\" !~ \"[0-9]+\"\nconstrained: \
+             =~\"[a-z]+\"\nconstrained: \"cue\"\nbad: =~\"[0-9]+\"\nbad: \"cue\"\n",
+        )?;
+        assert_eq!(
+            EvaluatedValue::Bool(true),
+            value.lookup_path(&["match"])?.evaluate()?,
+        );
+        assert_eq!(
+            EvaluatedValue::Bool(true),
+            value.lookup_path(&["notMatch"])?.evaluate()?,
+        );
+        assert_eq!(
+            EvaluatedValue::String("cue".to_owned()),
+            value.lookup_path(&["constrained"])?.evaluate()?,
+        );
+        assert!(
+            value
+                .lookup_path(&["bad"])?
+                .validate(ValidateOptions::default())
+                .is_err()
+        );
+        Ok(())
+    }
+
+    #[test]
     fn test_should_resolve_nested_field_before_outer_field()
     -> Result<(), Box<dyn std::error::Error>> {
         let context = Context::new();

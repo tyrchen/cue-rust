@@ -396,7 +396,9 @@ impl<'tokens> Parser<'tokens> {
             let expr = self.parse_prefix();
             return Expr::Default(Box::new(expr), star);
         }
-        if self.at(TokenKind::Operator) && matches!(self.peek_text(), Some("-" | "+" | "!")) {
+        if self.at(TokenKind::Operator)
+            && matches!(self.peek_text(), Some("-" | "+" | "!" | "=~" | "!~"))
+        {
             let Some(operator) = self.bump() else {
                 return Expr::Bad(self.current_span());
             };
@@ -529,7 +531,9 @@ impl<'tokens> Parser<'tokens> {
             TokenKind::Operator => match self.peek_text()? {
                 "&" | "&&" => Some((self.peek_text()?.to_owned(), 3, 4)),
                 "|" | "||" => Some((self.peek_text()?.to_owned(), 1, 2)),
-                "==" | "!=" | "<" | "<=" | ">" | ">=" => Some((self.peek_text()?.to_owned(), 5, 6)),
+                "==" | "!=" | "=~" | "!~" | "<" | "<=" | ">" | ">=" => {
+                    Some((self.peek_text()?.to_owned(), 5, 6))
+                }
                 "+" | "-" => Some((self.peek_text()?.to_owned(), 7, 8)),
                 "/" => Some((self.peek_text()?.to_owned(), 9, 10)),
                 _ => None,
@@ -750,6 +754,27 @@ mod tests {
         assert_eq!(
             Some(
                 "file\n  field x\n    call\n      ident len\n      list\n        number 1\n        number 2"
+                    .to_owned(),
+            ),
+            tree,
+        );
+    }
+
+    #[test]
+    fn test_should_parse_regex_expressions() {
+        let result = parse_bytes(
+            "test.cue",
+            br#"match: "foo" =~ "[a-z]+"
+constraint: =~"[a-z]+"
+"#,
+            ParseConfig::default(),
+        );
+        assert!(!result.diagnostics().has_errors());
+        let tree = result.ast().map(crate::AstFile::to_debug_tree);
+        assert_eq!(
+            Some(
+                "file\n  field match\n    binary =~\n      string \"foo\"\n      string \
+                 \"[a-z]+\"\n  field constraint\n    unary =~\n      string \"[a-z]+\""
                     .to_owned(),
             ),
             tree,

@@ -162,6 +162,8 @@ async fn test_should_run_supported_upstream_cli_script_fixtures() -> TestResult 
 async fn test_should_run_supported_upstream_core_eval_fixtures() -> TestResult {
     let root = workspace_root();
     let context = Context::new();
+    assert_upstream_references(&context, &root).await?;
+    assert_upstream_regex(&context, &root).await?;
     assert_upstream_object_unification(&context, &root).await?;
     assert_upstream_list_index_and_slice(&context, &root).await?;
     assert_upstream_selecting(&context, &root).await?;
@@ -206,6 +208,65 @@ async fn assert_upstream_object_unification(context: &Context, root: &Path) -> T
             .lookup_path(&["e"])?
             .validate(ValidateOptions::default())
             .is_err()
+    );
+    Ok(())
+}
+
+async fn assert_upstream_references(context: &Context, root: &Path) -> TestResult {
+    let references =
+        TxtarArchive::read(&root.join("vendors/cue/cue/testdata/basicrewrite/009_reference.txtar"))
+            .await?;
+    let value = context.compile_source(
+        "basicrewrite/009_reference/in.cue",
+        references.file("in.cue")?,
+    )?;
+    assert_eq!(
+        EvaluatedValue::Number("2".to_owned()),
+        value.lookup_path(&["a"])?.evaluate()?,
+    );
+    assert_eq!(
+        EvaluatedValue::Number("3".to_owned()),
+        value.lookup_path(&["d", "e"])?.evaluate()?,
+    );
+    assert_eq!(
+        EvaluatedValue::Number("1".to_owned()),
+        value.lookup_path(&["e", "f", "v"])?.evaluate()?,
+    );
+    Ok(())
+}
+
+async fn assert_upstream_regex(context: &Context, root: &Path) -> TestResult {
+    let regexp =
+        TxtarArchive::read(&root.join("vendors/cue/cue/testdata/basicrewrite/001_regexp.txtar"))
+            .await?;
+    let regex_source = selected_lines(
+        regexp.file("in.cue")?,
+        &["c1:", "c2:", "c3:", "c4:", "b1:", "b2:", "b3:", "b4:"],
+    );
+    let value = context.compile_source("basicrewrite/001_regexp/in.cue", regex_source)?;
+    for (path, expected) in [("c1", true), ("c2", true), ("c3", false), ("c4", true)] {
+        assert_eq!(
+            EvaluatedValue::Bool(expected),
+            value.lookup_path(&[path])?.evaluate()?,
+        );
+    }
+    assert_eq!(
+        EvaluatedValue::String("a".to_owned()),
+        value.lookup_path(&["b1"])?.evaluate()?,
+    );
+    assert_eq!(
+        EvaluatedValue::String("foo".to_owned()),
+        value.lookup_path(&["b2"])?.evaluate()?,
+    );
+    assert_eq!(
+        EvaluatedValue::String("foo".to_owned()),
+        value.lookup_path(&["b4"])?.evaluate()?,
+    );
+    assert!(
+        value
+            .lookup_path(&["b3"])?
+            .validate(ValidateOptions::default())
+            .is_err(),
     );
     Ok(())
 }
