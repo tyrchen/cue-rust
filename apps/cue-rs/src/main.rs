@@ -79,7 +79,7 @@ async fn scan_files(files: &[PathBuf]) -> Result<ExitCode> {
             .await
             .with_context(|| format!("failed to read input file {}", file.display()))?;
         let name = file.to_string_lossy().into_owned();
-        let result = ctx.scan_source_bytes(name, &bytes);
+        let result = ctx.parse_source_bytes(name, &bytes);
         for diagnostic in result.diagnostics().diagnostics() {
             let mut stderr = io::stderr().lock();
             writeln!(
@@ -90,6 +90,12 @@ async fn scan_files(files: &[PathBuf]) -> Result<ExitCode> {
                 diagnostic,
             )
             .context("failed to write diagnostic")?;
+        }
+        if !result.diagnostics().has_errors()
+            && let Some(ast) = result.ast()
+        {
+            let mut stdout = io::stdout().lock();
+            writeln!(stdout, "{}", ast.to_debug_tree()).context("failed to write parse tree")?;
         }
         saw_error |= result.diagnostics().has_errors();
     }

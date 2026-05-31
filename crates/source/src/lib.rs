@@ -19,6 +19,9 @@ pub const DEFAULT_MAX_SOURCE_BYTES: usize = 1_048_576;
 pub struct SourceId(NonZeroU32);
 
 impl SourceId {
+    /// First synthetic source id, useful for parser-produced recovery spans.
+    pub const FIRST: Self = Self(NonZeroU32::MIN);
+
     /// Creates a source id from a one-based integer.
     ///
     /// # Errors
@@ -50,6 +53,16 @@ pub struct Span {
 }
 
 impl Span {
+    /// Creates an infallible point span at `offset`.
+    #[must_use]
+    pub fn point(source: SourceId, offset: ByteOffset) -> Self {
+        Self {
+            source,
+            start: offset,
+            end: offset,
+        }
+    }
+
     /// Creates a checked span.
     ///
     /// # Errors
@@ -354,6 +367,11 @@ impl DiagnosticReport {
     /// Adds a diagnostic.
     pub fn push(&mut self, diagnostic: Diagnostic) {
         self.diagnostics.push(diagnostic);
+    }
+
+    /// Appends diagnostics from another report.
+    pub fn extend(&mut self, diagnostics: impl IntoIterator<Item = Diagnostic>) {
+        self.diagnostics.extend(diagnostics);
     }
 
     /// Returns true when at least one error diagnostic exists.

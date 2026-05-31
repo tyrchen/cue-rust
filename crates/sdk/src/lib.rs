@@ -6,7 +6,10 @@
 pub use cue_rust_eval::ValidateOptions;
 pub use cue_rust_loader::{LoadConfig, PackageSelector};
 pub use cue_rust_source::{SourceError, SourceFile, SourceLimits};
-pub use cue_rust_syntax::{ParseConfig, ParseMode, ParsedSource, ScanResult, Token, TokenKind};
+pub use cue_rust_syntax::{
+    AstFile, Decl, Expr, FieldDecl, ImportDecl, Label, LetDecl, PackageClause, ParseConfig,
+    ParseMode, ParseResult, ParsedSource, ScanResult, Token, TokenKind,
+};
 
 /// Current SDK version.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -30,18 +33,17 @@ impl Context {
         Self { parse_config }
     }
 
-    /// Validates and records a named source for syntax processing.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`SourceError`] when the source name or content violates the
-    /// configured limits.
-    pub fn parse_source(
-        &self,
-        name: impl Into<String>,
-        content: impl Into<String>,
-    ) -> Result<ParsedSource, SourceError> {
-        SourceFile::named(name, content, self.parse_config.limits()).map(ParsedSource::new)
+    /// Parses a named source into a tolerant AST and diagnostics.
+    #[must_use]
+    pub fn parse_source(&self, name: impl Into<String>, content: impl Into<String>) -> ParseResult {
+        let content = content.into();
+        cue_rust_syntax::parse_bytes(name, content.as_bytes(), self.parse_config)
+    }
+
+    /// Parses raw source bytes into a tolerant AST and diagnostics.
+    #[must_use]
+    pub fn parse_source_bytes(&self, name: impl Into<String>, bytes: &[u8]) -> ParseResult {
+        cue_rust_syntax::parse_bytes(name, bytes, self.parse_config)
     }
 
     /// Scans raw source bytes into syntax tokens and diagnostics.

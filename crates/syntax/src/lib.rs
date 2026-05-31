@@ -8,6 +8,12 @@ use cue_rust_source::{
     SourceLimits, Span,
 };
 
+mod ast;
+mod parser;
+
+pub use ast::{AstFile, Decl, Expr, FieldDecl, ImportDecl, Label, LetDecl, PackageClause};
+pub use parser::{ParseResult, parse_bytes};
+
 const SCANNER_SOURCE_ID: u32 = 1;
 
 /// Parser mode requested by the SDK or CLI.
