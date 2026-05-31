@@ -1,8 +1,33 @@
 build:
-	@cargo build
+	@cargo build --workspace --all-targets
 
 test:
-	@cargo nextest run --all-features
+	@cargo test --workspace --all-targets
+
+fmt:
+	@cargo +nightly fmt
+
+fmt-check:
+	@cargo +nightly fmt -- --check
+
+clippy:
+	@cargo clippy --workspace --all-targets -- -D warnings
+
+clippy-pedantic:
+	@cargo clippy --workspace --all-targets -- -D warnings -W clippy::pedantic
+
+doc:
+	@RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps
+
+audit:
+	@cargo audit
+
+deny:
+	@cargo deny check
+
+check: build test fmt-check clippy doc audit deny
+
+ci: check check-agent-sync
 
 check-agent-sync:
 	@cmp -s CLAUDE.md AGENTS.md || { \
@@ -30,4 +55,4 @@ release:
 update-submodule:
 	@git submodule update --init --recursive --remote
 
-.PHONY: build test check-agent-sync release update-submodule
+.PHONY: build test fmt fmt-check clippy clippy-pedantic doc audit deny check ci check-agent-sync release update-submodule

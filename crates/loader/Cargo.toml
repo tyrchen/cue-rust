@@ -1,0 +1,20 @@
+[package]
+name = "cue-rust-loader"
+description = "Package, module, overlay, and data-file loader for cue-rust."
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+license.workspace = true
+documentation.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+
+[dependencies]
+camino.workspace = true
+cue-rust-source.workspace = true
+cue-rust-syntax.workspace = true
+thiserror.workspace = true
+
+[lints]
+workspace = true

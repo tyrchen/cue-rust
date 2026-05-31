@@ -1,10 +1,6 @@
 [package]
-name = "cue-rust-core"
-description = """
-
-"""
-categories = ["development-tools"]
-keywords = []
+name = "cue-rust-eval"
+description = "Evaluator, validation, and export profiles for cue-rust."
 version.workspace = true
 authors.workspace = true
 edition.workspace = true
@@ -12,10 +8,11 @@ license.workspace = true
 documentation.workspace = true
 repository.workspace = true
 homepage.workspace = true
+readme.workspace = true
 
 [dependencies]
-anyhow.workspace = true
-serde.workspace = true
-serde_json.workspace = true
+cue-rust-adt.workspace = true
 thiserror.workspace = true
-tokio.workspace = true
+
+[lints]
+workspace = true

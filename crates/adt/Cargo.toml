@@ -1,8 +1,6 @@
 [package]
-name = "cue-rust-server"
-description = """
-
-"""
+name = "cue-rust-adt"
+description = "Semantic graph and runtime data structures for cue-rust."
 version.workspace = true
 authors.workspace = true
 edition.workspace = true
@@ -10,8 +8,10 @@ license.workspace = true
 documentation.workspace = true
 repository.workspace = true
 homepage.workspace = true
+readme.workspace = true
 
 [dependencies]
-cue-rust-core.workspace = true
-anyhow.workspace = true
-tokio.workspace = true
+indexmap.workspace = true
+
+[lints]
+workspace = true

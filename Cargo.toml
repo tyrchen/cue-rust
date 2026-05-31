@@ -4,20 +4,42 @@ resolver = "3"
 
 [workspace.package]
 version = "0.1.0"
-authors = ["Your Name <YourName@yourdomain.com>"]
+authors = ["Tyr Chen <tchen@tyrchen.com>"]
 edition = "2024"
 license = "MIT"
-documentation = "https://docs.rs/"
-repository = "https://github.com/TODO"
-homepage = "https://github.com/TODO"
+documentation = "https://docs.rs/cue-rust"
+repository = "https://github.com/tyrchen/cue-rust"
+homepage = "https://github.com/tyrchen/cue-rust"
 readme = "README.md"
 
 [workspace.dependencies]
 anyhow = "1.0.102"
+camino = "1.2.2"
+clap = { version = "4.6.1", features = ["derive"] }
+indexmap = "2.14.0"
+miette = { version = "7.6.0", features = ["fancy"] }
 serde = { version = "1.0.228", features = ["derive"] }
-serde_json = "1.0.142"
+serde_json = { version = "1.0.150", features = ["arbitrary_precision"] }
 thiserror = "2.0.18"
 tokio = { version = "1.52", features = ["rt", "rt-multi-thread", "macros"] }
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter", "fmt"] }
 
 # workspace crates
-cue-rust-core = { path = "crates/core" }
+cue-rust-adt = { path = "crates/adt" }
+cue-rust-compiler = { path = "crates/compiler" }
+cue-rust-encoding = { path = "crates/encoding" }
+cue-rust-eval = { path = "crates/eval" }
+cue-rust-loader = { path = "crates/loader" }
+cue-rust-source = { path = "crates/source" }
+cue-rust-syntax = { path = "crates/syntax" }
+cue-rust = { path = "crates/sdk" }
+
+[workspace.lints.rust]
+missing_debug_implementations = "warn"
+missing_docs = "warn"
+rust_2024_compatibility = { level = "warn", priority = -1 }
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+pedantic = "warn"
