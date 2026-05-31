@@ -61,6 +61,16 @@ async fn test_should_generate_compatibility_report() -> Result<(), Box<dyn Error
         ),
     ));
 
+    let call_value = context.compile_source("call.cue", "x: len([1, 2, 3])\n")?;
+    cases.push(case(
+        "eval/builtin-len-call",
+        "semantic",
+        pass_status(
+            call_value.lookup_path(&["x"])?.evaluate()?
+                == cue_rust::EvaluatedValue::Number("3".to_owned()),
+        ),
+    ));
+
     let schema = context.compile_source("schema.cue", "name: string\n")?;
     let data = context.compile_source("data.cue", "name: \"cue\"\n")?;
     cases.push(case(
