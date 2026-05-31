@@ -332,6 +332,54 @@ mod tests {
     }
 
     #[test]
+    fn test_should_evaluate_integer_arithmetic_builtins() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let context = Context::new();
+        let value = context.compile_source(
+            "test.cue",
+            "q: quo(-5, 2)\nr: rem(-5, 2)\nd: div(-5, 2)\nm: mod(-5, 2)\n",
+        )?;
+        assert_eq!(
+            EvaluatedValue::Number("-2".to_owned()),
+            value.lookup_path(&["q"])?.evaluate()?,
+        );
+        assert_eq!(
+            EvaluatedValue::Number("-1".to_owned()),
+            value.lookup_path(&["r"])?.evaluate()?,
+        );
+        assert_eq!(
+            EvaluatedValue::Number("-3".to_owned()),
+            value.lookup_path(&["d"])?.evaluate()?,
+        );
+        assert_eq!(
+            EvaluatedValue::Number("1".to_owned()),
+            value.lookup_path(&["m"])?.evaluate()?,
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_should_report_integer_arithmetic_builtin_errors()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let context = Context::new();
+        let non_integer = context.compile_source("test.cue", "x: quo(2.0, 1)\n")?;
+        assert!(
+            non_integer
+                .lookup_path(&["x"])?
+                .validate(ValidateOptions::default())
+                .is_err()
+        );
+        let division_by_zero = context.compile_source("test.cue", "x: div(1, 0)\n")?;
+        assert!(
+            division_by_zero
+                .lookup_path(&["x"])?
+                .validate(ValidateOptions::default())
+                .is_err()
+        );
+        Ok(())
+    }
+
+    #[test]
     fn test_should_report_len_builtin_arity() -> Result<(), Box<dyn std::error::Error>> {
         let context = Context::new();
         let value = context.compile_source("test.cue", "x: len()\n")?;

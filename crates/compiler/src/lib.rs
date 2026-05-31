@@ -457,7 +457,7 @@ fn is_builtin_kind(name: &str) -> bool {
 }
 
 fn is_builtin_name(name: &str) -> bool {
-    is_builtin_kind(name) || matches!(name, "len")
+    is_builtin_kind(name) || matches!(name, "div" | "len" | "mod" | "quo" | "rem")
 }
 
 #[cfg(test)]

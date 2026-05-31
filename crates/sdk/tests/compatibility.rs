@@ -26,14 +26,36 @@ struct CompatibilityCase {
 async fn test_should_generate_compatibility_report() -> Result<(), Box<dyn Error>> {
     let context = Context::new();
     let mut cases = Vec::new();
+    push_parser_cases(&context, &mut cases);
+    push_semantic_cases(&context, &mut cases)?;
+    push_encoding_cases(&context, &mut cases)?;
+    push_security_cases(&mut cases);
+    push_known_gap_cases(&context, &mut cases);
 
+    let report = CompatibilityReport {
+        version: cue_rust::VERSION,
+        cases,
+    };
+    let output = serde_json::to_vec_pretty(&report)?;
+    let output_dir = workspace_target_dir().join("compatibility");
+    fs::create_dir_all(&output_dir).await?;
+    fs::write(output_dir.join("core.json"), output).await?;
+    Ok(())
+}
+
+fn push_parser_cases(context: &Context, cases: &mut Vec<CompatibilityCase>) {
     let parsed = context.parse_source("syntax.cue", "package p\nx: 1\n");
     cases.push(case(
         "syntax/package-field",
         "parser",
         pass_status(!parsed.diagnostics().has_errors()),
     ));
+}
 
+fn push_semantic_cases(
+    context: &Context,
+    cases: &mut Vec<CompatibilityCase>,
+) -> Result<(), Box<dyn Error>> {
     let value = context.compile_source("eval.cue", "x: 1\ny: x\n")?;
     cases.push(case(
         "eval/top-level-reference",
@@ -81,6 +103,15 @@ async fn test_should_generate_compatibility_report() -> Result<(), Box<dyn Error
         ),
     ));
 
+    let integer_builtin = context.compile_source("integer.cue", "x: div(-5, 2)\n")?;
+    cases.push(case(
+        "eval/integer-div-builtin",
+        "semantic",
+        pass_status(
+            integer_builtin.lookup_path(&["x"])?.evaluate()?
+                == cue_rust::EvaluatedValue::Number("-3".to_owned()),
+        ),
+    ));
     let schema = context.compile_source("schema.cue", "name: string\n")?;
     let data = context.compile_source("data.cue", "name: \"cue\"\n")?;
     cases.push(case(
@@ -93,7 +124,13 @@ async fn test_should_generate_compatibility_report() -> Result<(), Box<dyn Error
                 .is_ok(),
         ),
     ));
+    Ok(())
+}
 
+fn push_encoding_cases(
+    context: &Context,
+    cases: &mut Vec<CompatibilityCase>,
+) -> Result<(), Box<dyn Error>> {
     let export_value = context.compile_source("export.cue", "x: 1\n")?;
     let mut options = EncodeOptions::default();
     options.encoding = Encoding::Json;
@@ -102,7 +139,10 @@ async fn test_should_generate_compatibility_report() -> Result<(), Box<dyn Error
         "encoding",
         pass_status(encode_value(&export_value, options)?.contains("\"x\": 1")),
     ));
+    Ok(())
+}
 
+fn push_security_cases(cases: &mut Vec<CompatibilityCase>) {
     let mut limited_decode = DecodeOptions::default();
     limited_decode.max_depth = 0;
     cases.push(case(
@@ -110,7 +150,9 @@ async fn test_should_generate_compatibility_report() -> Result<(), Box<dyn Error
         "security",
         pass_status(decode_bytes(Encoding::Json, br#"{"x":1}"#, limited_decode).is_err()),
     ));
+}
 
+fn push_known_gap_cases(context: &Context, cases: &mut Vec<CompatibilityCase>) {
     cases.push(case(
         "compile/import-diagnostic",
         "loader-gap",
@@ -126,16 +168,6 @@ async fn test_should_generate_compatibility_report() -> Result<(), Box<dyn Error
         "loader-gap",
         "expected-fail",
     ));
-
-    let report = CompatibilityReport {
-        version: cue_rust::VERSION,
-        cases,
-    };
-    let output = serde_json::to_vec_pretty(&report)?;
-    let output_dir = workspace_target_dir().join("compatibility");
-    fs::create_dir_all(&output_dir).await?;
-    fs::write(output_dir.join("core.json"), output).await?;
-    Ok(())
 }
 
 fn case(name: &'static str, category: &'static str, status: &'static str) -> CompatibilityCase {

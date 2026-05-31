@@ -165,6 +165,7 @@ async fn test_should_run_supported_upstream_core_eval_fixtures() -> TestResult {
     assert_upstream_object_unification(&context, &root).await?;
     assert_upstream_list_index_and_slice(&context, &root).await?;
     assert_upstream_arithmetic(&context, &root).await?;
+    assert_upstream_integer_arithmetic(&context, &root).await?;
     assert_upstream_len(&context, &root).await?;
     assert_upstream_strings_and_bytes(&context, &root).await?;
     assert_upstream_escaping(&context, &root).await?;
@@ -255,6 +256,49 @@ async fn assert_upstream_arithmetic(context: &Context, root: &Path) -> TestResul
         EvaluatedValue::Number("4".to_owned()),
         arithmetic_value.lookup_path(&["div1"])?.evaluate()?,
     );
+    Ok(())
+}
+
+async fn assert_upstream_integer_arithmetic(context: &Context, root: &Path) -> TestResult {
+    let integer_arithmetic = TxtarArchive::read(
+        &root.join("vendors/cue/cue/testdata/basicrewrite/003_integer-specific_arithmetic.txtar"),
+    )
+    .await?;
+    let value = context.compile_source(
+        "basicrewrite/003_integer-specific_arithmetic/in.cue",
+        integer_arithmetic.file("in.cue")?,
+    )?;
+    for (path, expected) in [
+        ("q1", "2"),
+        ("q2", "-2"),
+        ("q3", "-2"),
+        ("q4", "2"),
+        ("r1", "1"),
+        ("r2", "1"),
+        ("r3", "-1"),
+        ("r4", "-1"),
+        ("d1", "2"),
+        ("d2", "-2"),
+        ("d3", "-3"),
+        ("d4", "3"),
+        ("m1", "1"),
+        ("m2", "1"),
+        ("m3", "1"),
+        ("m4", "1"),
+    ] {
+        assert_eq!(
+            EvaluatedValue::Number(expected.to_owned()),
+            value.lookup_path(&[path])?.evaluate()?,
+        );
+    }
+    for path in ["qe1", "qe2", "re1", "re2", "de1", "de2", "me1", "me2"] {
+        assert!(
+            value
+                .lookup_path(&[path])?
+                .validate(ValidateOptions::default())
+                .is_err(),
+        );
+    }
     Ok(())
 }
 

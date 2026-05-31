@@ -587,6 +587,7 @@ fn evaluate_unary(op: &str, value: EvaluatedValue) -> EvaluatedValue {
 
 fn evaluate_builtin_call(name: &str, args: Vec<EvaluatedValue>) -> EvaluatedValue {
     match name {
+        "div" | "mod" | "quo" | "rem" => evaluate_integer_builtin(name, args),
         "len" => evaluate_len(args),
         _ => EvaluatedValue::Bottom(Bottom::new(
             "cue.eval.unsupported_builtin",
@@ -595,6 +596,87 @@ fn evaluate_builtin_call(name: &str, args: Vec<EvaluatedValue>) -> EvaluatedValu
             false,
         )),
     }
+}
+
+fn evaluate_integer_builtin(name: &str, args: Vec<EvaluatedValue>) -> EvaluatedValue {
+    if args.len() != 2 {
+        return EvaluatedValue::Bottom(Bottom::new(
+            "cue.eval.invalid_builtin_arity",
+            format!("{name} expects 2 arguments, got {}", args.len()),
+            None,
+            false,
+        ));
+    }
+    let mut args = args.into_iter();
+    let Some(left) = args.next().and_then(integer_arg) else {
+        return invalid_integer_builtin_arg(name);
+    };
+    let Some(right) = args.next().and_then(integer_arg) else {
+        return invalid_integer_builtin_arg(name);
+    };
+    if right == 0 {
+        return EvaluatedValue::Bottom(Bottom::new(
+            "cue.eval.division_by_zero",
+            "division by zero",
+            None,
+            false,
+        ));
+    }
+
+    let result = match name {
+        "quo" => left.checked_div(right),
+        "rem" => left.checked_rem(right),
+        "div" => floor_div(left, right),
+        "mod" => floor_div(left, right).and_then(|quotient| {
+            quotient
+                .checked_mul(right)
+                .and_then(|product| left.checked_sub(product))
+        }),
+        _ => None,
+    };
+    result.map_or_else(
+        || {
+            EvaluatedValue::Bottom(Bottom::new(
+                "cue.eval.integer_overflow",
+                format!("{name} overflowed integer range"),
+                None,
+                false,
+            ))
+        },
+        |value| EvaluatedValue::Number(value.to_string()),
+    )
+}
+
+fn floor_div(left: i128, right: i128) -> Option<i128> {
+    let divisor = right.checked_abs()?;
+    let quotient = left.checked_div(divisor)?;
+    let remainder = left.checked_rem(divisor)?;
+    let unsigned_quotient = if remainder < 0 {
+        quotient.checked_sub(1)?
+    } else {
+        quotient
+    };
+    if right < 0 {
+        unsigned_quotient.checked_neg()
+    } else {
+        Some(unsigned_quotient)
+    }
+}
+
+fn integer_arg(value: EvaluatedValue) -> Option<i128> {
+    let EvaluatedValue::Number(value) = value else {
+        return None;
+    };
+    parse_integer(&value)
+}
+
+fn invalid_integer_builtin_arg(name: &str) -> EvaluatedValue {
+    EvaluatedValue::Bottom(Bottom::new(
+        "cue.eval.invalid_builtin_arg",
+        format!("{name} arguments must be integers"),
+        None,
+        false,
+    ))
 }
 
 fn evaluate_len(args: Vec<EvaluatedValue>) -> EvaluatedValue {
@@ -827,6 +909,13 @@ fn parse_number(value: &str) -> Option<f64> {
         .parse::<f64>()
         .ok()
         .filter(|value| value.is_finite())
+}
+
+fn parse_integer(value: &str) -> Option<i128> {
+    if value.contains(['.', 'e', 'E']) {
+        return None;
+    }
+    value.replace('_', "").parse::<i128>().ok()
 }
 
 fn format_number(value: f64) -> String {
