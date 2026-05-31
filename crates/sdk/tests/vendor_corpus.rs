@@ -165,6 +165,7 @@ async fn test_should_run_supported_upstream_core_eval_fixtures() -> TestResult {
     assert_upstream_object_unification(&context, &root).await?;
     assert_upstream_list_index_and_slice(&context, &root).await?;
     assert_upstream_selecting(&context, &root).await?;
+    assert_upstream_basic_types(&context, &root).await?;
     assert_upstream_arithmetic(&context, &root).await?;
     assert_upstream_integer_arithmetic(&context, &root).await?;
     assert_upstream_booleans(&context, &root).await?;
@@ -267,6 +268,33 @@ async fn assert_upstream_selecting(context: &Context, root: &Path) -> TestResult
                 .is_err(),
         );
     }
+    Ok(())
+}
+
+async fn assert_upstream_basic_types(context: &Context, root: &Path) -> TestResult {
+    let basic_types = TxtarArchive::read(
+        &root.join("vendors/cue/cue/testdata/basicrewrite/006_basic_type.txtar"),
+    )
+    .await?;
+    let value = context.compile_source(
+        "basicrewrite/006_basic_type/in.cue",
+        basic_types.file("in.cue")?,
+    )?;
+    for (path, expected) in [
+        ("a", EvaluatedValue::Number("1".to_owned())),
+        ("b", EvaluatedValue::Number("1".to_owned())),
+        ("c", EvaluatedValue::Number("1.0".to_owned())),
+        ("e", EvaluatedValue::String("4".to_owned())),
+        ("f", EvaluatedValue::Bool(true)),
+    ] {
+        assert_eq!(expected, value.lookup_path(&[path])?.evaluate()?);
+    }
+    assert!(
+        value
+            .lookup_path(&["d"])?
+            .validate(ValidateOptions::default())
+            .is_err(),
+    );
     Ok(())
 }
 

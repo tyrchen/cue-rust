@@ -72,6 +72,10 @@ pub enum ValueKind {
     Bool,
     /// Number value.
     Number,
+    /// Integer number constraint.
+    Int,
+    /// Floating-point number constraint.
+    Float,
     /// String value.
     String,
     /// Bytes value.
@@ -918,6 +922,13 @@ fn parse_integer(value: &str) -> Option<i128> {
     value.replace('_', "").parse::<i128>().ok()
 }
 
+fn parse_float(value: &str) -> Option<f64> {
+    if !value.contains(['.', 'e', 'E']) {
+        return None;
+    }
+    parse_number(value)
+}
+
 fn format_number(value: f64) -> String {
     if is_zero(value.fract()) {
         return format!("{value:.0}");
@@ -1061,8 +1072,15 @@ fn unify_values(left: EvaluatedValue, right: EvaluatedValue, span: Option<Span>)
         (EvaluatedValue::Bottom(bottom), _) | (_, EvaluatedValue::Bottom(bottom)) => {
             EvaluatedValue::Bottom(bottom)
         }
+        (EvaluatedValue::Kind(left), EvaluatedValue::Kind(right)) => {
+            if let Some(kind) = intersect_kinds(left, right) {
+                EvaluatedValue::Kind(kind)
+            } else {
+                conflict_bottom(left, right, span, "cue.eval.kind_conflict")
+            }
+        }
         (EvaluatedValue::Kind(kind), value) | (value, EvaluatedValue::Kind(kind)) => {
-            if value.kind() == kind {
+            if kind_accepts_value(kind, &value) {
                 value
             } else {
                 conflict_bottom(kind, value.kind(), span, "cue.eval.kind_conflict")
@@ -1125,6 +1143,36 @@ fn conflict_bottom(
     ))
 }
 
+fn intersect_kinds(left: ValueKind, right: ValueKind) -> Option<ValueKind> {
+    match (left, right) {
+        (left, right) if left == right => Some(left),
+        (ValueKind::Number, ValueKind::Int) | (ValueKind::Int, ValueKind::Number) => {
+            Some(ValueKind::Int)
+        }
+        (ValueKind::Number, ValueKind::Float) | (ValueKind::Float, ValueKind::Number) => {
+            Some(ValueKind::Float)
+        }
+        _ => None,
+    }
+}
+
+fn kind_accepts_value(kind: ValueKind, value: &EvaluatedValue) -> bool {
+    match (kind, value) {
+        (ValueKind::Number, EvaluatedValue::Number(value)) => parse_number(value).is_some(),
+        (ValueKind::Int, EvaluatedValue::Number(value)) => parse_integer(value).is_some(),
+        (ValueKind::Float, EvaluatedValue::Number(value)) => parse_float(value).is_some(),
+        (ValueKind::Top, _)
+        | (ValueKind::Null, EvaluatedValue::Null)
+        | (ValueKind::Bool, EvaluatedValue::Bool(_))
+        | (ValueKind::String, EvaluatedValue::String(_))
+        | (ValueKind::Bytes, EvaluatedValue::Bytes(_))
+        | (ValueKind::Struct, EvaluatedValue::Struct(_))
+        | (ValueKind::List, EvaluatedValue::List(_))
+        | (ValueKind::Bottom, EvaluatedValue::Bottom(_)) => true,
+        _ => false,
+    }
+}
+
 fn validate_value(
     value: &EvaluatedValue,
     options: ValidateOptions,
@@ -1171,8 +1219,11 @@ fn validate_value(
 fn builtin_kind(name: &str) -> Option<ValueKind> {
     match name {
         "bool" => Some(ValueKind::Bool),
-        "int" | "number" => Some(ValueKind::Number),
+        "bytes" => Some(ValueKind::Bytes),
+        "float" => Some(ValueKind::Float),
+        "int" => Some(ValueKind::Int),
         "null" => Some(ValueKind::Null),
+        "number" => Some(ValueKind::Number),
         "string" => Some(ValueKind::String),
         _ => None,
     }
@@ -1195,6 +1246,8 @@ impl fmt::Display for ValueKind {
             Self::Null => "null",
             Self::Bool => "bool",
             Self::Number => "number",
+            Self::Int => "int",
+            Self::Float => "float",
             Self::String => "string",
             Self::Bytes => "bytes",
             Self::Struct => "struct",

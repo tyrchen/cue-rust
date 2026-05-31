@@ -170,6 +170,32 @@ mod tests {
     }
 
     #[test]
+    fn test_should_evaluate_numeric_builtin_kind_constraints()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let context = Context::new();
+        let value = context.compile_source(
+            "test.cue",
+            "integer: 1 & int\nfloating: 1.0 & float\nnarrowed: number & int\nbad: int & float\n",
+        )?;
+        assert_eq!(
+            EvaluatedValue::Number("1".to_owned()),
+            value.lookup_path(&["integer"])?.evaluate()?,
+        );
+        assert_eq!(
+            EvaluatedValue::Number("1.0".to_owned()),
+            value.lookup_path(&["floating"])?.evaluate()?,
+        );
+        assert_eq!(ValueKind::Int, value.lookup_path(&["narrowed"])?.kind()?);
+        assert!(
+            value
+                .lookup_path(&["bad"])?
+                .validate(ValidateOptions::default())
+                .is_err()
+        );
+        Ok(())
+    }
+
+    #[test]
     fn test_should_resolve_nested_field_before_outer_field()
     -> Result<(), Box<dyn std::error::Error>> {
         let context = Context::new();

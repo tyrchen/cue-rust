@@ -453,7 +453,10 @@ fn hex_value(byte: u8) -> Option<u8> {
 }
 
 fn is_builtin_kind(name: &str) -> bool {
-    matches!(name, "_" | "bool" | "int" | "null" | "number" | "string")
+    matches!(
+        name,
+        "_" | "bool" | "bytes" | "float" | "int" | "null" | "number" | "string"
+    )
 }
 
 fn is_builtin_name(name: &str) -> bool {
