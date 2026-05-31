@@ -255,6 +255,46 @@ mod tests {
     }
 
     #[test]
+    fn test_should_evaluate_len_builtin() -> Result<(), Box<dyn std::error::Error>> {
+        let context = Context::new();
+        let value = context.compile_source(
+            "test.cue",
+            "list: len([1, 2, 3])\nstruct: len({a: 1, b: 2})\nstring: len(\"😂\")\nempty: \
+             len(\"\")\n",
+        )?;
+        assert_eq!(
+            EvaluatedValue::Number("3".to_owned()),
+            value.lookup_path(&["list"])?.evaluate()?,
+        );
+        assert_eq!(
+            EvaluatedValue::Number("2".to_owned()),
+            value.lookup_path(&["struct"])?.evaluate()?,
+        );
+        assert_eq!(
+            EvaluatedValue::Number("4".to_owned()),
+            value.lookup_path(&["string"])?.evaluate()?,
+        );
+        assert_eq!(
+            EvaluatedValue::Number("0".to_owned()),
+            value.lookup_path(&["empty"])?.evaluate()?,
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_should_report_len_builtin_arity() -> Result<(), Box<dyn std::error::Error>> {
+        let context = Context::new();
+        let value = context.compile_source("test.cue", "x: len()\n")?;
+        assert!(
+            value
+                .lookup_path(&["x"])?
+                .validate(ValidateOptions::default())
+                .is_err()
+        );
+        Ok(())
+    }
+
+    #[test]
     fn test_should_report_numeric_division_by_zero() -> Result<(), Box<dyn std::error::Error>> {
         let context = Context::new();
         let value = context.compile_source("test.cue", "x: 1 / 0\n")?;

@@ -239,6 +239,26 @@ async fn test_should_run_supported_upstream_core_eval_fixtures() -> TestResult {
         EvaluatedValue::Number("4".to_owned()),
         arithmetic_value.lookup_path(&["div1"])?.evaluate()?,
     );
+
+    let len_fixture = TxtarArchive::read(
+        &root.join("vendors/cue/cue/testdata/fulleval/027_len_of_incomplete_types.txtar"),
+    )
+    .await?;
+    let len_source = selected_lines(len_fixture.file("in.cue")?, &["v2:", "v3:", "v4:"]);
+    let len_value =
+        context.compile_source("fulleval/027_len_of_incomplete_types/in.cue", len_source)?;
+    assert_eq!(
+        EvaluatedValue::Number("0".to_owned()),
+        len_value.lookup_path(&["v2"])?.evaluate()?,
+    );
+    assert_eq!(
+        EvaluatedValue::Number("0".to_owned()),
+        len_value.lookup_path(&["v3"])?.evaluate()?,
+    );
+    assert_eq!(
+        EvaluatedValue::Number("1".to_owned()),
+        len_value.lookup_path(&["v4"])?.evaluate()?,
+    );
     Ok(())
 }
 
@@ -266,6 +286,18 @@ fn txtar_header(line: &str) -> Option<&str> {
 
 fn first_lines(source: &str, limit: usize) -> String {
     source.lines().take(limit).collect::<Vec<_>>().join("\n")
+}
+
+fn selected_lines(source: &str, prefixes: &[&str]) -> String {
+    source
+        .lines()
+        .filter(|line| {
+            prefixes
+                .iter()
+                .any(|prefix| line.trim_start().starts_with(prefix))
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 async fn collect_txtar_files(root: &Path) -> Result<Vec<PathBuf>, Box<dyn Error>> {

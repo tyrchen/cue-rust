@@ -274,6 +274,11 @@ impl<'tokens> Parser<'tokens> {
                 continue;
             }
 
+            if self.at(TokenKind::LeftParen) {
+                left = self.parse_call(left);
+                continue;
+            }
+
             let Some((op, left_bp, right_bp)) = self.infix_binding_power() else {
                 break;
             };
@@ -297,6 +302,31 @@ impl<'tokens> Parser<'tokens> {
         }
 
         left
+    }
+
+    fn parse_call(&mut self, callee: Expr) -> Expr {
+        let left_paren = self.bump().map_or_else(|| callee.span(), Token::span);
+        let mut args = Vec::new();
+        while !self.at(TokenKind::RightParen) && !self.at(TokenKind::Eof) {
+            self.skip_separators();
+            if !self.at(TokenKind::RightParen) {
+                args.push(self.parse_expr(0));
+            }
+            self.skip_separators();
+        }
+        let right_paren = self
+            .expect_kind(
+                TokenKind::RightParen,
+                "cue.parse.expected_call_close",
+                "expected ')' after call arguments",
+            )
+            .unwrap_or(left_paren);
+        let span = merge_span(callee.span(), right_paren);
+        Expr::Call {
+            callee: Box::new(callee),
+            args,
+            span,
+        }
     }
 
     fn parse_index_or_slice(&mut self, base: Expr) -> Expr {
@@ -700,6 +730,20 @@ mod tests {
         assert_eq!(
             Some(
                 "file\n  field x\n    slice\n      list\n        number 1\n        number 2\n        number 3\n      number 1"
+                    .to_owned(),
+            ),
+            tree,
+        );
+    }
+
+    #[test]
+    fn test_should_parse_call_expression() {
+        let result = parse_bytes("test.cue", b"x: len([1, 2])\n", ParseConfig::default());
+        assert!(!result.diagnostics().has_errors());
+        let tree = result.ast().map(crate::AstFile::to_debug_tree);
+        assert_eq!(
+            Some(
+                "file\n  field x\n    call\n      ident len\n      list\n        number 1\n        number 2"
                     .to_owned(),
             ),
             tree,

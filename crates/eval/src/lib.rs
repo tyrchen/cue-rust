@@ -413,6 +413,11 @@ impl<'runtime> Evaluator<'runtime> {
                     .transpose()?;
                 evaluate_slice(base_value, start_value, end_value)
             }
+            SemanticExpr::Call { callee, args } => {
+                let callee = *callee;
+                let args = args.clone();
+                self.evaluate_call(callee, &args, environment, depth + 1)?
+            }
             SemanticExpr::Unary { op, expr } => {
                 let value = self.evaluate_expr_at(*expr, environment, depth + 1)?;
                 evaluate_unary(op, value)
@@ -432,6 +437,33 @@ impl<'runtime> Evaluator<'runtime> {
             )),
         };
         Ok(value)
+    }
+
+    fn evaluate_call(
+        &mut self,
+        callee: ExprId,
+        args: &[ExprId],
+        environment: EnvironmentId,
+        depth: u32,
+    ) -> Result<EvaluatedValue, EvalError> {
+        let builtin_name = match self.runtime.expression(callee)? {
+            SemanticExpr::Base(BaseValue::Builtin(name)) => Some(name.clone()),
+            _ => None,
+        };
+        let Some(name) = builtin_name else {
+            return Ok(EvaluatedValue::Bottom(Bottom::new(
+                "cue.eval.unsupported_call",
+                "only builtin calls are supported",
+                None,
+                false,
+            )));
+        };
+
+        let mut evaluated_args = Vec::with_capacity(args.len());
+        for arg in args {
+            evaluated_args.push(self.evaluate_expr_at(*arg, environment, depth + 1)?);
+        }
+        Ok(evaluate_builtin_call(&name, evaluated_args))
     }
 
     fn evaluate_field_reference(
@@ -547,6 +579,51 @@ fn evaluate_unary(op: &str, value: EvaluatedValue) -> EvaluatedValue {
         (op, value) => EvaluatedValue::Bottom(Bottom::new(
             "cue.eval.invalid_unary",
             format!("cannot apply unary `{op}` to {}", value.kind()),
+            None,
+            false,
+        )),
+    }
+}
+
+fn evaluate_builtin_call(name: &str, args: Vec<EvaluatedValue>) -> EvaluatedValue {
+    match name {
+        "len" => evaluate_len(args),
+        _ => EvaluatedValue::Bottom(Bottom::new(
+            "cue.eval.unsupported_builtin",
+            format!("unsupported builtin `{name}`"),
+            None,
+            false,
+        )),
+    }
+}
+
+fn evaluate_len(args: Vec<EvaluatedValue>) -> EvaluatedValue {
+    if args.len() != 1 {
+        return EvaluatedValue::Bottom(Bottom::new(
+            "cue.eval.invalid_builtin_arity",
+            format!("len expects 1 argument, got {}", args.len()),
+            None,
+            false,
+        ));
+    }
+    let mut args = args.into_iter();
+    let Some(value) = args.next() else {
+        return EvaluatedValue::Bottom(Bottom::new(
+            "cue.eval.invalid_builtin_arity",
+            "len expects 1 argument, got 0",
+            None,
+            false,
+        ));
+    };
+    match value {
+        EvaluatedValue::String(value) => EvaluatedValue::Number(value.len().to_string()),
+        EvaluatedValue::Bytes(value) => EvaluatedValue::Number(value.len().to_string()),
+        EvaluatedValue::List(values) => EvaluatedValue::Number(values.len().to_string()),
+        EvaluatedValue::Struct(fields) => EvaluatedValue::Number(fields.len().to_string()),
+        EvaluatedValue::Bottom(bottom) => EvaluatedValue::Bottom(bottom),
+        value => EvaluatedValue::Bottom(Bottom::new(
+            "cue.eval.invalid_builtin_arg",
+            format!("len cannot accept {}", value.kind()),
             None,
             false,
         )),

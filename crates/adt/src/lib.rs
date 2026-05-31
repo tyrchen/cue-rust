@@ -265,6 +265,13 @@ pub enum SemanticExpr {
         /// Optional exclusive end bound.
         end: Option<ExprId>,
     },
+    /// Function or builtin call expression.
+    Call {
+        /// Called expression.
+        callee: ExprId,
+        /// Call argument expressions.
+        args: Vec<ExprId>,
+    },
     /// Unary expression.
     Unary {
         /// Operator text.

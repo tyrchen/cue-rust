@@ -257,6 +257,17 @@ impl<'runtime> Compiler<'runtime> {
                 let end = end.as_ref().map(|end| self.lower_expr(end)).transpose()?;
                 SemanticExpr::Slice { base, start, end }
             }
+            Expr::Call { callee, args, .. } => {
+                let callee = self.lower_expr(callee)?;
+                let mut lowered_args = Vec::with_capacity(args.len());
+                for arg in args {
+                    lowered_args.push(self.lower_expr(arg)?);
+                }
+                SemanticExpr::Call {
+                    callee,
+                    args: lowered_args,
+                }
+            }
             Expr::Unary { op, expr, .. } => {
                 let expr = self.lower_expr(expr)?;
                 SemanticExpr::Unary {
@@ -329,7 +340,7 @@ impl<'runtime> Compiler<'runtime> {
     }
 
     fn lower_identifier(&mut self, name: &str, span: Span) -> SemanticExpr {
-        if is_builtin_kind(name) {
+        if is_builtin_name(name) {
             return SemanticExpr::Base(BaseValue::Builtin(name.to_owned()));
         }
         if let Some(expression) = self.resolve_let(name) {
@@ -385,6 +396,10 @@ fn unquote_string(value: &str) -> String {
 
 fn is_builtin_kind(name: &str) -> bool {
     matches!(name, "_" | "bool" | "int" | "null" | "number" | "string")
+}
+
+fn is_builtin_name(name: &str) -> bool {
+    is_builtin_kind(name) || matches!(name, "len")
 }
 
 #[cfg(test)]

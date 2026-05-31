@@ -196,6 +196,15 @@ pub enum Expr {
         /// Source span.
         span: Span,
     },
+    /// Function or builtin call expression.
+    Call {
+        /// Called expression.
+        callee: Box<Expr>,
+        /// Call arguments.
+        args: Vec<Expr>,
+        /// Source span.
+        span: Span,
+    },
     /// Unary expression.
     Unary {
         /// Operator text.
@@ -242,6 +251,7 @@ impl Expr {
             | Self::Selector { span, .. }
             | Self::Index { span, .. }
             | Self::Slice { span, .. }
+            | Self::Call { span, .. }
             | Self::Unary { span, .. }
             | Self::Binary { span, .. } => *span,
         }
@@ -286,6 +296,13 @@ impl Expr {
                 }
                 if let Some(end) = end {
                     end.push_debug(lines, depth + 1);
+                }
+            }
+            Self::Call { callee, args, .. } => {
+                lines.push(format!("{indent}call"));
+                callee.push_debug(lines, depth + 1);
+                for arg in args {
+                    arg.push_debug(lines, depth + 1);
                 }
             }
             Self::Unary { op, expr, .. } => {
