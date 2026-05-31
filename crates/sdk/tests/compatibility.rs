@@ -249,6 +249,50 @@ fn push_stdlib_cases(
                     cue_rust::EvaluatedValue::Number("3".to_owned()),
                 ]),
     ));
+
+    let broad_strings = context.compile_source(
+        "stdlib-strings.cue",
+        "import \"strings\"\ncompare: strings.Compare(\"a\", \"b\")\ncontainsAny: \
+         strings.ContainsAny(\"cue\", \"xzue\")\nlastIndex: strings.LastIndex(\"banana\", \
+         \"na\")\nsplitAfterN: strings.SplitAfterN(\"a,b,c\", \",\", 2)\nfields: \
+         strings.Fields(\"  a b \")\ntrim: strings.Trim(\"abba\", \"a\")\nreplace: \
+         strings.Replace(\"banana\", \"na\", \"NA\", 1)\nrunes: strings.Runes(\"Café\")\n",
+    )?;
+    cases.push(supported_case(
+        "eval/stdlib-strings-full-surface",
+        "semantic",
+        broad_strings.lookup_path(&["compare"])?.evaluate()?
+            == cue_rust::EvaluatedValue::Number("-1".to_owned())
+            && broad_strings.lookup_path(&["containsAny"])?.evaluate()?
+                == cue_rust::EvaluatedValue::Bool(true)
+            && broad_strings.lookup_path(&["lastIndex"])?.evaluate()?
+                == cue_rust::EvaluatedValue::Number("4".to_owned())
+            && broad_strings.lookup_path(&["splitAfterN"])?.kind()? == cue_rust::ValueKind::List
+            && broad_strings.lookup_path(&["fields"])?.kind()? == cue_rust::ValueKind::List
+            && broad_strings.lookup_path(&["trim"])?.evaluate()?
+                == cue_rust::EvaluatedValue::String("bb".to_owned())
+            && broad_strings.lookup_path(&["replace"])?.evaluate()?
+                == cue_rust::EvaluatedValue::String("baNAna".to_owned())
+            && broad_strings.lookup_path(&["runes"])?.kind()? == cue_rust::ValueKind::List,
+    ));
+
+    let broad_list = context.compile_source(
+        "stdlib-list.cue",
+        "import \"list\"\nflatten: list.FlattenN([1, [[2, 3], []], [4]], 2)\nrange: list.Range(0, \
+         5, 2)\nsorted: list.SortStrings([\"b\", \"a\"])\nsum: list.Sum([1, 2, 3])\nunique: \
+         list.UniqueItems([1, 2, 1])\n",
+    )?;
+    cases.push(supported_case(
+        "eval/stdlib-list-broad-surface",
+        "semantic",
+        broad_list.lookup_path(&["flatten"])?.kind()? == cue_rust::ValueKind::List
+            && broad_list.lookup_path(&["range"])?.kind()? == cue_rust::ValueKind::List
+            && broad_list.lookup_path(&["sorted"])?.kind()? == cue_rust::ValueKind::List
+            && broad_list.lookup_path(&["sum"])?.evaluate()?
+                == cue_rust::EvaluatedValue::Number("6".to_owned())
+            && broad_list.lookup_path(&["unique"])?.evaluate()?
+                == cue_rust::EvaluatedValue::Bool(false),
+    ));
     Ok(())
 }
 
@@ -292,16 +336,10 @@ fn push_known_gap_cases(context: &Context, cases: &mut Vec<CompatibilityCase>) {
         "registry imports are outside the Phase 9 local-loader compatibility subset",
     ));
     cases.push(expected_gap_case(
-        "stdlib/strings-full-surface",
+        "stdlib/list-comparator-schema-surface",
         "stdlib-gap",
-        "only high-frequency strings functions are implemented; remaining upstream strings \
-         builtins are tracked separately",
-    ));
-    cases.push(expected_gap_case(
-        "stdlib/list-full-surface",
-        "stdlib-gap",
-        "only high-frequency list functions are implemented; validators, sorting, and aggregate \
-         list builtins remain gaps",
+        "list.Sort, list.SortStable, list.IsSorted comparator schemas, package CUE constants, and \
+         partial-application validators need richer package values and evaluator hooks",
     ));
     cases.push(expected_gap_case(
         "syntax/string-interpolation",

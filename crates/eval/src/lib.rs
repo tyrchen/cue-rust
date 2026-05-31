@@ -3,8 +3,9 @@
 #![forbid(unsafe_code)]
 #![warn(rust_2024_compatibility, missing_docs, missing_debug_implementations)]
 
-use std::{cmp::Ordering, fmt, num::FpCategory};
+use std::{cmp::Ordering, fmt, num::FpCategory, str::FromStr};
 
+use bigdecimal::{BigDecimal, Zero};
 use cue_rust_adt::{
     AdtError, BaseValue, Bottom, EnvironmentId, ExprId, Feature, FieldExpr, FieldMetadata, Runtime,
     SemanticExpr, VertexId,
@@ -835,19 +836,60 @@ fn evaluate_builtin_call(name: &str, args: Vec<EvaluatedValue>) -> EvaluatedValu
         "len" => evaluate_len(args),
         "list.Concat" => evaluate_list_concat(args),
         "list.Contains" => evaluate_list_contains(args),
+        "list.Drop" => evaluate_list_drop(args),
+        "list.FlattenN" => evaluate_list_flatten_n(args),
+        "list.IsSortedStrings" => evaluate_list_is_sorted_strings(args),
+        "list.MaxItems" => evaluate_list_max_items(args),
+        "list.Max" => evaluate_list_numeric_aggregate("list.Max", args, NumericAggregate::Max),
+        "list.MinItems" => evaluate_list_min_items(args),
+        "list.Min" => evaluate_list_numeric_aggregate("list.Min", args, NumericAggregate::Min),
+        "list.Avg" => evaluate_list_numeric_aggregate("list.Avg", args, NumericAggregate::Avg),
+        "list.Product" => {
+            evaluate_list_numeric_aggregate("list.Product", args, NumericAggregate::Product)
+        }
+        "list.Range" => evaluate_list_range(args),
         "list.Repeat" => evaluate_list_repeat(args),
+        "list.Reverse" => evaluate_list_reverse(args),
+        "list.Slice" => evaluate_list_slice(args),
+        "list.SortStrings" => evaluate_list_sort_strings(args),
+        "list.Sum" => evaluate_list_numeric_aggregate("list.Sum", args, NumericAggregate::Sum),
+        "list.Take" => evaluate_list_take(args),
+        "list.UniqueItems" => evaluate_list_unique_items(args),
         "or" => evaluate_or(args),
+        "strings.ByteAt" => evaluate_strings_byte_at(args),
+        "strings.ByteSlice" => evaluate_strings_byte_slice(args),
+        "strings.Compare" => evaluate_strings_compare(args),
         "strings.Contains" => evaluate_strings_contains(args),
+        "strings.ContainsAny" => evaluate_strings_contains_any(args),
         "strings.Count" => evaluate_strings_count(args),
+        "strings.Fields" => evaluate_strings_fields(args),
         "strings.HasPrefix" => evaluate_strings_has_prefix(args),
         "strings.HasSuffix" => evaluate_strings_has_suffix(args),
         "strings.Index" => evaluate_strings_index(args),
+        "strings.IndexAny" => evaluate_strings_index_any(args),
         "strings.Join" => evaluate_strings_join(args),
+        "strings.LastIndex" => evaluate_strings_last_index(args),
+        "strings.LastIndexAny" => evaluate_strings_last_index_any(args),
+        "strings.MaxRunes" => evaluate_strings_max_runes(args),
+        "strings.MinRunes" => evaluate_strings_min_runes(args),
+        "strings.Replace" => evaluate_strings_replace(args),
         "strings.Repeat" => evaluate_strings_repeat(args),
+        "strings.Runes" => evaluate_strings_runes(args),
+        "strings.SliceRunes" => evaluate_strings_slice_runes(args),
         "strings.Split" => evaluate_strings_split(args),
+        "strings.SplitAfter" => evaluate_strings_split_after(args),
+        "strings.SplitAfterN" => evaluate_strings_split_after_n(args),
+        "strings.SplitN" => evaluate_strings_split_n(args),
+        "strings.ToCamel" => evaluate_strings_to_camel(args),
         "strings.ToLower" => evaluate_strings_to_lower(args),
+        "strings.ToTitle" => evaluate_strings_to_title(args),
         "strings.ToUpper" => evaluate_strings_to_upper(args),
+        "strings.Trim" => evaluate_strings_trim(args),
+        "strings.TrimLeft" => evaluate_strings_trim_left(args),
+        "strings.TrimPrefix" => evaluate_strings_trim_prefix(args),
+        "strings.TrimRight" => evaluate_strings_trim_right(args),
         "strings.TrimSpace" => evaluate_strings_trim_space(args),
+        "strings.TrimSuffix" => evaluate_strings_trim_suffix(args),
         _ => EvaluatedValue::Bottom(Bottom::new(
             "cue.eval.unsupported_builtin",
             format!("unsupported builtin `{name}`"),
@@ -861,6 +903,24 @@ fn evaluate_strings_contains(args: Vec<EvaluatedValue>) -> EvaluatedValue {
     evaluate_two_string_args_bool("strings.Contains", args, |value, needle| {
         value.contains(needle)
     })
+}
+
+fn evaluate_strings_contains_any(args: Vec<EvaluatedValue>) -> EvaluatedValue {
+    evaluate_two_string_args_bool("strings.ContainsAny", args, |value, chars| {
+        value.chars().any(|character| chars.contains(character))
+    })
+}
+
+fn evaluate_strings_compare(args: Vec<EvaluatedValue>) -> EvaluatedValue {
+    let Some((left, right)) = two_string_args("strings.Compare", args) else {
+        return invalid_string_builtin_args("strings.Compare");
+    };
+    let ordering = match left.cmp(&right) {
+        Ordering::Less => -1,
+        Ordering::Equal => 0,
+        Ordering::Greater => 1,
+    };
+    EvaluatedValue::Number(ordering.to_string())
 }
 
 fn evaluate_strings_has_prefix(args: Vec<EvaluatedValue>) -> EvaluatedValue {
@@ -894,10 +954,28 @@ fn evaluate_strings_index(args: Vec<EvaluatedValue>) -> EvaluatedValue {
     let Some((value, needle)) = two_string_args("strings.Index", args) else {
         return invalid_string_builtin_args("strings.Index");
     };
-    let index = value
-        .find(&needle)
-        .map_or(-1_i128, |index| i128::try_from(index).unwrap_or(i128::MAX));
-    EvaluatedValue::Number(index.to_string())
+    byte_index_result(value.find(&needle))
+}
+
+fn evaluate_strings_last_index(args: Vec<EvaluatedValue>) -> EvaluatedValue {
+    let Some((value, needle)) = two_string_args("strings.LastIndex", args) else {
+        return invalid_string_builtin_args("strings.LastIndex");
+    };
+    byte_index_result(value.rfind(&needle))
+}
+
+fn evaluate_strings_index_any(args: Vec<EvaluatedValue>) -> EvaluatedValue {
+    let Some((value, chars)) = two_string_args("strings.IndexAny", args) else {
+        return invalid_string_builtin_args("strings.IndexAny");
+    };
+    byte_index_result(value.find(|character| chars.contains(character)))
+}
+
+fn evaluate_strings_last_index_any(args: Vec<EvaluatedValue>) -> EvaluatedValue {
+    let Some((value, chars)) = two_string_args("strings.LastIndexAny", args) else {
+        return invalid_string_builtin_args("strings.LastIndexAny");
+    };
+    byte_index_result(value.rfind(|character| chars.contains(character)))
 }
 
 fn evaluate_strings_join(args: Vec<EvaluatedValue>) -> EvaluatedValue {
@@ -927,26 +1005,47 @@ fn evaluate_strings_split(args: Vec<EvaluatedValue>) -> EvaluatedValue {
     let Some((value, separator)) = two_string_args("strings.Split", args) else {
         return invalid_string_builtin_args("strings.Split");
     };
-    if !generated_string_fits(&value) {
-        return builtin_resource_exhausted("strings.Split");
-    }
-    let items = if separator.is_empty() {
-        if value.chars().count() > MAX_BUILTIN_GENERATED_ITEMS {
-            return builtin_resource_exhausted("strings.Split");
-        }
-        value
-            .chars()
-            .map(|character| EvaluatedValue::String(character.to_string()))
-            .collect()
-    } else {
-        if value.matches(&separator).count() >= MAX_BUILTIN_GENERATED_ITEMS {
-            return builtin_resource_exhausted("strings.Split");
-        }
-        value
-            .split(&separator)
-            .map(|item| EvaluatedValue::String(item.to_owned()))
-            .collect()
+    evaluate_split("strings.Split", &value, &separator, -1, false)
+}
+
+fn evaluate_strings_split_after(args: Vec<EvaluatedValue>) -> EvaluatedValue {
+    let Some((value, separator)) = two_string_args("strings.SplitAfter", args) else {
+        return invalid_string_builtin_args("strings.SplitAfter");
     };
+    evaluate_split("strings.SplitAfter", &value, &separator, -1, true)
+}
+
+fn evaluate_strings_split_n(args: Vec<EvaluatedValue>) -> EvaluatedValue {
+    let Some((value, separator, count)) = two_string_string_integer_args("strings.SplitN", args)
+    else {
+        return invalid_string_builtin_args("strings.SplitN");
+    };
+    evaluate_split("strings.SplitN", &value, &separator, count, false)
+}
+
+fn evaluate_strings_split_after_n(args: Vec<EvaluatedValue>) -> EvaluatedValue {
+    let Some((value, separator, count)) =
+        two_string_string_integer_args("strings.SplitAfterN", args)
+    else {
+        return invalid_string_builtin_args("strings.SplitAfterN");
+    };
+    evaluate_split("strings.SplitAfterN", &value, &separator, count, true)
+}
+
+fn evaluate_strings_fields(args: Vec<EvaluatedValue>) -> EvaluatedValue {
+    let Some(value) = single_string_arg("strings.Fields", args) else {
+        return invalid_string_builtin_args("strings.Fields");
+    };
+    if !generated_string_fits(&value) {
+        return builtin_resource_exhausted("strings.Fields");
+    }
+    let items = value
+        .split_whitespace()
+        .map(|item| EvaluatedValue::String(item.to_owned()))
+        .collect::<Vec<_>>();
+    if items.len() > MAX_BUILTIN_GENERATED_ITEMS {
+        return builtin_resource_exhausted("strings.Fields");
+    }
     EvaluatedValue::List(items)
 }
 
@@ -964,6 +1063,38 @@ fn evaluate_strings_to_upper(args: Vec<EvaluatedValue>) -> EvaluatedValue {
     evaluate_case_mapping("strings.ToUpper", &value, str::to_uppercase)
 }
 
+fn evaluate_strings_to_title(args: Vec<EvaluatedValue>) -> EvaluatedValue {
+    let Some(value) = single_string_arg("strings.ToTitle", args) else {
+        return invalid_string_builtin_args("strings.ToTitle");
+    };
+    let mut previous_was_space = true;
+    evaluate_char_mapping("strings.ToTitle", &value, |character| {
+        let mapped = if previous_was_space {
+            character.to_uppercase().collect::<String>()
+        } else {
+            character.to_string()
+        };
+        previous_was_space = character.is_whitespace();
+        mapped
+    })
+}
+
+fn evaluate_strings_to_camel(args: Vec<EvaluatedValue>) -> EvaluatedValue {
+    let Some(value) = single_string_arg("strings.ToCamel", args) else {
+        return invalid_string_builtin_args("strings.ToCamel");
+    };
+    let mut previous_was_space = true;
+    evaluate_char_mapping("strings.ToCamel", &value, |character| {
+        let mapped = if previous_was_space {
+            character.to_lowercase().collect::<String>()
+        } else {
+            character.to_string()
+        };
+        previous_was_space = character.is_whitespace();
+        mapped
+    })
+}
+
 fn evaluate_strings_trim_space(args: Vec<EvaluatedValue>) -> EvaluatedValue {
     let Some(value) = single_string_arg("strings.TrimSpace", args) else {
         return invalid_string_builtin_args("strings.TrimSpace");
@@ -972,6 +1103,149 @@ fn evaluate_strings_trim_space(args: Vec<EvaluatedValue>) -> EvaluatedValue {
         return builtin_resource_exhausted("strings.TrimSpace");
     }
     EvaluatedValue::String(value.trim().to_owned())
+}
+
+fn evaluate_strings_trim(args: Vec<EvaluatedValue>) -> EvaluatedValue {
+    evaluate_two_string_args_string("strings.Trim", args, |value, cutset| {
+        value
+            .trim_matches(|character| cutset.contains(character))
+            .to_owned()
+    })
+}
+
+fn evaluate_strings_trim_left(args: Vec<EvaluatedValue>) -> EvaluatedValue {
+    evaluate_two_string_args_string("strings.TrimLeft", args, |value, cutset| {
+        value
+            .trim_start_matches(|character| cutset.contains(character))
+            .to_owned()
+    })
+}
+
+fn evaluate_strings_trim_right(args: Vec<EvaluatedValue>) -> EvaluatedValue {
+    evaluate_two_string_args_string("strings.TrimRight", args, |value, cutset| {
+        value
+            .trim_end_matches(|character| cutset.contains(character))
+            .to_owned()
+    })
+}
+
+fn evaluate_strings_trim_prefix(args: Vec<EvaluatedValue>) -> EvaluatedValue {
+    evaluate_two_string_args_string("strings.TrimPrefix", args, |value, prefix| {
+        value.strip_prefix(prefix).unwrap_or(value).to_owned()
+    })
+}
+
+fn evaluate_strings_trim_suffix(args: Vec<EvaluatedValue>) -> EvaluatedValue {
+    evaluate_two_string_args_string("strings.TrimSuffix", args, |value, suffix| {
+        value.strip_suffix(suffix).unwrap_or(value).to_owned()
+    })
+}
+
+fn evaluate_strings_replace(args: Vec<EvaluatedValue>) -> EvaluatedValue {
+    let Some((value, old, new, count)) = three_string_integer_args("strings.Replace", args) else {
+        return invalid_string_builtin_args("strings.Replace");
+    };
+    let replaced = if count < 0 {
+        value.replace(&old, &new)
+    } else {
+        let Some(count) = usize::try_from(count).ok() else {
+            return builtin_resource_exhausted("strings.Replace");
+        };
+        value.replacen(&old, &new, count)
+    };
+    if !generated_string_fits(&replaced) {
+        return builtin_resource_exhausted("strings.Replace");
+    }
+    EvaluatedValue::String(replaced)
+}
+
+fn evaluate_strings_runes(args: Vec<EvaluatedValue>) -> EvaluatedValue {
+    let Some(value) = single_string_arg("strings.Runes", args) else {
+        return invalid_string_builtin_args("strings.Runes");
+    };
+    if value.chars().count() > MAX_BUILTIN_GENERATED_ITEMS {
+        return builtin_resource_exhausted("strings.Runes");
+    }
+    EvaluatedValue::List(
+        value
+            .chars()
+            .map(|character| {
+                let codepoint = u32::from(character);
+                EvaluatedValue::Number(codepoint.to_string())
+            })
+            .collect(),
+    )
+}
+
+fn evaluate_strings_min_runes(args: Vec<EvaluatedValue>) -> EvaluatedValue {
+    let Some((value, limit)) = string_and_signed_count_args("strings.MinRunes", args) else {
+        return invalid_string_builtin_args("strings.MinRunes");
+    };
+    EvaluatedValue::Bool(rune_count_satisfies(
+        value.chars().count(),
+        limit,
+        Ordering::Greater,
+    ))
+}
+
+fn evaluate_strings_max_runes(args: Vec<EvaluatedValue>) -> EvaluatedValue {
+    let Some((value, limit)) = string_and_signed_count_args("strings.MaxRunes", args) else {
+        return invalid_string_builtin_args("strings.MaxRunes");
+    };
+    EvaluatedValue::Bool(rune_count_satisfies(
+        value.chars().count(),
+        limit,
+        Ordering::Less,
+    ))
+}
+
+fn evaluate_strings_slice_runes(args: Vec<EvaluatedValue>) -> EvaluatedValue {
+    let Some((value, start, end)) = string_two_index_args("strings.SliceRunes", args) else {
+        return invalid_string_builtin_args("strings.SliceRunes");
+    };
+    let chars = value.chars().collect::<Vec<_>>();
+    if start > end || end > chars.len() {
+        return invalid_string_index("strings.SliceRunes");
+    }
+    let Some(slice) = chars.get(start..end) else {
+        return invalid_string_index("strings.SliceRunes");
+    };
+    let sliced = slice.iter().collect::<String>();
+    EvaluatedValue::String(sliced)
+}
+
+fn evaluate_strings_byte_at(args: Vec<EvaluatedValue>) -> EvaluatedValue {
+    let Some((bytes, index)) = bytes_like_and_index_args("strings.ByteAt", args) else {
+        return invalid_string_builtin_args("strings.ByteAt");
+    };
+    let Some(byte) = bytes.get(index) else {
+        return invalid_string_index("strings.ByteAt");
+    };
+    EvaluatedValue::Number(byte.to_string())
+}
+
+fn evaluate_strings_byte_slice(args: Vec<EvaluatedValue>) -> EvaluatedValue {
+    let Some((value, start, end)) = bytes_like_two_index_args("strings.ByteSlice", args) else {
+        return invalid_string_builtin_args("strings.ByteSlice");
+    };
+    let len = value.byte_len();
+    if start > end || end > len {
+        return invalid_string_index("strings.ByteSlice");
+    }
+    match value {
+        BytesLikeValue::String(value) => {
+            let Some(slice) = value.as_bytes().get(start..end) else {
+                return invalid_string_index("strings.ByteSlice");
+            };
+            EvaluatedValue::Bytes(slice.to_vec())
+        }
+        BytesLikeValue::Bytes(bytes) => {
+            let Some(slice) = bytes.get(start..end) else {
+                return invalid_string_index("strings.ByteSlice");
+            };
+            EvaluatedValue::Bytes(slice.to_vec())
+        }
+    }
 }
 
 fn evaluate_case_mapping(
@@ -989,6 +1263,24 @@ fn evaluate_case_mapping(
     EvaluatedValue::String(mapped)
 }
 
+fn evaluate_char_mapping(
+    name: &str,
+    value: &str,
+    mut mapping: impl FnMut(char) -> String,
+) -> EvaluatedValue {
+    if !generated_string_fits(value) {
+        return builtin_resource_exhausted(name);
+    }
+    let mut mapped = String::with_capacity(value.len());
+    for character in value.chars() {
+        mapped.push_str(&mapping(character));
+        if mapped.len() > MAX_BUILTIN_GENERATED_BYTES {
+            return builtin_resource_exhausted(name);
+        }
+    }
+    EvaluatedValue::String(mapped)
+}
+
 fn evaluate_two_string_args_bool(
     name: &str,
     args: Vec<EvaluatedValue>,
@@ -998,6 +1290,21 @@ fn evaluate_two_string_args_bool(
         return invalid_string_builtin_args(name);
     };
     EvaluatedValue::Bool(predicate(&value, &other))
+}
+
+fn evaluate_two_string_args_string(
+    name: &str,
+    args: Vec<EvaluatedValue>,
+    mapping: impl Fn(&str, &str) -> String,
+) -> EvaluatedValue {
+    let Some((value, other)) = two_string_args(name, args) else {
+        return invalid_string_builtin_args(name);
+    };
+    let mapped = mapping(&value, &other);
+    if !generated_string_fits(&mapped) {
+        return builtin_resource_exhausted(name);
+    }
+    EvaluatedValue::String(mapped)
 }
 
 fn evaluate_list_contains(args: Vec<EvaluatedValue>) -> EvaluatedValue {
@@ -1061,6 +1368,198 @@ fn evaluate_list_concat(args: Vec<EvaluatedValue>) -> EvaluatedValue {
         concatenated.extend(items);
     }
     EvaluatedValue::List(concatenated)
+}
+
+fn evaluate_list_drop(args: Vec<EvaluatedValue>) -> EvaluatedValue {
+    let Some((items, count)) = list_and_count_args("list.Drop", args) else {
+        return invalid_list_builtin_arg("list.Drop");
+    };
+    let dropped = if count > items.len() {
+        Vec::new()
+    } else {
+        items.into_iter().skip(count).collect()
+    };
+    EvaluatedValue::List(dropped)
+}
+
+fn evaluate_list_take(args: Vec<EvaluatedValue>) -> EvaluatedValue {
+    let Some((items, count)) = list_and_count_args("list.Take", args) else {
+        return invalid_list_builtin_arg("list.Take");
+    };
+    EvaluatedValue::List(items.into_iter().take(count).collect())
+}
+
+fn evaluate_list_slice(args: Vec<EvaluatedValue>) -> EvaluatedValue {
+    let Some((items, start, end)) = list_two_index_args("list.Slice", args) else {
+        return invalid_list_builtin_arg("list.Slice");
+    };
+    if start > end || end > items.len() {
+        return invalid_list_index("list.Slice");
+    }
+    EvaluatedValue::List(items.into_iter().skip(start).take(end - start).collect())
+}
+
+fn evaluate_list_reverse(args: Vec<EvaluatedValue>) -> EvaluatedValue {
+    let Some(mut items) = single_list_arg(args) else {
+        return invalid_list_builtin_arg("list.Reverse");
+    };
+    items.reverse();
+    EvaluatedValue::List(items)
+}
+
+fn evaluate_list_flatten_n(args: Vec<EvaluatedValue>) -> EvaluatedValue {
+    let Some((items, depth)) = list_and_signed_count_args("list.FlattenN", args) else {
+        return invalid_list_builtin_arg("list.FlattenN");
+    };
+    let mut flattened = Vec::new();
+    if !flatten_items(&items, depth, &mut flattened) {
+        return builtin_resource_exhausted("list.FlattenN");
+    }
+    EvaluatedValue::List(flattened)
+}
+
+fn evaluate_list_unique_items(args: Vec<EvaluatedValue>) -> EvaluatedValue {
+    let Some(items) = single_list_arg(args) else {
+        return invalid_list_builtin_arg("list.UniqueItems");
+    };
+    for (index, item) in items.iter().enumerate() {
+        for other in items.iter().skip(index.saturating_add(1)) {
+            match values_equal(item, other) {
+                Ok(true) => return EvaluatedValue::Bool(false),
+                Ok(false) => {}
+                Err(bottom) => return EvaluatedValue::Bottom(bottom),
+            }
+        }
+    }
+    EvaluatedValue::Bool(true)
+}
+
+fn evaluate_list_min_items(args: Vec<EvaluatedValue>) -> EvaluatedValue {
+    let Some((items, count)) = list_and_count_args("list.MinItems", args) else {
+        return invalid_list_builtin_arg("list.MinItems");
+    };
+    EvaluatedValue::Bool(items.len() >= count)
+}
+
+fn evaluate_list_max_items(args: Vec<EvaluatedValue>) -> EvaluatedValue {
+    let Some((items, count)) = list_and_count_args("list.MaxItems", args) else {
+        return invalid_list_builtin_arg("list.MaxItems");
+    };
+    EvaluatedValue::Bool(items.len() <= count)
+}
+
+fn evaluate_list_sort_strings(args: Vec<EvaluatedValue>) -> EvaluatedValue {
+    let Some(mut items) = single_string_list_arg("list.SortStrings", args) else {
+        return invalid_list_builtin_arg("list.SortStrings");
+    };
+    items.sort();
+    EvaluatedValue::List(items.into_iter().map(EvaluatedValue::String).collect())
+}
+
+fn evaluate_list_is_sorted_strings(args: Vec<EvaluatedValue>) -> EvaluatedValue {
+    let Some(items) = single_string_list_arg("list.IsSortedStrings", args) else {
+        return invalid_list_builtin_arg("list.IsSortedStrings");
+    };
+    EvaluatedValue::Bool(items.windows(2).all(|window| {
+        let Some(left) = window.first() else {
+            return true;
+        };
+        let Some(right) = window.get(1) else {
+            return true;
+        };
+        left <= right
+    }))
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum NumericAggregate {
+    Avg,
+    Max,
+    Min,
+    Product,
+    Sum,
+}
+
+fn evaluate_list_numeric_aggregate(
+    name: &str,
+    args: Vec<EvaluatedValue>,
+    aggregate: NumericAggregate,
+) -> EvaluatedValue {
+    let Some(values) = single_number_list_arg(name, args) else {
+        return invalid_list_builtin_arg(name);
+    };
+    match aggregate {
+        NumericAggregate::Avg | NumericAggregate::Max | NumericAggregate::Min
+            if values.is_empty() =>
+        {
+            empty_numeric_list(name)
+        }
+        NumericAggregate::Avg => {
+            let sum = values
+                .iter()
+                .fold(BigDecimal::zero(), |sum, value| sum + value);
+            let Some(count) = i64::try_from(values.len()).ok().map(BigDecimal::from) else {
+                return builtin_resource_exhausted(name);
+            };
+            evaluated_decimal_number(name, &(sum / count))
+        }
+        NumericAggregate::Max => values.into_iter().reduce(BigDecimal::max).map_or_else(
+            || empty_numeric_list(name),
+            |value| evaluated_decimal_number(name, &value),
+        ),
+        NumericAggregate::Min => values.into_iter().reduce(BigDecimal::min).map_or_else(
+            || empty_numeric_list(name),
+            |value| evaluated_decimal_number(name, &value),
+        ),
+        NumericAggregate::Product => evaluated_decimal_number(
+            name,
+            &values
+                .into_iter()
+                .fold(BigDecimal::from(1), |product, value| product * value),
+        ),
+        NumericAggregate::Sum => evaluated_decimal_number(
+            name,
+            &values
+                .into_iter()
+                .fold(BigDecimal::zero(), |sum, value| sum + value),
+        ),
+    }
+}
+
+fn evaluate_list_range(args: Vec<EvaluatedValue>) -> EvaluatedValue {
+    let Some((start, limit, step)) = three_number_args("list.Range", args) else {
+        return invalid_list_builtin_arg("list.Range");
+    };
+    if step.is_zero() {
+        return EvaluatedValue::Bottom(Bottom::new(
+            "cue.eval.invalid_builtin_arg",
+            "list.Range step must be non-zero",
+            None,
+            false,
+        ));
+    }
+    let zero = BigDecimal::zero();
+    if (step > zero && start > limit) || (step < zero && start < limit) {
+        return EvaluatedValue::Bottom(Bottom::new(
+            "cue.eval.invalid_builtin_arg",
+            "list.Range limit is incompatible with step direction",
+            None,
+            false,
+        ));
+    }
+    let mut values = Vec::new();
+    let mut next = start;
+    while (step > zero && next < limit) || (step < zero && next > limit) {
+        if values.len() >= MAX_BUILTIN_GENERATED_ITEMS {
+            return builtin_resource_exhausted("list.Range");
+        }
+        let Some(number) = format_decimal_number(&next) else {
+            return builtin_resource_exhausted("list.Range");
+        };
+        values.push(EvaluatedValue::Number(number));
+        next += &step;
+    }
+    EvaluatedValue::List(values)
 }
 
 fn evaluate_integer_builtin(name: &str, args: Vec<EvaluatedValue>) -> EvaluatedValue {
@@ -1181,7 +1680,16 @@ fn single_list_arg(args: Vec<EvaluatedValue>) -> Option<Vec<EvaluatedValue>> {
 fn invalid_list_builtin_arg(name: &str) -> EvaluatedValue {
     EvaluatedValue::Bottom(Bottom::new(
         "cue.eval.invalid_builtin_arg",
-        format!("{name} expects a single list argument"),
+        format!("{name} received invalid arguments"),
+        None,
+        false,
+    ))
+}
+
+fn invalid_list_index(name: &str) -> EvaluatedValue {
+    EvaluatedValue::Bottom(Bottom::new(
+        "cue.eval.invalid_builtin_arg",
+        format!("{name} received invalid list indexes"),
         None,
         false,
     ))
@@ -1255,6 +1763,164 @@ fn string_and_count_args(_name: &str, args: Vec<EvaluatedValue>) -> Option<(Stri
     }
 }
 
+fn string_and_signed_count_args(_name: &str, args: Vec<EvaluatedValue>) -> Option<(String, i128)> {
+    let mut args = args
+        .into_iter()
+        .map(resolve_default_value)
+        .collect::<Vec<_>>();
+    if args.len() != 2 {
+        return None;
+    }
+    let count = args.pop()?;
+    let value = args.pop()?;
+    match (value, count) {
+        (EvaluatedValue::String(value), EvaluatedValue::Number(count)) => {
+            Some((value, parse_integer(&count)?))
+        }
+        _ => None,
+    }
+}
+
+fn string_two_index_args(_name: &str, args: Vec<EvaluatedValue>) -> Option<(String, usize, usize)> {
+    let mut args = args
+        .into_iter()
+        .map(resolve_default_value)
+        .collect::<Vec<_>>();
+    if args.len() != 3 {
+        return None;
+    }
+    let end = args.pop()?;
+    let start = args.pop()?;
+    let value = args.pop()?;
+    match (value, start, end) {
+        (
+            EvaluatedValue::String(value),
+            EvaluatedValue::Number(start),
+            EvaluatedValue::Number(end),
+        ) => Some((
+            value,
+            non_negative_count(&start)?,
+            non_negative_count(&end)?,
+        )),
+        _ => None,
+    }
+}
+
+fn two_string_string_integer_args(
+    _name: &str,
+    args: Vec<EvaluatedValue>,
+) -> Option<(String, String, i128)> {
+    let mut args = args
+        .into_iter()
+        .map(resolve_default_value)
+        .collect::<Vec<_>>();
+    if args.len() != 3 {
+        return None;
+    }
+    let count = args.pop()?;
+    let separator = args.pop()?;
+    let value = args.pop()?;
+    match (value, separator, count) {
+        (
+            EvaluatedValue::String(value),
+            EvaluatedValue::String(separator),
+            EvaluatedValue::Number(count),
+        ) => Some((value, separator, parse_integer(&count)?)),
+        _ => None,
+    }
+}
+
+fn three_string_integer_args(
+    _name: &str,
+    args: Vec<EvaluatedValue>,
+) -> Option<(String, String, String, i128)> {
+    let mut args = args
+        .into_iter()
+        .map(resolve_default_value)
+        .collect::<Vec<_>>();
+    if args.len() != 4 {
+        return None;
+    }
+    let count = args.pop()?;
+    let new = args.pop()?;
+    let old = args.pop()?;
+    let value = args.pop()?;
+    match (value, old, new, count) {
+        (
+            EvaluatedValue::String(value),
+            EvaluatedValue::String(old),
+            EvaluatedValue::String(new),
+            EvaluatedValue::Number(count),
+        ) => Some((value, old, new, parse_integer(&count)?)),
+        _ => None,
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum BytesLikeValue {
+    Bytes(Vec<u8>),
+    String(String),
+}
+
+impl BytesLikeValue {
+    fn byte_len(&self) -> usize {
+        match self {
+            Self::Bytes(bytes) => bytes.len(),
+            Self::String(value) => value.len(),
+        }
+    }
+}
+
+fn bytes_like_and_index_args(_name: &str, args: Vec<EvaluatedValue>) -> Option<(Vec<u8>, usize)> {
+    let mut args = args
+        .into_iter()
+        .map(resolve_default_value)
+        .collect::<Vec<_>>();
+    if args.len() != 2 {
+        return None;
+    }
+    let index = args.pop()?;
+    let value = args.pop()?;
+    let bytes = match value {
+        EvaluatedValue::String(value) => value.into_bytes(),
+        EvaluatedValue::Bytes(bytes) => bytes,
+        _ => return None,
+    };
+    let EvaluatedValue::Number(index) = index else {
+        return None;
+    };
+    Some((bytes, non_negative_count(&index)?))
+}
+
+fn bytes_like_two_index_args(
+    _name: &str,
+    args: Vec<EvaluatedValue>,
+) -> Option<(BytesLikeValue, usize, usize)> {
+    let mut args = args
+        .into_iter()
+        .map(resolve_default_value)
+        .collect::<Vec<_>>();
+    if args.len() != 3 {
+        return None;
+    }
+    let end = args.pop()?;
+    let start = args.pop()?;
+    let value = args.pop()?;
+    let value = match value {
+        EvaluatedValue::String(value) => BytesLikeValue::String(value),
+        EvaluatedValue::Bytes(bytes) => BytesLikeValue::Bytes(bytes),
+        _ => return None,
+    };
+    match (start, end) {
+        (EvaluatedValue::Number(start), EvaluatedValue::Number(end)) => Some((
+            value,
+            non_negative_count(&start)?,
+            non_negative_count(&end)?,
+        )),
+        _ => None,
+    }
+}
+
 fn list_and_count_args(
     _name: &str,
     args: Vec<EvaluatedValue>,
@@ -1272,6 +1938,55 @@ fn list_and_count_args(
         (EvaluatedValue::List(items), EvaluatedValue::Number(count)) => {
             Some((items, non_negative_count(&count)?))
         }
+        _ => None,
+    }
+}
+
+fn list_and_signed_count_args(
+    _name: &str,
+    args: Vec<EvaluatedValue>,
+) -> Option<(Vec<EvaluatedValue>, i128)> {
+    let mut args = args
+        .into_iter()
+        .map(resolve_default_value)
+        .collect::<Vec<_>>();
+    if args.len() != 2 {
+        return None;
+    }
+    let count = args.pop()?;
+    let list = args.pop()?;
+    match (list, count) {
+        (EvaluatedValue::List(items), EvaluatedValue::Number(count)) => {
+            Some((items, parse_integer(&count)?))
+        }
+        _ => None,
+    }
+}
+
+fn list_two_index_args(
+    _name: &str,
+    args: Vec<EvaluatedValue>,
+) -> Option<(Vec<EvaluatedValue>, usize, usize)> {
+    let mut args = args
+        .into_iter()
+        .map(resolve_default_value)
+        .collect::<Vec<_>>();
+    if args.len() != 3 {
+        return None;
+    }
+    let end = args.pop()?;
+    let start = args.pop()?;
+    let list = args.pop()?;
+    match (list, start, end) {
+        (
+            EvaluatedValue::List(items),
+            EvaluatedValue::Number(start),
+            EvaluatedValue::Number(end),
+        ) => Some((
+            items,
+            non_negative_count(&start)?,
+            non_negative_count(&end)?,
+        )),
         _ => None,
     }
 }
@@ -1296,6 +2011,28 @@ fn nested_list_arg(_name: &str, args: Vec<EvaluatedValue>) -> Option<Vec<Vec<Eva
         .collect()
 }
 
+fn single_string_list_arg(_name: &str, args: Vec<EvaluatedValue>) -> Option<Vec<String>> {
+    let items = single_list_arg(args)?;
+    items
+        .into_iter()
+        .map(|item| match resolve_default_value(item) {
+            EvaluatedValue::String(value) => Some(value),
+            _ => None,
+        })
+        .collect()
+}
+
+fn single_number_list_arg(_name: &str, args: Vec<EvaluatedValue>) -> Option<Vec<BigDecimal>> {
+    let items = single_list_arg(args)?;
+    items
+        .into_iter()
+        .map(|item| match resolve_default_value(item) {
+            EvaluatedValue::Number(value) => parse_exact_decimal(&value),
+            _ => None,
+        })
+        .collect()
+}
+
 fn string_list_value(value: EvaluatedValue) -> Option<Vec<String>> {
     let EvaluatedValue::List(items) = value else {
         return None;
@@ -1307,6 +2044,61 @@ fn string_list_value(value: EvaluatedValue) -> Option<Vec<String>> {
             _ => None,
         })
         .collect()
+}
+
+fn three_number_args(
+    _name: &str,
+    args: Vec<EvaluatedValue>,
+) -> Option<(BigDecimal, BigDecimal, BigDecimal)> {
+    let mut args = args
+        .into_iter()
+        .map(resolve_default_value)
+        .collect::<Vec<_>>();
+    if args.len() != 3 {
+        return None;
+    }
+    let step = args.pop()?;
+    let limit = args.pop()?;
+    let start = args.pop()?;
+    match (start, limit, step) {
+        (
+            EvaluatedValue::Number(start),
+            EvaluatedValue::Number(limit),
+            EvaluatedValue::Number(step),
+        ) => Some((
+            parse_exact_decimal(&start)?,
+            parse_exact_decimal(&limit)?,
+            parse_exact_decimal(&step)?,
+        )),
+        _ => None,
+    }
+}
+
+fn flatten_items(items: &[EvaluatedValue], depth: i128, output: &mut Vec<EvaluatedValue>) -> bool {
+    for item in items {
+        if output.len() >= MAX_BUILTIN_GENERATED_ITEMS {
+            return false;
+        }
+        match resolve_default_value(item.clone()) {
+            EvaluatedValue::List(nested) if depth != 0 => {
+                let next_depth = if depth < 0 { depth } else { depth - 1 };
+                if !flatten_items(&nested, next_depth, output) {
+                    return false;
+                }
+            }
+            value => output.push(value),
+        }
+    }
+    true
+}
+
+fn empty_numeric_list(name: &str) -> EvaluatedValue {
+    EvaluatedValue::Bottom(Bottom::new(
+        "cue.eval.invalid_builtin_arg",
+        format!("{name} received an empty list"),
+        None,
+        false,
+    ))
 }
 
 fn joined_string_fits(items: &[String], separator: &str) -> bool {
@@ -1325,8 +2117,145 @@ fn joined_string_fits(items: &[String], separator: &str) -> bool {
         .is_some_and(|size| size <= MAX_BUILTIN_GENERATED_BYTES)
 }
 
+fn evaluate_split(
+    name: &str,
+    value: &str,
+    separator: &str,
+    count: i128,
+    after: bool,
+) -> EvaluatedValue {
+    if !generated_string_fits(value) {
+        return builtin_resource_exhausted(name);
+    }
+    if count == 0 {
+        return EvaluatedValue::List(Vec::new());
+    }
+    let limit = if count < 0 {
+        None
+    } else {
+        let Some(limit) = usize::try_from(count).ok() else {
+            return builtin_resource_exhausted(name);
+        };
+        Some(limit)
+    };
+    let items = if separator.is_empty() {
+        split_empty_separator(value, limit)
+    } else if after {
+        split_after_separator(value, separator, limit)
+    } else {
+        split_before_separator(value, separator, limit)
+    };
+    let Some(items) = items else {
+        return builtin_resource_exhausted(name);
+    };
+    EvaluatedValue::List(items.into_iter().map(EvaluatedValue::String).collect())
+}
+
+fn split_empty_separator(value: &str, limit: Option<usize>) -> Option<Vec<String>> {
+    let limit = limit.unwrap_or(usize::MAX);
+    if limit == 0 || value.is_empty() {
+        return Some(Vec::new());
+    }
+    let mut items = Vec::new();
+    for character in value.chars() {
+        if items.len().checked_add(1)? >= limit {
+            let remaining = value
+                .char_indices()
+                .nth(items.len())
+                .and_then(|(offset, _)| value.get(offset..))
+                .unwrap_or("");
+            items.push(remaining.to_owned());
+            return bounded_split_items(items);
+        }
+        items.push(character.to_string());
+    }
+    bounded_split_items(items)
+}
+
+fn split_before_separator(
+    value: &str,
+    separator: &str,
+    limit: Option<usize>,
+) -> Option<Vec<String>> {
+    let items = match limit {
+        Some(limit) => value
+            .splitn(limit, separator)
+            .map(str::to_owned)
+            .collect::<Vec<_>>(),
+        None => value
+            .split(separator)
+            .map(str::to_owned)
+            .collect::<Vec<_>>(),
+    };
+    bounded_split_items(items)
+}
+
+fn split_after_separator(
+    value: &str,
+    separator: &str,
+    limit: Option<usize>,
+) -> Option<Vec<String>> {
+    let limit = limit.unwrap_or(usize::MAX);
+    if limit == 0 {
+        return Some(Vec::new());
+    }
+    let mut items = Vec::new();
+    let mut start = 0_usize;
+    while items.len().checked_add(1)? < limit {
+        let haystack = value.get(start..)?;
+        let Some(relative) = haystack.find(separator) else {
+            break;
+        };
+        let end = start.checked_add(relative)?.checked_add(separator.len())?;
+        items.push(value.get(start..end)?.to_owned());
+        start = end;
+    }
+    if let Some(rest) = value.get(start..) {
+        items.push(rest.to_owned());
+    }
+    bounded_split_items(items)
+}
+
+fn bounded_split_items(items: Vec<String>) -> Option<Vec<String>> {
+    if items.len() > MAX_BUILTIN_GENERATED_ITEMS {
+        return None;
+    }
+    let bytes = items
+        .iter()
+        .try_fold(0_usize, |size, item| size.checked_add(item.len()))?;
+    (bytes <= MAX_BUILTIN_GENERATED_BYTES).then_some(items)
+}
+
 fn generated_string_fits(value: &str) -> bool {
     value.len() <= MAX_BUILTIN_GENERATED_BYTES
+}
+
+fn byte_index_result(index: Option<usize>) -> EvaluatedValue {
+    let index = index.map_or(-1_i128, |index| i128::try_from(index).unwrap_or(i128::MAX));
+    EvaluatedValue::Number(index.to_string())
+}
+
+fn rune_count_satisfies(count: usize, limit: i128, direction: Ordering) -> bool {
+    if limit < 0 {
+        return matches!(direction, Ordering::Greater);
+    }
+    let Ok(limit) = usize::try_from(limit) else {
+        return matches!(direction, Ordering::Less);
+    };
+    match direction {
+        Ordering::Greater => count >= limit,
+        Ordering::Less => count <= limit,
+        Ordering::Equal => count == limit,
+    }
+}
+
+fn invalid_string_index(name: &str) -> EvaluatedValue {
+    EvaluatedValue::Bottom(Bottom::new(
+        "cue.eval.invalid_builtin_arg",
+        format!("{name} received an out-of-range index"),
+        None,
+        false,
+    ))
 }
 
 fn non_negative_count(value: &str) -> Option<usize> {
@@ -1933,6 +2862,14 @@ fn parse_finite_f64(value: &str) -> Option<f64> {
         .filter(|value| value.is_finite())
 }
 
+fn parse_exact_decimal(value: &str) -> Option<BigDecimal> {
+    let parsed = parse_decimal_number(value)?;
+    if !decimal_plain_string_fits(&parsed) {
+        return None;
+    }
+    BigDecimal::from_str(&value.replace('_', "")).ok()
+}
+
 fn parse_integer(value: &str) -> Option<i128> {
     if value.contains(['.', 'e', 'E']) {
         return None;
@@ -2045,6 +2982,46 @@ fn format_number(value: f64) -> String {
         return format!("{value:.0}");
     }
     value.to_string()
+}
+
+fn evaluated_decimal_number(name: &str, value: &BigDecimal) -> EvaluatedValue {
+    format_decimal_number(value)
+        .map_or_else(|| builtin_resource_exhausted(name), EvaluatedValue::Number)
+}
+
+fn format_decimal_number(value: &BigDecimal) -> Option<String> {
+    let normalized = value.normalized();
+    let compact = normalized.to_string();
+    let parsed = parse_decimal_number(&compact)?;
+    if !decimal_plain_string_fits(&parsed) {
+        return None;
+    }
+    let plain = normalized.to_plain_string();
+    (plain.len() <= MAX_BUILTIN_GENERATED_BYTES).then_some(plain)
+}
+
+fn decimal_plain_string_fits(value: &DecimalNumber) -> bool {
+    decimal_plain_string_len(value).is_some_and(|len| len <= MAX_BUILTIN_GENERATED_BYTES)
+}
+
+fn decimal_plain_string_len(value: &DecimalNumber) -> Option<usize> {
+    let digits_len = value.digits.len();
+    let unsigned_len = if value.scale <= 0 {
+        let zeroes = usize::try_from(value.scale.checked_neg()?).ok()?;
+        digits_len.checked_add(zeroes)?
+    } else {
+        let scale = usize::try_from(value.scale).ok()?;
+        if digits_len > scale {
+            digits_len.checked_add(1)?
+        } else {
+            scale.checked_add(2)?
+        }
+    };
+    if value.sign < 0 {
+        unsigned_len.checked_add(1)
+    } else {
+        Some(unsigned_len)
+    }
 }
 
 fn numeric_bound_op(op: &str) -> Option<NumericBoundOp> {

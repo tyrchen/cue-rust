@@ -166,6 +166,7 @@ async fn test_should_run_supported_upstream_core_eval_fixtures() -> TestResult {
     assert_upstream_regex(&context, &root).await?;
     assert_upstream_disjunctions_and_defaults(&context, &root).await?;
     assert_upstream_aggregate_builtins(&context, &root).await?;
+    assert_upstream_stdlib_surface_builtins(&context, &root).await?;
     assert_upstream_object_unification(&context, &root).await?;
     assert_upstream_list_index_and_slice(&context, &root).await?;
     assert_upstream_selecting(&context, &root).await?;
@@ -501,6 +502,98 @@ async fn assert_upstream_aggregate_builtins(context: &Context, root: &Path) -> T
     assert_eq!(
         EvaluatedValue::Bool(true),
         list_value.lookup_path(&["contains"])?.evaluate()?,
+    );
+    Ok(())
+}
+
+async fn assert_upstream_stdlib_surface_builtins(context: &Context, root: &Path) -> TestResult {
+    let strings_gen =
+        TxtarArchive::read(&root.join("vendors/cue/pkg/strings/testdata/gen.txtar")).await?;
+    let strings_source = strings_gen.file("in.cue")?;
+    assert!(strings_source.contains("strings.ByteAt"));
+    assert!(strings_source.contains("strings.ByteSlice"));
+    assert!(strings_source.contains("strings.SliceRunes"));
+
+    let strings_value = context.compile_source(
+        "pkg/strings/gen/reduced.cue",
+        "import \"strings\"\nbyteAt: strings.ByteAt(\"a\", 0)\nsliceRunes: strings.SliceRunes(\"✓ \
+         Hello\", 0, 3)\nbyteSlice: strings.ByteSlice(\"Hello\", 2, 5)\nrunes: \
+         strings.Runes(\"Café\")\ntrimPrefix: strings.TrimPrefix(\"cue-rust\", \
+         \"cue-\")\nreplace: strings.Replace(\"banana\", \"na\", \"NA\", 1)\n",
+    )?;
+    assert_eq!(
+        EvaluatedValue::Number("97".to_owned()),
+        strings_value.lookup_path(&["byteAt"])?.evaluate()?,
+    );
+    assert_eq!(
+        EvaluatedValue::String("✓ H".to_owned()),
+        strings_value.lookup_path(&["sliceRunes"])?.evaluate()?,
+    );
+    assert_eq!(
+        EvaluatedValue::Bytes(b"llo".to_vec()),
+        strings_value.lookup_path(&["byteSlice"])?.evaluate()?,
+    );
+    assert_eq!(
+        EvaluatedValue::List(vec![
+            EvaluatedValue::Number("67".to_owned()),
+            EvaluatedValue::Number("97".to_owned()),
+            EvaluatedValue::Number("102".to_owned()),
+            EvaluatedValue::Number("233".to_owned()),
+        ]),
+        strings_value.lookup_path(&["runes"])?.evaluate()?,
+    );
+    assert_eq!(
+        EvaluatedValue::String("rust".to_owned()),
+        strings_value.lookup_path(&["trimPrefix"])?.evaluate()?,
+    );
+    assert_eq!(
+        EvaluatedValue::String("baNAna".to_owned()),
+        strings_value.lookup_path(&["replace"])?.evaluate()?,
+    );
+
+    let list_gen =
+        TxtarArchive::read(&root.join("vendors/cue/pkg/list/testdata/gen.txtar")).await?;
+    let list_source = list_gen.file("in.cue")?;
+    assert!(list_source.contains("list.FlattenN"));
+    assert!(list_source.contains("list.SortStrings"));
+
+    let list_value = context.compile_source(
+        "pkg/list/gen/reduced.cue",
+        "import \"list\"\nflatten: list.FlattenN([1, [[2, 3], []], [4]], 2)\nrange: list.Range(0, \
+         5, 2)\nsorted: list.SortStrings([\"b\", \"a\"])\nsum: list.Sum([1, 2, 3, 4])\navg: \
+         list.Avg([4, 8, 12])\n",
+    )?;
+    assert_eq!(
+        EvaluatedValue::List(vec![
+            EvaluatedValue::Number("1".to_owned()),
+            EvaluatedValue::Number("2".to_owned()),
+            EvaluatedValue::Number("3".to_owned()),
+            EvaluatedValue::Number("4".to_owned()),
+        ]),
+        list_value.lookup_path(&["flatten"])?.evaluate()?,
+    );
+    assert_eq!(
+        EvaluatedValue::List(vec![
+            EvaluatedValue::Number("0".to_owned()),
+            EvaluatedValue::Number("2".to_owned()),
+            EvaluatedValue::Number("4".to_owned()),
+        ]),
+        list_value.lookup_path(&["range"])?.evaluate()?,
+    );
+    assert_eq!(
+        EvaluatedValue::List(vec![
+            EvaluatedValue::String("a".to_owned()),
+            EvaluatedValue::String("b".to_owned()),
+        ]),
+        list_value.lookup_path(&["sorted"])?.evaluate()?,
+    );
+    assert_eq!(
+        EvaluatedValue::Number("10".to_owned()),
+        list_value.lookup_path(&["sum"])?.evaluate()?,
+    );
+    assert_eq!(
+        EvaluatedValue::Number("8".to_owned()),
+        list_value.lookup_path(&["avg"])?.evaluate()?,
     );
     Ok(())
 }

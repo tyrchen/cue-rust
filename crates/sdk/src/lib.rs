@@ -195,8 +195,40 @@ fn single_diagnostic(code: &'static str, message: &'static str) -> DiagnosticRep
 mod tests {
     use super::{
         Context, CueError, DecodeOptions, EncodeOptions, Encoding, EvalError, EvaluatedValue,
-        ValidateOptions, ValueKind, decode_bytes, encode_value,
+        ValidateOptions, Value, ValueKind, decode_bytes, encode_value,
     };
+
+    fn assert_evaluated_path(
+        value: &Value,
+        label: &str,
+        expected: &EvaluatedValue,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        assert_eq!(expected, &value.lookup_path(&[label])?.evaluate()?);
+        Ok(())
+    }
+
+    fn string_list(items: &[&str]) -> EvaluatedValue {
+        EvaluatedValue::List(
+            items
+                .iter()
+                .map(|item| EvaluatedValue::String((*item).to_owned()))
+                .collect(),
+        )
+    }
+
+    fn number_list(items: &[&str]) -> EvaluatedValue {
+        EvaluatedValue::List(
+            items
+                .iter()
+                .map(|item| EvaluatedValue::Number((*item).to_owned()))
+                .collect(),
+        )
+    }
+
+    fn assert_number_list(value: &EvaluatedValue, expected: &[&str]) {
+        let expected = number_list(expected);
+        assert_eq!(&expected, value);
+    }
 
     #[test]
     fn test_should_compile_source_and_lookup_value() -> Result<(), Box<dyn std::error::Error>> {
@@ -854,6 +886,182 @@ mod tests {
             ]),
             value.lookup_path(&["concatenated"])?.evaluate()?,
         );
+        Ok(())
+    }
+
+    #[test]
+    fn test_should_evaluate_broad_strings_standard_library_surface()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let context = Context::new();
+        let value = context.compile_source(
+            "strings.cue",
+            "import \"strings\"\ncompare: strings.Compare(\"a\", \"b\")\ncontainsAny: \
+             strings.ContainsAny(\"cue\", \"xzue\")\nlastIndex: strings.LastIndex(\"banana\", \
+             \"na\")\nindexAny: strings.IndexAny(\"cue\", \"xzue\")\nlastIndexAny: \
+             strings.LastIndexAny(\"cuecue\", \"eu\")\nsplitN: strings.SplitN(\"a,b,c\", \",\", \
+             2)\nsplitAfter: strings.SplitAfter(\"a,b\", \",\")\nsplitAfterN: \
+             strings.SplitAfterN(\"a,b,c\", \",\", 2)\nfields: strings.Fields(\"  a  b\\t c \
+             \")\ntrim: strings.Trim(\"abba\", \"a\")\ntrimLeft: strings.TrimLeft(\"abba\", \
+             \"ab\")\ntrimRight: strings.TrimRight(\"abba\", \"ab\")\ntrimPrefix: \
+             strings.TrimPrefix(\"cue-rust\", \"cue-\")\ntrimSuffix: \
+             strings.TrimSuffix(\"cue-rust\", \"-rust\")\nreplace: strings.Replace(\"banana\", \
+             \"na\", \"NA\", 1)\nrunes: strings.Runes(\"Café\")\nminRunes: \
+             strings.MinRunes(\"Café\", 4)\nmaxRunes: strings.MaxRunes(\"Café\", 4)\nsliceRunes: \
+             strings.SliceRunes(\"✓ Hello\", 0, 3)\nbyteAt: strings.ByteAt(\"abc\", \
+             1)\nbyteSlice: strings.ByteSlice(\"Hello\", 2, 5)\nsplitAfterTrailing: \
+             strings.SplitAfter(\"a,\", \",\")\nsplitAfterNTrailing: strings.SplitAfterN(\"a,\", \
+             \",\", 2)\ntoTitle: strings.ToTitle(\"alpha beta\")\ntoCamel: \
+             strings.ToCamel(\"Alpha Beta\")\n",
+        )?;
+
+        assert_evaluated_path(&value, "compare", &EvaluatedValue::Number("-1".to_owned()))?;
+        assert_evaluated_path(&value, "containsAny", &EvaluatedValue::Bool(true))?;
+        assert_evaluated_path(&value, "lastIndex", &EvaluatedValue::Number("4".to_owned()))?;
+        assert_evaluated_path(&value, "indexAny", &EvaluatedValue::Number("1".to_owned()))?;
+        assert_evaluated_path(
+            &value,
+            "lastIndexAny",
+            &EvaluatedValue::Number("5".to_owned()),
+        )?;
+        assert_evaluated_path(&value, "splitN", &string_list(&["a", "b,c"]))?;
+        assert_evaluated_path(&value, "splitAfter", &string_list(&["a,", "b"]))?;
+        assert_evaluated_path(&value, "splitAfterN", &string_list(&["a,", "b,c"]))?;
+        assert_evaluated_path(&value, "fields", &string_list(&["a", "b", "c"]))?;
+        assert_evaluated_path(&value, "trim", &EvaluatedValue::String("bb".to_owned()))?;
+        assert_evaluated_path(&value, "trimLeft", &EvaluatedValue::String(String::new()))?;
+        assert_evaluated_path(&value, "trimRight", &EvaluatedValue::String(String::new()))?;
+        assert_evaluated_path(
+            &value,
+            "trimPrefix",
+            &EvaluatedValue::String("rust".to_owned()),
+        )?;
+        assert_evaluated_path(
+            &value,
+            "trimSuffix",
+            &EvaluatedValue::String("cue".to_owned()),
+        )?;
+        assert_evaluated_path(
+            &value,
+            "replace",
+            &EvaluatedValue::String("baNAna".to_owned()),
+        )?;
+        assert_evaluated_path(&value, "runes", &number_list(&["67", "97", "102", "233"]))?;
+        assert_evaluated_path(&value, "minRunes", &EvaluatedValue::Bool(true))?;
+        assert_evaluated_path(&value, "maxRunes", &EvaluatedValue::Bool(true))?;
+        assert_evaluated_path(
+            &value,
+            "sliceRunes",
+            &EvaluatedValue::String("✓ H".to_owned()),
+        )?;
+        assert_evaluated_path(&value, "byteAt", &EvaluatedValue::Number("98".to_owned()))?;
+        assert_evaluated_path(&value, "byteSlice", &EvaluatedValue::Bytes(b"llo".to_vec()))?;
+        assert_evaluated_path(&value, "splitAfterTrailing", &string_list(&["a,", ""]))?;
+        assert_evaluated_path(&value, "splitAfterNTrailing", &string_list(&["a,", ""]))?;
+        assert_evaluated_path(
+            &value,
+            "toTitle",
+            &EvaluatedValue::String("Alpha Beta".to_owned()),
+        )?;
+        assert_evaluated_path(
+            &value,
+            "toCamel",
+            &EvaluatedValue::String("alpha beta".to_owned()),
+        )?;
+        Ok(())
+    }
+
+    #[test]
+    fn test_should_evaluate_broad_list_standard_library_surface()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let context = Context::new();
+        let value = context.compile_source(
+            "list.cue",
+            "import \"list\"\ndrop: list.Drop([1, 2, 3, 4], 2)\ntake: list.Take([1, 2, 3, 4], \
+             2)\nslice: list.Slice([1, 2, 3, 4], 1, 3)\nreverse: list.Reverse([1, 2, \
+             3])\nflatten: list.FlattenN([1, [[2, 3], []], [4]], 2)\nuniqueGood: \
+             list.UniqueItems([1, 2, 3])\nuniqueBad: list.UniqueItems([1, 2, 1])\nsorted: \
+             list.SortStrings([\"b\", \"a\"])\nisSorted: list.IsSortedStrings([\"a\", \
+             \"b\"])\nminItems: list.MinItems([1, 2], 2)\nmaxItems: list.MaxItems([1, 2], \
+             3)\nsum: list.Sum([1, 2, 3])\nproduct: list.Product([2, 3, 4])\nmin: list.Min([3, 1, \
+             2])\nmax: list.Max([3, 1, 2])\navg: list.Avg([4, 8, 12])\nrange: list.Range(0, 5, \
+             2)\ndecimalSum: list.Sum([0.1, 0.2])\ndecimalRange: list.Range(0, 0.3, \
+             0.1)\nhugeDecimal: list.Sum([1e20000000])\n",
+        )?;
+
+        assert_number_list(&value.lookup_path(&["drop"])?.evaluate()?, &["3", "4"]);
+        assert_number_list(&value.lookup_path(&["take"])?.evaluate()?, &["1", "2"]);
+        assert_number_list(&value.lookup_path(&["slice"])?.evaluate()?, &["2", "3"]);
+        assert_number_list(
+            &value.lookup_path(&["reverse"])?.evaluate()?,
+            &["3", "2", "1"],
+        );
+        assert_number_list(
+            &value.lookup_path(&["flatten"])?.evaluate()?,
+            &["1", "2", "3", "4"],
+        );
+        assert_eq!(
+            EvaluatedValue::Bool(true),
+            value.lookup_path(&["uniqueGood"])?.evaluate()?,
+        );
+        assert_eq!(
+            EvaluatedValue::Bool(false),
+            value.lookup_path(&["uniqueBad"])?.evaluate()?,
+        );
+        assert_eq!(
+            EvaluatedValue::List(vec![
+                EvaluatedValue::String("a".to_owned()),
+                EvaluatedValue::String("b".to_owned()),
+            ]),
+            value.lookup_path(&["sorted"])?.evaluate()?,
+        );
+        assert_eq!(
+            EvaluatedValue::Bool(true),
+            value.lookup_path(&["isSorted"])?.evaluate()?,
+        );
+        assert_eq!(
+            EvaluatedValue::Bool(true),
+            value.lookup_path(&["minItems"])?.evaluate()?,
+        );
+        assert_eq!(
+            EvaluatedValue::Bool(true),
+            value.lookup_path(&["maxItems"])?.evaluate()?,
+        );
+        assert_eq!(
+            EvaluatedValue::Number("6".to_owned()),
+            value.lookup_path(&["sum"])?.evaluate()?,
+        );
+        assert_eq!(
+            EvaluatedValue::Number("24".to_owned()),
+            value.lookup_path(&["product"])?.evaluate()?,
+        );
+        assert_eq!(
+            EvaluatedValue::Number("1".to_owned()),
+            value.lookup_path(&["min"])?.evaluate()?,
+        );
+        assert_eq!(
+            EvaluatedValue::Number("3".to_owned()),
+            value.lookup_path(&["max"])?.evaluate()?,
+        );
+        assert_eq!(
+            EvaluatedValue::Number("8".to_owned()),
+            value.lookup_path(&["avg"])?.evaluate()?,
+        );
+        assert_number_list(
+            &value.lookup_path(&["range"])?.evaluate()?,
+            &["0", "2", "4"],
+        );
+        assert_eq!(
+            EvaluatedValue::Number("0.3".to_owned()),
+            value.lookup_path(&["decimalSum"])?.evaluate()?,
+        );
+        assert_number_list(
+            &value.lookup_path(&["decimalRange"])?.evaluate()?,
+            &["0", "0.1", "0.2"],
+        );
+        assert!(matches!(
+            value.lookup_path(&["hugeDecimal"])?.evaluate()?,
+            EvaluatedValue::Bottom(_),
+        ));
         Ok(())
     }
 
