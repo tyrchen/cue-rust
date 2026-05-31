@@ -926,14 +926,19 @@ fn format_number(value: f64) -> String {
 }
 
 fn evaluate_index(base: EvaluatedValue, index: EvaluatedValue) -> EvaluatedValue {
-    let EvaluatedValue::List(items) = base else {
-        return EvaluatedValue::Bottom(Bottom::new(
+    match base {
+        EvaluatedValue::List(items) => evaluate_list_index(&items, index),
+        EvaluatedValue::Struct(fields) => evaluate_struct_index(&fields, index),
+        _ => EvaluatedValue::Bottom(Bottom::new(
             "cue.eval.invalid_index_base",
-            "cannot index non-list value",
+            "cannot index non-list or non-struct value",
             None,
             false,
-        ));
-    };
+        )),
+    }
+}
+
+fn evaluate_list_index(items: &[EvaluatedValue], index: EvaluatedValue) -> EvaluatedValue {
     let EvaluatedValue::Number(index) = index else {
         return EvaluatedValue::Bottom(Bottom::new(
             "cue.eval.invalid_index",
@@ -956,6 +961,28 @@ fn evaluate_index(base: EvaluatedValue, index: EvaluatedValue) -> EvaluatedValue
             format!("list index {index} is out of bounds"),
             None,
             false,
+        ))
+    })
+}
+
+fn evaluate_struct_index(
+    fields: &IndexMap<String, EvaluatedValue>,
+    index: EvaluatedValue,
+) -> EvaluatedValue {
+    let EvaluatedValue::String(index) = index else {
+        return EvaluatedValue::Bottom(Bottom::new(
+            "cue.eval.invalid_index",
+            "struct index must be a string",
+            None,
+            false,
+        ));
+    };
+    fields.get(&index).cloned().unwrap_or_else(|| {
+        EvaluatedValue::Bottom(Bottom::new(
+            "cue.eval.missing_field",
+            format!("field `{index}` does not exist"),
+            None,
+            true,
         ))
     })
 }

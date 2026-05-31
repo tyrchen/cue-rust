@@ -164,6 +164,7 @@ async fn test_should_run_supported_upstream_core_eval_fixtures() -> TestResult {
     let context = Context::new();
     assert_upstream_object_unification(&context, &root).await?;
     assert_upstream_list_index_and_slice(&context, &root).await?;
+    assert_upstream_selecting(&context, &root).await?;
     assert_upstream_arithmetic(&context, &root).await?;
     assert_upstream_integer_arithmetic(&context, &root).await?;
     assert_upstream_booleans(&context, &root).await?;
@@ -238,6 +239,33 @@ async fn assert_upstream_list_index_and_slice(context: &Context, root: &Path) ->
         ]),
         slice_value.lookup_path(&["openStart"])?.evaluate()?,
     );
+    Ok(())
+}
+
+async fn assert_upstream_selecting(context: &Context, root: &Path) -> TestResult {
+    let selecting =
+        TxtarArchive::read(&root.join("vendors/cue/cue/testdata/basicrewrite/012_selecting.txtar"))
+            .await?;
+    let value = context.compile_source(
+        "basicrewrite/012_selecting/in.cue",
+        selecting.file("in.cue")?,
+    )?;
+    assert_eq!(
+        EvaluatedValue::Number("2".to_owned()),
+        value.lookup_path(&["index"])?.evaluate()?,
+    );
+    assert_eq!(
+        EvaluatedValue::Number("3".to_owned()),
+        value.lookup_path(&["mulidx"])?.evaluate()?,
+    );
+    for path in ["e", "f", "g", "h"] {
+        assert!(
+            value
+                .lookup_path(&[path])?
+                .validate(ValidateOptions::default())
+                .is_err(),
+        );
+    }
     Ok(())
 }
 

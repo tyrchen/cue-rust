@@ -221,6 +221,31 @@ mod tests {
     }
 
     #[test]
+    fn test_should_evaluate_struct_string_index_expression()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let context = Context::new();
+        let value = context.compile_source("test.cue", "x: {a: 1, b: {c: 2}}[\"b\"][\"c\"]\n")?;
+        assert_eq!(
+            EvaluatedValue::Number("2".to_owned()),
+            value.lookup_path(&["x"])?.evaluate()?,
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_should_report_missing_struct_string_index() -> Result<(), Box<dyn std::error::Error>> {
+        let context = Context::new();
+        let value = context.compile_source("test.cue", "x: {a: 1}[\"b\"]\n")?;
+        assert!(
+            value
+                .lookup_path(&["x"])?
+                .validate(ValidateOptions::default())
+                .is_err()
+        );
+        Ok(())
+    }
+
+    #[test]
     fn test_should_evaluate_numeric_binary_expressions() -> Result<(), Box<dyn std::error::Error>> {
         let context = Context::new();
         let value = context.compile_source(
