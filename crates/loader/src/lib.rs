@@ -6,6 +6,7 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
     path::PathBuf,
+    str,
 };
 
 use camino::Utf8PathBuf;
@@ -279,7 +280,14 @@ impl Loader {
             }
             if let Some((encoding, path)) = data_arg(arg) {
                 let path = self
-                    .resolve_existing_path(&current_dir, &allowed_root, &path)
+                    .resolve_data_path(&current_dir, &allowed_root, &path)
+                    .await?;
+                data_files.push(DataFile { encoding, path });
+                continue;
+            }
+            if let Some(encoding) = data_encoding_for_path(arg) {
+                let path = self
+                    .resolve_existing_path(&current_dir, &allowed_root, arg)
                     .await?;
                 data_files.push(DataFile { encoding, path });
                 continue;
@@ -314,7 +322,12 @@ impl Loader {
 
     async fn module_root(&self, current_dir: &Utf8PathBuf) -> Result<Utf8PathBuf, LoadError> {
         if let Some(root) = &self.config.module_root {
-            return Ok(root.clone());
+            let root = if root.is_absolute() {
+                root.clone()
+            } else {
+                current_dir.join(root)
+            };
+            return path_to_utf8(tokio::fs::canonicalize(root.as_std_path()).await?);
         }
         discover_module_root(current_dir).await
     }
@@ -384,6 +397,19 @@ impl Loader {
         Ok(())
     }
 
+    async fn resolve_data_path(
+        &self,
+        current_dir: &Utf8PathBuf,
+        allowed_root: &Utf8PathBuf,
+        path: &Utf8PathBuf,
+    ) -> Result<Utf8PathBuf, LoadError> {
+        if path.as_str() == "-" {
+            return Ok(Utf8PathBuf::from("-"));
+        }
+        self.resolve_existing_path(current_dir, allowed_root, path)
+            .await
+    }
+
     async fn push_file(
         &self,
         path: Utf8PathBuf,
@@ -415,13 +441,26 @@ impl Loader {
         if self.config.tags.is_empty() {
             return Ok(());
         }
-        let mut content = String::new();
-        for (name, value) in &self.config.tags {
+        for name in self.config.tags.keys() {
             validate_identifier(name)
                 .map_err(|()| LoadError::InvalidTagName { name: name.clone() })?;
+        }
+        let selected_package = match &self.config.package {
+            PackageSelector::Named(name) => Some(name.as_str()),
+            PackageSelector::Default | PackageSelector::Any | PackageSelector::None => None,
+        };
+        let injections = collect_tag_injections(cue_files, &self.config.tags, selected_package);
+        if injections.is_empty() {
+            return Ok(());
+        }
+        let mut content = String::new();
+        if let PackageSelector::Named(name) = &self.config.package {
+            content.push_str("package ");
             content.push_str(name);
-            content.push_str(": ");
-            content.push_str(value);
+            content.push('\n');
+        }
+        for (field_path, value) in injections {
+            content.push_str(&render_injection_field(&field_path, &value));
             content.push('\n');
         }
         SourceFile::named("tags.cue", &content, self.config.source_limits)?;
@@ -502,17 +541,34 @@ impl Loader {
             PackageSelector::Named(name) => {
                 validate_identifier(name)
                     .map_err(|()| LoadError::InvalidPackageName { name: name.clone() })?;
-                if instance
-                    .package_name
-                    .as_deref()
-                    .is_some_and(|package| package != name)
+                let mut kept_files = Vec::new();
+                let mut kept_build_files = Vec::new();
+                for (ast, build_file) in instance
+                    .files
+                    .iter()
+                    .cloned()
+                    .zip(instance.build_files.iter().cloned())
                 {
+                    if ast
+                        .package
+                        .as_ref()
+                        .is_some_and(|package| package.name == *name)
+                    {
+                        kept_files.push(ast);
+                        kept_build_files.push(build_file);
+                    }
+                }
+                if kept_files.is_empty() {
                     instance.diagnostics.push(Diagnostic::new(
                         Severity::Error,
                         "cue.load.package_mismatch",
-                        format!("package does not match requested package `{name}`"),
+                        format!("no files match requested package `{name}`"),
                         None,
                     ));
+                } else {
+                    instance.files = kept_files;
+                    instance.build_files = kept_build_files;
+                    instance.direct_imports = collect_direct_imports(&instance.files);
                 }
                 instance.package_name = Some(name.clone());
             }
@@ -550,6 +606,274 @@ fn data_arg(arg: &Utf8PathBuf) -> Option<(String, Utf8PathBuf)> {
         return Some((encoding.to_owned(), Utf8PathBuf::from(path)));
     }
     None
+}
+
+fn data_encoding_for_path(path: &Utf8PathBuf) -> Option<String> {
+    match path.extension()? {
+        "json" => Some("json".to_owned()),
+        "yaml" | "yml" => Some("yaml".to_owned()),
+        "toml" => Some("toml".to_owned()),
+        _ => None,
+    }
+}
+
+fn collect_tag_injections(
+    cue_files: &[LoadedSource],
+    tags: &BTreeMap<String, String>,
+    selected_package: Option<&str>,
+) -> BTreeMap<Vec<String>, String> {
+    let mut injections = BTreeMap::new();
+    for source in cue_files {
+        let Ok(content) = str::from_utf8(&source.content) else {
+            continue;
+        };
+        let content = strip_cue_comments(content);
+        if selected_package
+            .is_some_and(|package| source_package(&content).as_deref() != Some(package))
+        {
+            continue;
+        }
+        let mut scope = Vec::new();
+        for line in content.lines() {
+            if let Some((label, tag_name)) = tag_injection_target(line)
+                && let Some(value) = tags.get(&tag_name)
+            {
+                let mut path = scope.clone();
+                path.extend(label);
+                injections.insert(path, value.clone());
+            }
+            update_tag_scope(line, &mut scope);
+        }
+    }
+    injections
+}
+
+fn source_package(content: &str) -> Option<String> {
+    content.lines().find_map(|line| {
+        let line = line.trim();
+        line.strip_prefix("package")
+            .and_then(|rest| rest.split_whitespace().next())
+            .map(ToOwned::to_owned)
+    })
+}
+
+fn tag_injection_target(line: &str) -> Option<(Vec<String>, String)> {
+    let tag_start = find_outside_string(line, "@tag(")?;
+    let before_tag = line.get(..tag_start)?.trim_end();
+    let field_path = injection_field_path(before_tag)?;
+    let tag_body_start = tag_start.checked_add("@tag(".len())?;
+    let tag_body = line.get(tag_body_start..)?;
+    let tag_body_end = tag_body.find(')')?;
+    let tag_name = tag_body
+        .get(..tag_body_end)?
+        .split(',')
+        .next()?
+        .trim()
+        .to_owned();
+    if validate_identifier(&tag_name).is_err() {
+        return None;
+    }
+    Some((field_path, tag_name))
+}
+
+fn update_tag_scope(line: &str, scope: &mut Vec<String>) {
+    for (index, brace) in brace_events(line) {
+        match brace {
+            b'{' => {
+                let Some(prefix) = line.get(..index) else {
+                    continue;
+                };
+                if let Some(path) = injection_field_path(prefix) {
+                    scope.extend(path);
+                }
+            }
+            b'}' => {
+                let _ignored = scope.pop();
+            }
+            _ => {}
+        }
+    }
+}
+
+fn brace_events(line: &str) -> Vec<(usize, u8)> {
+    let mut events = Vec::new();
+    scan_outside_strings(line, |index, byte| {
+        if matches!(byte, b'{' | b'}') {
+            events.push((index, byte));
+        }
+    });
+    events
+}
+
+fn strip_cue_comments(content: &str) -> String {
+    let mut stripped = String::with_capacity(content.len());
+    let mut chars = content.chars().peekable();
+    let mut quote = None;
+    let mut escaped = false;
+    let mut line_comment = false;
+    let mut block_comment = false;
+
+    while let Some(char) = chars.next() {
+        if line_comment {
+            if char == '\n' {
+                line_comment = false;
+                stripped.push('\n');
+            } else {
+                stripped.push(' ');
+            }
+            continue;
+        }
+
+        if block_comment {
+            if char == '*' && chars.peek() == Some(&'/') {
+                let _ignored = chars.next();
+                stripped.push(' ');
+                stripped.push(' ');
+                block_comment = false;
+            } else if char == '\n' {
+                stripped.push('\n');
+            } else {
+                stripped.push(' ');
+            }
+            continue;
+        }
+
+        if let Some(active_quote) = quote {
+            stripped.push(char);
+            if escaped {
+                escaped = false;
+            } else if char == '\\' {
+                escaped = true;
+            } else if char == active_quote {
+                quote = None;
+            }
+            continue;
+        }
+
+        if matches!(char, '"' | '\'') {
+            quote = Some(char);
+            stripped.push(char);
+            continue;
+        }
+
+        if char == '/' && chars.peek() == Some(&'/') {
+            let _ignored = chars.next();
+            stripped.push(' ');
+            stripped.push(' ');
+            line_comment = true;
+            continue;
+        }
+
+        if char == '/' && chars.peek() == Some(&'*') {
+            let _ignored = chars.next();
+            stripped.push(' ');
+            stripped.push(' ');
+            block_comment = true;
+            continue;
+        }
+
+        stripped.push(char);
+    }
+
+    stripped
+}
+
+fn find_outside_string(line: &str, needle: &str) -> Option<usize> {
+    let mut found = None;
+    scan_outside_strings(line, |index, _byte| {
+        if found.is_none()
+            && line
+                .get(index..)
+                .is_some_and(|rest| rest.starts_with(needle))
+        {
+            found = Some(index);
+        }
+    });
+    found
+}
+
+fn scan_outside_strings(line: &str, mut visit: impl FnMut(usize, u8)) {
+    let mut quote = None;
+    let mut escaped = false;
+    for (index, byte) in line.bytes().enumerate() {
+        if let Some(active_quote) = quote {
+            if escaped {
+                escaped = false;
+                continue;
+            }
+            if byte == b'\\' {
+                escaped = true;
+                continue;
+            }
+            if byte == active_quote {
+                quote = None;
+            }
+            continue;
+        }
+        if matches!(byte, b'"' | b'\'') {
+            quote = Some(byte);
+            continue;
+        }
+        visit(index, byte);
+    }
+}
+
+fn injection_field_path(prefix: &str) -> Option<Vec<String>> {
+    let mut labels = Vec::new();
+    let mut segment_start = 0;
+    for colon_index in colon_indices(prefix) {
+        let segment = prefix.get(segment_start..colon_index)?;
+        let label = trailing_label(segment)?;
+        if !is_valid_injection_label(label) {
+            return None;
+        }
+        labels.push(label.to_owned());
+        segment_start = colon_index.saturating_add(1);
+    }
+    if labels.is_empty() {
+        None
+    } else {
+        Some(labels)
+    }
+}
+
+fn colon_indices(line: &str) -> Vec<usize> {
+    let mut indices = Vec::new();
+    scan_outside_strings(line, |index, byte| {
+        if byte == b':' {
+            indices.push(index);
+        }
+    });
+    indices
+}
+
+fn trailing_label(segment: &str) -> Option<&str> {
+    segment
+        .rsplit(|char: char| char == '{' || char == ',' || char.is_whitespace())
+        .find(|part| !part.is_empty())
+}
+
+fn is_valid_injection_label(label: &str) -> bool {
+    validate_identifier(label).is_ok()
+        || label.as_bytes().first() == Some(&b'"') && label.as_bytes().last() == Some(&b'"')
+}
+
+fn render_injection_field(path: &[String], value: &str) -> String {
+    let mut rendered = String::new();
+    let mut labels = path.iter().peekable();
+    while let Some(label) = labels.next() {
+        rendered.push_str(label);
+        rendered.push_str(": ");
+        if labels.peek().is_some() {
+            rendered.push_str("{ ");
+        } else {
+            rendered.push_str(value);
+        }
+    }
+    for _ in 1..path.len() {
+        rendered.push_str(" }");
+    }
+    rendered
 }
 
 fn validate_overlay_path(path: &Utf8PathBuf) -> Result<(), LoadError> {
@@ -686,7 +1010,7 @@ mod tests {
         let loader = Loader::new(
             LoadConfig::builder()
                 .current_dir(Some(dir))
-                .stdin(Some("y: 2\n".to_owned()))
+                .stdin(Some("y: 2\nenvironment: string @tag(env)\n".to_owned()))
                 .overlays(overlays)
                 .tags(tags)
                 .build(),
@@ -712,7 +1036,65 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_should_record_unqualified_data_files() -> Result<(), Box<dyn Error>> {
+        let dir = fixture_dir().await?;
+        fs::write(dir.join("data.yaml"), "x: 1\n").await?;
+        let loader = Loader::new(LoadConfig::builder().current_dir(Some(dir)).build());
+        let instances = loader.load_args(&[Utf8PathBuf::from("data.yaml")]).await?;
+        let instance = instances.first().ok_or("missing instance")?;
+        assert_eq!(1, instance.data_files().len());
+        assert_eq!(
+            "yaml",
+            instance
+                .data_files()
+                .first()
+                .ok_or("missing data")?
+                .encoding
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_should_record_qualified_data_stdin() -> Result<(), Box<dyn Error>> {
+        let dir = fixture_dir().await?;
+        let loader = Loader::new(LoadConfig::builder().current_dir(Some(dir)).build());
+        let instances = loader.load_args(&[Utf8PathBuf::from("json:-")]).await?;
+        let instance = instances.first().ok_or("missing instance")?;
+        let data_file = instance.data_files().first().ok_or("missing data")?;
+        assert_eq!("json", data_file.encoding);
+        assert_eq!("-", data_file.path.as_str());
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn test_should_honor_named_package_selector() -> Result<(), Box<dyn Error>> {
+        let dir = fixture_dir().await?;
+        fs::write(dir.join("a.cue"), "package p\nx: 1\n").await?;
+        fs::write(dir.join("b.cue"), "package q\ny: 2\n").await?;
+        let loader = Loader::new(
+            LoadConfig::builder()
+                .current_dir(Some(dir.clone()))
+                .package(PackageSelector::Named("p".to_owned()))
+                .build(),
+        );
+        let instances = loader.load_args(&[Utf8PathBuf::from(".")]).await?;
+        let instance = instances.first().ok_or("missing instance")?;
+        assert!(!instance.diagnostics().has_errors());
+        assert_eq!(Some("p"), instance.package_name());
+        assert_eq!(1, instance.files().len());
+        assert!(
+            instance
+                .build_files()
+                .first()
+                .ok_or("missing build")?
+                .name
+                .ends_with("a.cue")
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_should_report_missing_named_package() -> Result<(), Box<dyn Error>> {
         let dir = fixture_dir().await?;
         fs::write(dir.join("a.cue"), "package p\nx: 1\n").await?;
         let loader = Loader::new(
@@ -721,7 +1103,7 @@ mod tests {
                 .package(PackageSelector::Named("q".to_owned()))
                 .build(),
         );
-        let instances = loader.load_args(&[Utf8PathBuf::from("a.cue")]).await?;
+        let instances = loader.load_args(&[Utf8PathBuf::from(".")]).await?;
         let instance = instances.first().ok_or("missing instance")?;
         assert!(instance.diagnostics().has_errors());
         Ok(())

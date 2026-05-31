@@ -166,6 +166,26 @@ async fn test_should_eval_upstream_expression_selection_fixture() -> TestResult 
     Ok(())
 }
 
+#[tokio::test]
+async fn test_should_export_positional_upstream_toml_data_fixture() -> TestResult {
+    let archive = TxtarArchive::read(
+        &workspace_root().join("vendors/cue/cmd/cue/cmd/testdata/script/encoding_toml.txtar"),
+    )
+    .await?;
+    let dir = fixture_dir().await?;
+    let data = dir.join("export.toml");
+    fs::write(&data, archive.file("export.toml")?).await?;
+    let data_arg = format!("toml:{}", path_arg(&data)?);
+
+    let output = run(&["export", "--out", "json", &data_arg]).await?;
+    assert_success(&output)?;
+    let stdout = String::from_utf8(output.stdout)?;
+    assert!(!stdout.starts_with("{}"));
+    assert!(stdout.contains("\"message\": \"Hello World!\""));
+    assert!(stdout.contains("\"b\": \"two levels\""));
+    Ok(())
+}
+
 async fn fixture_dir() -> Result<PathBuf, Box<dyn Error>> {
     let id = NEXT_FIXTURE_ID.fetch_add(1, Ordering::Relaxed);
     let path = std::env::temp_dir().join(format!("cue-rust-vendor-{}-{id}", std::process::id()));

@@ -4,8 +4,9 @@
 #![warn(rust_2024_compatibility, missing_docs, missing_debug_implementations)]
 
 use std::{
-    io::{self, Write},
-    path::{Path, PathBuf},
+    collections::BTreeMap,
+    io::{self, Read, Write},
+    path::{Component, Path, PathBuf},
     process::ExitCode,
 };
 
@@ -27,6 +28,19 @@ struct Cli {
     /// Suppress non-data output.
     #[arg(long, global = true)]
     quiet: bool,
+    /// Maximum accepted CUE source size in bytes.
+    #[arg(long, global = true)]
+    source_limit: Option<usize>,
+    /// Module root used to resolve package arguments.
+    #[arg(long, global = true)]
+    module_root: Option<PathBuf>,
+    /// Required CUE package name.
+    #[arg(long, global = true)]
+    package: Option<String>,
+    /// Inject a top-level tag value. Bare names inject true; name=value infers bool, null, number,
+    /// or string.
+    #[arg(short = 't', long = "inject", global = true)]
+    inject: Vec<String>,
     /// Command to run.
     #[command(subcommand)]
     command: Command,
@@ -118,20 +132,23 @@ fn main() -> ExitCode {
 async fn run() -> Result<ExitCode> {
     let cli = Cli::parse();
     init_tracing(cli.verbose, cli.quiet)?;
+    let load_options = load_options_from_cli(&cli).await?;
 
     match cli.command {
-        Command::Parse { files } => scan_files(&files).await,
-        Command::Eval { expressions, files } => eval_files(&files, &expressions).await,
+        Command::Parse { files } => scan_files(&files, &load_options).await,
+        Command::Eval { expressions, files } => {
+            eval_files(&files, &expressions, &load_options).await
+        }
         Command::Export {
             out,
             expressions,
             files,
-        } => export_files(out, &files, &expressions).await,
+        } => export_files(out, &files, &expressions, &load_options).await,
         Command::Vet {
             files,
             data,
             data_format,
-        } => vet_files(&files, &data, data_format).await,
+        } => vet_files(&files, &data, data_format, &load_options).await,
         Command::Version => {
             let mut stdout = io::stdout().lock();
             writeln!(stdout, "{}", cue_rust::VERSION).context("failed to write version output")?;
@@ -140,16 +157,87 @@ async fn run() -> Result<ExitCode> {
     }
 }
 
-async fn eval_files(files: &[PathBuf], expressions: &[String]) -> Result<ExitCode> {
-    write_encoded_files(files, expressions, OutputFormat::Cue, false).await
+#[derive(Clone, Debug, Default)]
+struct CliLoadOptions {
+    source_limits: cue_rust::SourceLimits,
+    module_root: Option<Utf8PathBuf>,
+    package: Option<String>,
+    inject: BTreeMap<String, String>,
+}
+
+async fn load_options_from_cli(cli: &Cli) -> Result<CliLoadOptions> {
+    let source_limits = cli.source_limit.map_or_else(
+        || Ok(cue_rust::SourceLimits::default()),
+        cue_rust::SourceLimits::new,
+    )?;
+    let module_root = if let Some(path) = cli.module_root.as_deref() {
+        Some(canonical_utf8_path(path).await?)
+    } else {
+        None
+    };
+    let inject = parse_injections(&cli.inject)?;
+    Ok(CliLoadOptions {
+        source_limits,
+        module_root,
+        package: cli.package.clone(),
+        inject,
+    })
+}
+
+fn parse_injections(values: &[String]) -> Result<BTreeMap<String, String>> {
+    let mut tags = BTreeMap::new();
+    for value in values {
+        let (name, raw_value) = value
+            .split_once('=')
+            .map_or((value.as_str(), "true"), |(name, raw)| (name, raw));
+        if name.is_empty() {
+            return Err(anyhow!("injected tag name must not be empty"));
+        }
+        tags.insert(name.to_owned(), injected_value(raw_value)?);
+    }
+    Ok(tags)
+}
+
+fn injected_value(value: &str) -> Result<String> {
+    if matches!(value, "true" | "false" | "null")
+        || is_json_number_literal(value)
+        || is_quoted_cue_literal(value)
+    {
+        return Ok(value.to_owned());
+    }
+    serde_json::to_string(value).context("failed to encode injected string value")
+}
+
+fn is_quoted_cue_literal(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    matches!(
+        (bytes.first(), bytes.last()),
+        (Some(b'"'), Some(b'"')) | (Some(b'\''), Some(b'\''))
+    ) && bytes.len() >= 2
+}
+
+fn is_json_number_literal(value: &str) -> bool {
+    if value.is_empty() {
+        return false;
+    }
+    serde_json::from_str::<serde_json::Number>(value).is_ok()
+}
+
+async fn eval_files(
+    files: &[PathBuf],
+    expressions: &[String],
+    load_options: &CliLoadOptions,
+) -> Result<ExitCode> {
+    write_encoded_files(files, expressions, OutputFormat::Cue, false, load_options).await
 }
 
 async fn export_files(
     out: OutputFormat,
     files: &[PathBuf],
     expressions: &[String],
+    load_options: &CliLoadOptions,
 ) -> Result<ExitCode> {
-    write_encoded_files(files, expressions, out, true).await
+    write_encoded_files(files, expressions, out, true, load_options).await
 }
 
 async fn write_encoded_files(
@@ -157,14 +245,15 @@ async fn write_encoded_files(
     expressions: &[String],
     output_format: OutputFormat,
     concrete: bool,
+    load_options: &CliLoadOptions,
 ) -> Result<ExitCode> {
     if files.is_empty() {
         return Err(anyhow!("at least one CUE file is required"));
     }
 
-    let ctx = cue_rust::Context::new();
+    let ctx = context_for(load_options);
     let mut saw_error = false;
-    let loaded = compile_cue_args(&ctx, files).await?;
+    let loaded = compile_cue_args(&ctx, files, load_options).await?;
     saw_error |= loaded.saw_diagnostics;
     for loaded_value in loaded.values {
         if expressions.is_empty() {
@@ -173,6 +262,17 @@ async fn write_encoded_files(
         }
         for expression in expressions {
             let selected = select_expression(&ctx, &loaded_value, expression)?;
+            saw_error |= write_value(&selected, output_format, concrete)?;
+        }
+    }
+    for data_file in loaded.data_files {
+        let data = read_loaded_data_file(&data_file, load_options.source_limits).await?;
+        if expressions.is_empty() {
+            saw_error |= write_value(&data, output_format, concrete)?;
+            continue;
+        }
+        for expression in expressions {
+            let selected = select_value_path(&data, expression)?;
             saw_error |= write_value(&selected, output_format, concrete)?;
         }
     }
@@ -220,6 +320,13 @@ fn select_expression(
         .map_err(|error| anyhow!("failed to select expression `{expression}`: {error}"))
 }
 
+fn select_value_path(value: &Value, expression: &str) -> Result<Value> {
+    let path = parse_expression_path(expression)?;
+    value
+        .lookup_path(&path)
+        .map_err(|error| anyhow!("failed to select expression `{expression}`: {error}"))
+}
+
 fn parse_expression_path(expression: &str) -> Result<Vec<&str>> {
     let trimmed = expression.trim();
     if trimmed.is_empty() {
@@ -241,38 +348,43 @@ async fn vet_files(
     files: &[PathBuf],
     data_files: &[PathBuf],
     data_format: Option<OutputFormat>,
+    load_options: &CliLoadOptions,
 ) -> Result<ExitCode> {
     if files.is_empty() {
         return Err(anyhow!("at least one CUE file is required"));
     }
 
-    let ctx = cue_rust::Context::new();
-    let loaded = compile_cue_args(&ctx, files).await?;
+    let ctx = context_for(load_options);
+    let loaded = compile_cue_args(&ctx, files, load_options).await?;
     if loaded.saw_diagnostics {
         return Ok(ExitCode::from(1));
     }
-    let Some(schema) = unify_all(loaded.values.into_iter().map(|loaded| loaded.value))? else {
+    let LoadedValues {
+        values,
+        data_files: positional_data_files,
+        ..
+    } = loaded;
+    let Some(schema) = unify_all(values.into_iter().map(|loaded| loaded.value))? else {
         return Ok(ExitCode::from(1));
     };
 
     let mut saw_error = false;
-    if data_files.is_empty() {
+    if data_files.is_empty() && positional_data_files.is_empty() {
         if let Err(error) = schema.validate(cue_rust::ValidateOptions::default()) {
             write_eval_error(error)?;
             saw_error = true;
         }
     } else {
+        for data_file in positional_data_files {
+            let data = read_loaded_data_file(&data_file, load_options.source_limits).await?;
+            if validate_data(&schema, &data)? {
+                saw_error = true;
+            }
+        }
         for data_file in data_files {
-            let data = read_data_file(data_file, data_format).await?;
-            match schema.unify(&data).and_then(|value| {
-                value.validate(cue_rust::ValidateOptions::default())?;
-                Ok(value)
-            }) {
-                Ok(_) => {}
-                Err(error) => {
-                    write_eval_error(error)?;
-                    saw_error = true;
-                }
+            let data = read_cli_data_file(data_file, data_format, load_options).await?;
+            if validate_data(&schema, &data)? {
+                saw_error = true;
             }
         }
     }
@@ -287,6 +399,7 @@ async fn vet_files(
 #[derive(Debug)]
 struct LoadedValues {
     values: Vec<LoadedValue>,
+    data_files: Vec<LoadedDataFile>,
     saw_diagnostics: bool,
 }
 
@@ -296,13 +409,38 @@ struct LoadedValue {
     value: Value,
 }
 
-async fn compile_cue_args(ctx: &cue_rust::Context, files: &[PathBuf]) -> Result<LoadedValues> {
+#[derive(Debug)]
+struct LoadedDataFile {
+    encoding: OutputFormat,
+    path: Utf8PathBuf,
+}
+
+async fn compile_cue_args(
+    ctx: &cue_rust::Context,
+    files: &[PathBuf],
+    load_options: &CliLoadOptions,
+) -> Result<LoadedValues> {
     let args = paths_to_utf8(files)?;
-    let config = load_config_for(files)?;
+    let stdin = if args.iter().any(|arg| arg.as_str() == "-") {
+        Some(read_stdin_string(load_options.source_limits).await?)
+    } else {
+        None
+    };
+    let config = load_config_for(files, load_options, stdin)?;
     let instances = ctx.load(config, &args).await?;
     let mut values = Vec::new();
+    let mut data_files = Vec::new();
     let mut saw_diagnostics = false;
     for instance in instances {
+        for data_file in instance.data_files() {
+            data_files.push(LoadedDataFile {
+                encoding: output_format_for_encoding(&data_file.encoding)?,
+                path: data_file.path.clone(),
+            });
+        }
+        if instance.files().is_empty() && !instance.data_files().is_empty() {
+            continue;
+        }
         match ctx.build_instance(&instance) {
             Ok(value) => values.push(LoadedValue { instance, value }),
             Err(CueError::Diagnostics(report)) => {
@@ -314,26 +452,177 @@ async fn compile_cue_args(ctx: &cue_rust::Context, files: &[PathBuf]) -> Result<
     }
     Ok(LoadedValues {
         values,
+        data_files,
         saw_diagnostics,
     })
 }
 
-fn load_config_for(files: &[PathBuf]) -> Result<cue_rust::LoadConfig> {
-    let Some(first) = files.first() else {
-        return Ok(cue_rust::LoadConfig::default());
-    };
-    let current_dir = if first.is_absolute() {
-        let base = first.parent().unwrap_or_else(|| Path::new("."));
-        Some(
-            Utf8PathBuf::from_path_buf(base.to_path_buf())
-                .map_err(|path| anyhow!("path is not valid UTF-8: {}", path.display()))?,
-        )
-    } else {
-        None
-    };
+fn load_config_for(
+    files: &[PathBuf],
+    load_options: &CliLoadOptions,
+    stdin: Option<String>,
+) -> Result<cue_rust::LoadConfig> {
+    let current_dir = current_dir_for_args(files)?;
+    let package = load_options
+        .package
+        .as_ref()
+        .map_or(cue_rust::PackageSelector::Default, |name| {
+            cue_rust::PackageSelector::Named(name.clone())
+        });
     Ok(cue_rust::LoadConfig::builder()
         .current_dir(current_dir)
+        .module_root(load_options.module_root.clone())
+        .package(package)
+        .parse_config(parse_config_for(load_options))
+        .source_limits(load_options.source_limits)
+        .stdin(stdin)
+        .tags(load_options.inject.clone())
         .build())
+}
+
+fn current_dir_for_args(files: &[PathBuf]) -> Result<Option<Utf8PathBuf>> {
+    let candidate = files.iter().find_map(candidate_path_for_current_dir);
+    if let Some(first) = candidate
+        && first.is_absolute()
+    {
+        let base = first.parent().unwrap_or_else(|| Path::new("."));
+        return path_buf_to_utf8(base).map(Some);
+    }
+    Ok(None)
+}
+
+fn candidate_path_for_current_dir(path: &PathBuf) -> Option<PathBuf> {
+    if path == Path::new("-") {
+        return None;
+    }
+    let text = path.to_str()?;
+    if let Some((encoding, rest)) = text.split_once(':')
+        && matches!(encoding, "json" | "yaml" | "toml")
+    {
+        return Some(PathBuf::from(rest));
+    }
+    Some(path.clone())
+}
+
+fn path_buf_to_utf8(path: &Path) -> Result<Utf8PathBuf> {
+    Utf8PathBuf::from_path_buf(path.to_path_buf())
+        .map_err(|path| anyhow!("path is not valid UTF-8: {}", path.display()))
+}
+
+async fn canonical_utf8_path(path: &Path) -> Result<Utf8PathBuf> {
+    let canonical = tokio::fs::canonicalize(path)
+        .await
+        .with_context(|| format!("failed to canonicalize path {}", path.display()))?;
+    path_buf_to_utf8(&canonical)
+}
+
+fn output_format_for_encoding(encoding: &str) -> Result<OutputFormat> {
+    match encoding {
+        "json" => Ok(OutputFormat::Json),
+        "yaml" => Ok(OutputFormat::Yaml),
+        "toml" => Ok(OutputFormat::Toml),
+        _ => Err(anyhow!("unsupported data encoding `{encoding}`")),
+    }
+}
+
+fn validate_data(schema: &Value, data: &Value) -> Result<bool> {
+    match schema.unify(data).and_then(|value| {
+        value.validate(cue_rust::ValidateOptions::default())?;
+        Ok(value)
+    }) {
+        Ok(_) => Ok(false),
+        Err(error) => {
+            write_eval_error(error)?;
+            Ok(true)
+        }
+    }
+}
+
+async fn read_loaded_data_file(
+    data_file: &LoadedDataFile,
+    limits: cue_rust::SourceLimits,
+) -> Result<Value> {
+    let path = data_file.path.as_std_path().to_path_buf();
+    read_data_file(&path, Some(data_file.encoding), limits).await
+}
+
+async fn read_stdin_string(limits: cue_rust::SourceLimits) -> Result<String> {
+    let bytes = read_stdin_bytes(limits).await?;
+    String::from_utf8(bytes).context("stdin is not valid UTF-8")
+}
+
+async fn read_stdin_bytes(limits: cue_rust::SourceLimits) -> Result<Vec<u8>> {
+    tokio::task::spawn_blocking(move || {
+        let limit = limits.max_file_bytes();
+        let take_limit = u64::try_from(limit)
+            .ok()
+            .and_then(|limit| limit.checked_add(1))
+            .ok_or_else(|| anyhow!("source limit is too large"))?;
+        let mut input = Vec::new();
+        io::stdin()
+            .take(take_limit)
+            .read_to_end(&mut input)
+            .context("failed to read stdin")?;
+        if input.len() > limit {
+            return Err(anyhow!(
+                "stdin source exceeds maximum size of {} bytes",
+                limits.max_file_bytes()
+            ));
+        }
+        Ok::<_, anyhow::Error>(input)
+    })
+    .await
+    .context("stdin read task failed")?
+}
+
+fn parse_config_for(load_options: &CliLoadOptions) -> cue_rust::ParseConfig {
+    cue_rust::ParseConfig::new(cue_rust::ParseMode::File, load_options.source_limits)
+}
+
+fn context_for(load_options: &CliLoadOptions) -> cue_rust::Context {
+    cue_rust::Context::with_parse_config(parse_config_for(load_options))
+}
+
+async fn read_file_or_stdin(file: &Path, limits: cue_rust::SourceLimits) -> Result<Vec<u8>> {
+    if file == Path::new("-") {
+        return read_stdin_bytes(limits).await;
+    }
+    let bytes = tokio::fs::read(file)
+        .await
+        .with_context(|| format!("failed to read input file {}", file.display()))?;
+    if bytes.len() > limits.max_file_bytes() {
+        return Err(anyhow!(
+            "input file {} exceeds maximum size of {} bytes",
+            file.display(),
+            limits.max_file_bytes()
+        ));
+    }
+    Ok(bytes)
+}
+
+async fn scan_files(files: &[PathBuf], load_options: &CliLoadOptions) -> Result<ExitCode> {
+    let ctx = context_for(load_options);
+    let mut saw_error = false;
+
+    for file in files {
+        let bytes = read_file_or_stdin(file, load_options.source_limits).await?;
+        let name = file.to_string_lossy().into_owned();
+        let result = ctx.parse_source_bytes(name, &bytes);
+        write_diagnostics(result.diagnostics())?;
+        if !result.diagnostics().has_errors()
+            && let Some(ast) = result.ast()
+        {
+            let mut stdout = io::stdout().lock();
+            writeln!(stdout, "{}", ast.to_debug_tree()).context("failed to write parse tree")?;
+        }
+        saw_error |= result.diagnostics().has_errors();
+    }
+
+    if saw_error {
+        Ok(ExitCode::from(1))
+    } else {
+        Ok(ExitCode::SUCCESS)
+    }
 }
 
 fn paths_to_utf8(files: &[PathBuf]) -> Result<Vec<Utf8PathBuf>> {
@@ -357,10 +646,59 @@ fn unify_all(values: impl IntoIterator<Item = Value>) -> Result<Option<Value>> {
     Ok(Some(unified))
 }
 
-async fn read_data_file(file: &Path, format: Option<OutputFormat>) -> Result<Value> {
-    let bytes = tokio::fs::read(file)
-        .await
-        .with_context(|| format!("failed to read data file {}", file.display()))?;
+async fn read_cli_data_file(
+    file: &Path,
+    format: Option<OutputFormat>,
+    load_options: &CliLoadOptions,
+) -> Result<Value> {
+    let file = resolve_cli_data_path(file, load_options).await?;
+    read_data_file(&file, format, load_options.source_limits).await
+}
+
+async fn resolve_cli_data_path(file: &Path, load_options: &CliLoadOptions) -> Result<PathBuf> {
+    if file == Path::new("-") {
+        return Ok(PathBuf::from("-"));
+    }
+    if let Some(root) = &load_options.module_root {
+        reject_path_traversal(file)?;
+        let path = if file.is_absolute() {
+            file.to_path_buf()
+        } else {
+            std::env::current_dir()
+                .context("failed to discover current directory")?
+                .join(file)
+        };
+        let canonical = tokio::fs::canonicalize(&path)
+            .await
+            .with_context(|| format!("failed to canonicalize data file {}", file.display()))?;
+        if !canonical.starts_with(root.as_std_path()) {
+            return Err(anyhow!(
+                "data file {} escapes module root {}",
+                canonical.display(),
+                root
+            ));
+        }
+        return Ok(canonical);
+    }
+    Ok(file.to_path_buf())
+}
+
+fn reject_path_traversal(path: &Path) -> Result<()> {
+    if path
+        .components()
+        .any(|component| matches!(component, Component::ParentDir))
+    {
+        return Err(anyhow!("path traversal is not allowed: {}", path.display()));
+    }
+    Ok(())
+}
+
+async fn read_data_file(
+    file: &Path,
+    format: Option<OutputFormat>,
+    limits: cue_rust::SourceLimits,
+) -> Result<Value> {
+    let bytes = read_file_or_stdin(file, limits).await?;
     let output_format = format.unwrap_or_else(|| infer_format(file));
     match output_format {
         OutputFormat::Cue => {
@@ -420,33 +758,6 @@ fn write_diagnostics(report: &cue_rust::DiagnosticReport) -> Result<()> {
         .context("failed to write diagnostic")?;
     }
     Ok(())
-}
-
-async fn scan_files(files: &[PathBuf]) -> Result<ExitCode> {
-    let ctx = cue_rust::Context::new();
-    let mut saw_error = false;
-
-    for file in files {
-        let bytes = tokio::fs::read(file)
-            .await
-            .with_context(|| format!("failed to read input file {}", file.display()))?;
-        let name = file.to_string_lossy().into_owned();
-        let result = ctx.parse_source_bytes(name, &bytes);
-        write_diagnostics(result.diagnostics())?;
-        if !result.diagnostics().has_errors()
-            && let Some(ast) = result.ast()
-        {
-            let mut stdout = io::stdout().lock();
-            writeln!(stdout, "{}", ast.to_debug_tree()).context("failed to write parse tree")?;
-        }
-        saw_error |= result.diagnostics().has_errors();
-    }
-
-    if saw_error {
-        Ok(ExitCode::from(1))
-    } else {
-        Ok(ExitCode::SUCCESS)
-    }
 }
 
 fn init_tracing(verbose: bool, quiet: bool) -> Result<()> {

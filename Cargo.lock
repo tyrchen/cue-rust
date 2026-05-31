@@ -296,6 +296,7 @@ dependencies = [
  "camino",
  "clap",
  "cue-rust",
+ "serde_json",
  "tokio",
  "tracing",
  "tracing-subscriber",
