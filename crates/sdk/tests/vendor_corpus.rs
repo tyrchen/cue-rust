@@ -166,6 +166,7 @@ async fn test_should_run_supported_upstream_core_eval_fixtures() -> TestResult {
     assert_upstream_list_index_and_slice(&context, &root).await?;
     assert_upstream_selecting(&context, &root).await?;
     assert_upstream_basic_types(&context, &root).await?;
+    assert_upstream_types(&context, &root).await?;
     assert_upstream_arithmetic(&context, &root).await?;
     assert_upstream_integer_arithmetic(&context, &root).await?;
     assert_upstream_booleans(&context, &root).await?;
@@ -295,6 +296,32 @@ async fn assert_upstream_basic_types(context: &Context, root: &Path) -> TestResu
             .validate(ValidateOptions::default())
             .is_err(),
     );
+    Ok(())
+}
+
+async fn assert_upstream_types(context: &Context, root: &Path) -> TestResult {
+    let types =
+        TxtarArchive::read(&root.join("vendors/cue/cue/testdata/basicrewrite/015_types.txtar"))
+            .await?;
+    let value = context.compile_source("basicrewrite/015_types/in.cue", types.file("in.cue")?)?;
+    assert_eq!(ValueKind::Int, value.lookup_path(&["i"])?.kind()?);
+    assert_eq!(
+        EvaluatedValue::Number("3".to_owned()),
+        value.lookup_path(&["j"])?.evaluate()?,
+    );
+    assert_eq!(ValueKind::String, value.lookup_path(&["s"])?.kind()?);
+    assert_eq!(
+        EvaluatedValue::String("s".to_owned()),
+        value.lookup_path(&["t"])?.evaluate()?,
+    );
+    for path in ["e", "e2", "b", "p", "m"] {
+        assert!(
+            value
+                .lookup_path(&[path])?
+                .validate(ValidateOptions::default())
+                .is_err(),
+        );
+    }
     Ok(())
 }
 

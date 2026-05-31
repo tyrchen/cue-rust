@@ -196,6 +196,19 @@ mod tests {
     }
 
     #[test]
+    fn test_should_report_invalid_unary_plus_operand() -> Result<(), Box<dyn std::error::Error>> {
+        let context = Context::new();
+        let value = context.compile_source("test.cue", "x: +true\n")?;
+        assert!(
+            value
+                .lookup_path(&["x"])?
+                .validate(ValidateOptions::default())
+                .is_err()
+        );
+        Ok(())
+    }
+
+    #[test]
     fn test_should_resolve_nested_field_before_outer_field()
     -> Result<(), Box<dyn std::error::Error>> {
         let context = Context::new();

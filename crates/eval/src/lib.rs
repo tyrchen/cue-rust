@@ -574,7 +574,8 @@ fn into_fields(value: EvaluatedValue) -> IndexMap<String, EvaluatedValue> {
 
 fn evaluate_unary(op: &str, value: EvaluatedValue) -> EvaluatedValue {
     match (op, value) {
-        ("group" | "+", value) => value,
+        ("group", value) => value,
+        ("+", EvaluatedValue::Number(value)) => EvaluatedValue::Number(value),
         ("-", EvaluatedValue::Number(value)) if value.starts_with('-') => {
             EvaluatedValue::Number(value.trim_start_matches('-').to_owned())
         }
