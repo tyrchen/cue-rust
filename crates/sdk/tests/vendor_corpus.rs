@@ -168,6 +168,7 @@ async fn test_should_run_supported_upstream_core_eval_fixtures() -> TestResult {
     assert_upstream_arithmetic(&context, &root).await?;
     assert_upstream_integer_arithmetic(&context, &root).await?;
     assert_upstream_booleans(&context, &root).await?;
+    assert_upstream_null(&context, &root).await?;
     assert_upstream_len(&context, &root).await?;
     assert_upstream_strings_and_bytes(&context, &root).await?;
     assert_upstream_escaping(&context, &root).await?;
@@ -375,6 +376,31 @@ async fn assert_upstream_booleans(context: &Context, root: &Path) -> TestResult 
     assert!(
         value
             .lookup_path(&["f"])?
+            .validate(ValidateOptions::default())
+            .is_err(),
+    );
+    Ok(())
+}
+
+async fn assert_upstream_null(context: &Context, root: &Path) -> TestResult {
+    let null_fixture =
+        TxtarArchive::read(&root.join("vendors/cue/cue/testdata/basicrewrite/017_null.txtar"))
+            .await?;
+    let value =
+        context.compile_source("basicrewrite/017_null/in.cue", null_fixture.file("in.cue")?)?;
+    for (path, expected) in [
+        ("eql", EvaluatedValue::Bool(true)),
+        ("neq", EvaluatedValue::Bool(false)),
+        ("unf", EvaluatedValue::Null),
+        ("eq1", EvaluatedValue::Bool(false)),
+        ("eq2", EvaluatedValue::Bool(false)),
+        ("ne1", EvaluatedValue::Bool(true)),
+    ] {
+        assert_eq!(expected, value.lookup_path(&[path])?.evaluate()?);
+    }
+    assert!(
+        value
+            .lookup_path(&["call"])?
             .validate(ValidateOptions::default())
             .is_err(),
     );
