@@ -389,10 +389,11 @@ impl<'runtime> Compiler<'runtime> {
 }
 
 fn unquote_string(value: &str) -> String {
-    value
+    let unquoted = value
         .strip_prefix('"')
         .and_then(|value| value.strip_suffix('"'))
-        .map_or_else(|| value.to_owned(), ToOwned::to_owned)
+        .unwrap_or(value);
+    String::from_utf8_lossy(&unescape_literal_bytes(unquoted)).into_owned()
 }
 
 fn unquote_bytes(value: &str) -> Vec<u8> {
@@ -400,7 +401,55 @@ fn unquote_bytes(value: &str) -> Vec<u8> {
         .strip_prefix('\'')
         .and_then(|value| value.strip_suffix('\''))
         .unwrap_or(value);
-    unquoted.as_bytes().to_vec()
+    unescape_literal_bytes(unquoted)
+}
+
+fn unescape_literal_bytes(value: &str) -> Vec<u8> {
+    let mut output = Vec::with_capacity(value.len());
+    let mut bytes = value.bytes();
+    while let Some(byte) = bytes.next() {
+        if byte != b'\\' {
+            output.push(byte);
+            continue;
+        }
+        let Some(escaped) = bytes.next() else {
+            output.push(b'\\');
+            break;
+        };
+        match escaped {
+            b'n' => output.push(b'\n'),
+            b'r' => output.push(b'\r'),
+            b't' => output.push(b'\t'),
+            b'"' => output.push(b'"'),
+            b'\'' => output.push(b'\''),
+            b'\\' => output.push(b'\\'),
+            b'x' => push_hex_escape(&mut output, &mut bytes),
+            other => {
+                output.push(b'\\');
+                output.push(other);
+            }
+        }
+    }
+    output
+}
+
+fn push_hex_escape(output: &mut Vec<u8>, bytes: &mut impl Iterator<Item = u8>) {
+    match (
+        bytes.next().and_then(hex_value),
+        bytes.next().and_then(hex_value),
+    ) {
+        (Some(high), Some(low)) => output.push((high << 4) | low),
+        _ => output.extend_from_slice(b"\\x"),
+    }
+}
+
+fn hex_value(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        b'A'..=b'F' => Some(byte - b'A' + 10),
+        _ => None,
+    }
 }
 
 fn is_builtin_kind(name: &str) -> bool {

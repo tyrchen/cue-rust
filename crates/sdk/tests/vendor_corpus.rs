@@ -167,6 +167,7 @@ async fn test_should_run_supported_upstream_core_eval_fixtures() -> TestResult {
     assert_upstream_arithmetic(&context, &root).await?;
     assert_upstream_len(&context, &root).await?;
     assert_upstream_strings_and_bytes(&context, &root).await?;
+    assert_upstream_escaping(&context, &root).await?;
     Ok(())
 }
 
@@ -301,6 +302,24 @@ async fn assert_upstream_strings_and_bytes(context: &Context, root: &Path) -> Te
     assert_eq!(
         EvaluatedValue::Bytes(b"abcabc".to_vec()),
         strings_bytes_value.lookup_path(&["b2"])?.evaluate()?,
+    );
+    Ok(())
+}
+
+async fn assert_upstream_escaping(context: &Context, root: &Path) -> TestResult {
+    let escaping =
+        TxtarArchive::read(&root.join("vendors/cue/cue/testdata/basicrewrite/008_escaping.txtar"))
+            .await?;
+    let escaping_source = first_lines(escaping.file("in.cue")?, 2);
+    let escaping_value =
+        context.compile_source("basicrewrite/008_escaping/in.cue", escaping_source)?;
+    assert_eq!(
+        EvaluatedValue::String("foo\nbar".to_owned()),
+        escaping_value.lookup_path(&["a"])?.evaluate()?,
+    );
+    assert_eq!(
+        EvaluatedValue::String("foo\nbar".to_owned()),
+        escaping_value.lookup_path(&["b"])?.evaluate()?,
     );
     Ok(())
 }

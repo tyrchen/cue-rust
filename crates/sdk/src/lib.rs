@@ -317,6 +317,21 @@ mod tests {
     }
 
     #[test]
+    fn test_should_unescape_string_and_bytes_literals() -> Result<(), Box<dyn std::error::Error>> {
+        let context = Context::new();
+        let value = context.compile_source("test.cue", "s: \"foo\\nbar\"\nb: 'a\\n\\xff'\n")?;
+        assert_eq!(
+            EvaluatedValue::String("foo\nbar".to_owned()),
+            value.lookup_path(&["s"])?.evaluate()?,
+        );
+        assert_eq!(
+            EvaluatedValue::Bytes(vec![b'a', b'\n', 0xff]),
+            value.lookup_path(&["b"])?.evaluate()?,
+        );
+        Ok(())
+    }
+
+    #[test]
     fn test_should_report_len_builtin_arity() -> Result<(), Box<dyn std::error::Error>> {
         let context = Context::new();
         let value = context.compile_source("test.cue", "x: len()\n")?;
