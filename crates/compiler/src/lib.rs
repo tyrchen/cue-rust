@@ -68,6 +68,7 @@ pub struct Compiler<'runtime> {
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 struct Scope {
     fields: BTreeSet<String>,
+    imports: BTreeMap<String, String>,
     lets: BTreeMap<String, ExprId>,
 }
 
@@ -132,15 +133,26 @@ impl<'runtime> Compiler<'runtime> {
         environment: cue_rust_adt::EnvironmentId,
     ) -> Result<(), CompileError> {
         for import in &file.imports {
-            self.runtime.add_expression(SemanticExpr::ImportReference {
-                path: import.path.clone(),
-            })?;
-            self.diagnostics.push(Diagnostic::new(
-                Severity::Error,
-                "cue.compile.unsupported_import",
-                format!("import {} is not loaded by the current loader", import.path),
-                Some(import.span),
-            ));
+            let path = unquote_string(&import.path);
+            if is_supported_builtin_import(&path) {
+                if let Some(scope) = self.scopes.last_mut() {
+                    let local_name = import
+                        .alias
+                        .clone()
+                        .unwrap_or_else(|| import_name(&path).to_owned());
+                    scope.imports.insert(local_name, path);
+                }
+            } else {
+                self.runtime.add_expression(SemanticExpr::ImportReference {
+                    path: import.path.clone(),
+                })?;
+                self.diagnostics.push(Diagnostic::new(
+                    Severity::Error,
+                    "cue.compile.unsupported_import",
+                    format!("import {} is not loaded by the current loader", import.path),
+                    Some(import.span),
+                ));
+            }
         }
         for declaration in &file.declarations {
             if let Decl::Let(let_decl) = declaration {
@@ -245,6 +257,11 @@ impl<'runtime> Compiler<'runtime> {
                 SemanticExpr::List(lowered_items)
             }
             Expr::Selector { base, field, .. } => {
+                if let Some(path) = self.import_path_for_selector_base(base) {
+                    return Ok(self.runtime.add_expression(SemanticExpr::Base(
+                        BaseValue::Builtin(format!("{path}.{field}")),
+                    ))?);
+                }
                 let base = self.lower_expr(base)?;
                 let feature = self.feature_for_name(field);
                 SemanticExpr::Selector { base, feature }
@@ -353,6 +370,9 @@ impl<'runtime> Compiler<'runtime> {
         if let Some(expression) = self.resolve_let(name) {
             return SemanticExpr::LetReference { expression };
         }
+        if let Some(path) = self.resolve_import(name) {
+            return SemanticExpr::ImportReference { path };
+        }
         if self.resolve_field(name) {
             let feature = self.feature_for_name(name);
             return SemanticExpr::FieldReference {
@@ -410,11 +430,25 @@ impl<'runtime> Compiler<'runtime> {
             .find_map(|scope| scope.lets.get(name).copied())
     }
 
+    fn resolve_import(&self, name: &str) -> Option<String> {
+        self.scopes
+            .iter()
+            .rev()
+            .find_map(|scope| scope.imports.get(name).cloned())
+    }
+
     fn resolve_field(&self, name: &str) -> bool {
         self.scopes
             .iter()
             .rev()
             .any(|scope| scope.fields.contains(name))
+    }
+
+    fn import_path_for_selector_base(&self, base: &Expr) -> Option<String> {
+        let Expr::Identifier(name, _) = base else {
+            return None;
+        };
+        self.resolve_import(name)
     }
 }
 
@@ -424,6 +458,10 @@ fn unquote_string(value: &str) -> String {
         .and_then(|value| value.strip_suffix('"'))
         .unwrap_or(value);
     String::from_utf8_lossy(&unescape_literal_bytes(unquoted)).into_owned()
+}
+
+fn import_name(path: &str) -> &str {
+    path.rsplit('/').next().unwrap_or(path)
 }
 
 fn label_name(label: &Label) -> String {
@@ -522,6 +560,10 @@ fn is_builtin_name(name: &str) -> bool {
             name,
             "and" | "close" | "div" | "len" | "mod" | "or" | "quo" | "rem"
         )
+}
+
+fn is_supported_builtin_import(path: &str) -> bool {
+    matches!(path, "list" | "strings")
 }
 
 #[cfg(test)]

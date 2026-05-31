@@ -37,7 +37,11 @@ impl AstFile {
             lines.push(format!("  package {}", package.name));
         }
         for import in &self.imports {
-            lines.push(format!("  import {}", import.path));
+            if let Some(alias) = &import.alias {
+                lines.push(format!("  import {alias} {}", import.path));
+            } else {
+                lines.push(format!("  import {}", import.path));
+            }
         }
         for declaration in &self.declarations {
             declaration.push_debug(&mut lines, 1);
@@ -58,6 +62,8 @@ pub struct PackageClause {
 /// Import declaration.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ImportDecl {
+    /// Optional local import alias.
+    pub alias: Option<String>,
     /// Import path literal, including quotes.
     pub path: String,
     /// Source span.

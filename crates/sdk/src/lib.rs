@@ -782,9 +782,86 @@ mod tests {
     }
 
     #[test]
-    fn test_should_report_import_as_compile_diagnostic() {
+    fn test_should_evaluate_supported_standard_library_imports()
+    -> Result<(), Box<dyn std::error::Error>> {
         let context = Context::new();
-        let result = context.compile_source("test.cue", "import \"strings\"\nx: 1\n");
+        let value = context.compile_source(
+            "test.cue",
+            "import s \"strings\"\nimport l \"list\"\ntrimmed: s.TrimSpace(\" cue \")\nupper: \
+             s.ToUpper(\"cue\")\njoined: s.Join([\"cue\", \"rust\"], \"-\")\nsplit: \
+             s.Split(\"a.b\", \".\")\ncontains: l.Contains([\"cue\", \"rust\"], \
+             \"rust\")\nhasPrefix: s.HasPrefix(\"cue-rust\", \"cue\")\nhasSuffix: \
+             s.HasSuffix(\"cue-rust\", \"rust\")\ncount: s.Count(\"banana\", \"na\")\nindex: \
+             s.Index(\"cue-rust\", \"rust\")\nstringRepeat: s.Repeat(\"ha\", 3)\nrepeated: \
+             l.Repeat([\"x\"], 3)\nconcatenated: l.Concat([[1], [2, 3]])\n",
+        )?;
+        assert_eq!(
+            EvaluatedValue::String("cue".to_owned()),
+            value.lookup_path(&["trimmed"])?.evaluate()?,
+        );
+        assert_eq!(
+            EvaluatedValue::String("CUE".to_owned()),
+            value.lookup_path(&["upper"])?.evaluate()?,
+        );
+        assert_eq!(
+            EvaluatedValue::String("cue-rust".to_owned()),
+            value.lookup_path(&["joined"])?.evaluate()?,
+        );
+        assert_eq!(
+            EvaluatedValue::List(vec![
+                EvaluatedValue::String("a".to_owned()),
+                EvaluatedValue::String("b".to_owned()),
+            ]),
+            value.lookup_path(&["split"])?.evaluate()?,
+        );
+        assert_eq!(
+            EvaluatedValue::Bool(true),
+            value.lookup_path(&["contains"])?.evaluate()?,
+        );
+        assert_eq!(
+            EvaluatedValue::Bool(true),
+            value.lookup_path(&["hasPrefix"])?.evaluate()?,
+        );
+        assert_eq!(
+            EvaluatedValue::Bool(true),
+            value.lookup_path(&["hasSuffix"])?.evaluate()?,
+        );
+        assert_eq!(
+            EvaluatedValue::Number("2".to_owned()),
+            value.lookup_path(&["count"])?.evaluate()?,
+        );
+        assert_eq!(
+            EvaluatedValue::Number("4".to_owned()),
+            value.lookup_path(&["index"])?.evaluate()?,
+        );
+        assert_eq!(
+            EvaluatedValue::String("hahaha".to_owned()),
+            value.lookup_path(&["stringRepeat"])?.evaluate()?,
+        );
+        assert_eq!(
+            EvaluatedValue::List(vec![
+                EvaluatedValue::String("x".to_owned()),
+                EvaluatedValue::String("x".to_owned()),
+                EvaluatedValue::String("x".to_owned()),
+            ]),
+            value.lookup_path(&["repeated"])?.evaluate()?,
+        );
+        assert_eq!(
+            EvaluatedValue::List(vec![
+                EvaluatedValue::Number("1".to_owned()),
+                EvaluatedValue::Number("2".to_owned()),
+                EvaluatedValue::Number("3".to_owned()),
+            ]),
+            value.lookup_path(&["concatenated"])?.evaluate()?,
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_should_report_unsupported_import_as_compile_diagnostic() {
+        let context = Context::new();
+        let result =
+            context.compile_source("test.cue", "import \"example.com/remote/pkg\"\nx: 1\n");
         assert!(matches!(result, Err(CueError::Diagnostics(_))));
     }
 }

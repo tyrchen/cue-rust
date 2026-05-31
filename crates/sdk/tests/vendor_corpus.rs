@@ -407,6 +407,74 @@ async fn assert_upstream_aggregate_builtins(context: &Context, root: &Path) -> T
         ValueKind::Struct,
         or_value.lookup_path(&["unique2"])?.kind()?
     );
+
+    let strings_arity =
+        TxtarArchive::read(&root.join("vendors/cue/cue/testdata/builtins/issue_3567.txtar"))
+            .await?;
+    assert!(strings_arity.file("in.cue")?.contains("strings.Join"));
+    let invalid_join = context.compile_source(
+        "builtins/issue_3567/reduced.cue",
+        "import \"strings\"\na: strings.Join([\"1\"])\n",
+    )?;
+    assert!(
+        invalid_join
+            .lookup_path(&["a"])?
+            .validate(ValidateOptions::default())
+            .is_err(),
+    );
+
+    let cmd_print =
+        TxtarArchive::read(&root.join("vendors/cue/cmd/cue/cmd/testdata/script/cmd_print.txtar"))
+            .await?;
+    assert!(cmd_print.file("task_tool.cue")?.contains("strings.Join"));
+    let strings_value = context.compile_source(
+        "cmd/cmd_print/reduced.cue",
+        "import \"strings\"\nresult: strings.Join(strings.Split(\"abc\", \"\"), \".\")\nupper: \
+         strings.ToUpper(\"cue\")\ntrimmed: strings.TrimSpace(\" cue \")\n",
+    )?;
+    assert_eq!(
+        EvaluatedValue::String("a.b.c".to_owned()),
+        strings_value.lookup_path(&["result"])?.evaluate()?,
+    );
+    assert_eq!(
+        EvaluatedValue::String("CUE".to_owned()),
+        strings_value.lookup_path(&["upper"])?.evaluate()?,
+    );
+    assert_eq!(
+        EvaluatedValue::String("cue".to_owned()),
+        strings_value.lookup_path(&["trimmed"])?.evaluate()?,
+    );
+
+    let export_force = TxtarArchive::read(
+        &root.join("vendors/cue/cmd/cue/cmd/testdata/script/export_force.txtar"),
+    )
+    .await?;
+    assert!(export_force.file("slow.cue")?.contains("list.Repeat"));
+    let list_value = context.compile_source(
+        "cmd/export_force/reduced.cue",
+        "import \"list\"\nrepeated: list.Repeat([\"x\"], 3)\nconcatenated: list.Concat([[\"a\"], \
+         [\"b\", \"c\"]])\ncontains: list.Contains([\"a\", \"b\"], \"b\")\n",
+    )?;
+    assert_eq!(
+        EvaluatedValue::List(vec![
+            EvaluatedValue::String("x".to_owned()),
+            EvaluatedValue::String("x".to_owned()),
+            EvaluatedValue::String("x".to_owned()),
+        ]),
+        list_value.lookup_path(&["repeated"])?.evaluate()?,
+    );
+    assert_eq!(
+        EvaluatedValue::List(vec![
+            EvaluatedValue::String("a".to_owned()),
+            EvaluatedValue::String("b".to_owned()),
+            EvaluatedValue::String("c".to_owned()),
+        ]),
+        list_value.lookup_path(&["concatenated"])?.evaluate()?,
+    );
+    assert_eq!(
+        EvaluatedValue::Bool(true),
+        list_value.lookup_path(&["contains"])?.evaluate()?,
+    );
     Ok(())
 }
 

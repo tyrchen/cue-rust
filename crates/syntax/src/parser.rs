@@ -136,8 +136,8 @@ impl<'tokens> Parser<'tokens> {
             let mut imports = Vec::new();
             while !self.at(TokenKind::RightParen) && !self.at(TokenKind::Eof) {
                 self.skip_separators();
-                if self.at(TokenKind::String) {
-                    imports.push(self.import_from_string(start));
+                if self.at_import_start() {
+                    imports.push(self.parse_import_spec(start));
                 } else {
                     self.error_here("cue.parse.expected_import", "expected import string");
                     self.recover_to_separator();
@@ -150,22 +150,42 @@ impl<'tokens> Parser<'tokens> {
                 "expected ')' after import list",
             );
             imports
-        } else if self.at(TokenKind::String) {
-            vec![self.import_from_string(start)]
+        } else if self.at_import_start() {
+            vec![self.parse_import_spec(start)]
         } else {
             self.error_here("cue.parse.expected_import", "expected import string");
             Vec::new()
         }
     }
 
-    fn import_from_string(&mut self, start: Span) -> ImportDecl {
+    fn parse_import_spec(&mut self, start: Span) -> ImportDecl {
+        let alias = if self.at(TokenKind::Identifier) {
+            self.bump().map(|token| token.text().to_owned())
+        } else {
+            None
+        };
         let Some(token) = self.bump() else {
             return ImportDecl {
+                alias,
                 path: "\"<bad>\"".to_owned(),
                 span: start,
             };
         };
+        if token.kind() != TokenKind::String {
+            self.diagnostics.push(Diagnostic::new(
+                Severity::Error,
+                "cue.parse.expected_import",
+                "expected import string",
+                Some(token.span()),
+            ));
+            return ImportDecl {
+                alias,
+                path: "\"<bad>\"".to_owned(),
+                span: merge_span(start, token.span()),
+            };
+        }
         ImportDecl {
+            alias,
             path: token.text().to_owned(),
             span: merge_span(start, token.span()),
         }
@@ -672,6 +692,15 @@ impl<'tokens> Parser<'tokens> {
         )
     }
 
+    fn at_import_start(&self) -> bool {
+        self.at(TokenKind::String)
+            || (self.at(TokenKind::Identifier)
+                && self
+                    .tokens
+                    .get(self.cursor.saturating_add(1))
+                    .is_some_and(|token| token.kind() == TokenKind::String))
+    }
+
     fn at_chained_field_start(&self) -> bool {
         self.label_marker_colon_offset().is_some()
     }
@@ -768,6 +797,24 @@ mod tests {
         let tree = result.ast().map(crate::AstFile::to_debug_tree);
         assert_eq!(
             Some("file\n  package demo\n  field x\n    number 1".to_owned()),
+            tree,
+        );
+    }
+
+    #[test]
+    fn test_should_parse_import_alias() {
+        let result = parse_bytes(
+            "test.cue",
+            b"import s \"strings\"\nvalue: s.ToUpper(\"cue\")\n",
+            ParseConfig::default(),
+        );
+        assert!(!result.diagnostics().has_errors());
+        let tree = result.ast().map(crate::AstFile::to_debug_tree);
+        assert_eq!(
+            Some(
+                "file\n  import s \"strings\"\n  field value\n    call\n      selector ToUpper\n        ident s\n      string \"cue\""
+                    .to_owned(),
+            ),
             tree,
         );
     }

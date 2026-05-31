@@ -114,6 +114,8 @@ fn push_semantic_cases(
             == cue_rust::EvaluatedValue::Number("3".to_owned()),
     ));
 
+    push_stdlib_cases(context, cases)?;
+
     let bytes_value = context.compile_source("bytes.cue", "x: 2 * 'ab'\n")?;
     cases.push(supported_case(
         "eval/bytes-repeat",
@@ -169,6 +171,47 @@ fn push_semantic_cases(
     Ok(())
 }
 
+fn push_stdlib_cases(
+    context: &Context,
+    cases: &mut Vec<CompatibilityCase>,
+) -> Result<(), Box<dyn Error>> {
+    let standard_imports = context.compile_source(
+        "stdlib.cue",
+        "import \"strings\"\nimport \"list\"\ntext: strings.ToUpper(strings.TrimSpace(\" cue \
+         \"))\njoined: strings.Join([\"cue\", \"rust\"], \"-\")\nhas: list.Contains([\"cue\", \
+         \"rust\"], \"rust\")\nrepeated: list.Repeat([1], 3)\nconcatenated: list.Concat([[1], [2, \
+         3]])\n",
+    )?;
+    cases.push(supported_case(
+        "eval/stdlib-strings-import",
+        "semantic",
+        standard_imports.lookup_path(&["text"])?.evaluate()?
+            == cue_rust::EvaluatedValue::String("CUE".to_owned())
+            && standard_imports.lookup_path(&["joined"])?.evaluate()?
+                == cue_rust::EvaluatedValue::String("cue-rust".to_owned()),
+    ));
+    cases.push(supported_case(
+        "eval/stdlib-list-import",
+        "semantic",
+        standard_imports.lookup_path(&["has"])?.evaluate()? == cue_rust::EvaluatedValue::Bool(true)
+            && standard_imports.lookup_path(&["repeated"])?.evaluate()?
+                == cue_rust::EvaluatedValue::List(vec![
+                    cue_rust::EvaluatedValue::Number("1".to_owned()),
+                    cue_rust::EvaluatedValue::Number("1".to_owned()),
+                    cue_rust::EvaluatedValue::Number("1".to_owned()),
+                ])
+            && standard_imports
+                .lookup_path(&["concatenated"])?
+                .evaluate()?
+                == cue_rust::EvaluatedValue::List(vec![
+                    cue_rust::EvaluatedValue::Number("1".to_owned()),
+                    cue_rust::EvaluatedValue::Number("2".to_owned()),
+                    cue_rust::EvaluatedValue::Number("3".to_owned()),
+                ]),
+    ));
+    Ok(())
+}
+
 fn push_encoding_cases(
     context: &Context,
     cases: &mut Vec<CompatibilityCase>,
@@ -196,10 +239,10 @@ fn push_security_cases(cases: &mut Vec<CompatibilityCase>) {
 
 fn push_known_gap_cases(context: &Context, cases: &mut Vec<CompatibilityCase>) {
     cases.push(supported_case(
-        "compile/import-diagnostic",
+        "compile/unsupported-import-diagnostic",
         "loader-gap",
         context
-            .compile_source("import.cue", "import \"strings\"\nx: 1\n")
+            .compile_source("import.cue", "import \"example.com/remote/pkg\"\nx: 1\n")
             .is_err(),
     ));
 
@@ -207,6 +250,55 @@ fn push_known_gap_cases(context: &Context, cases: &mut Vec<CompatibilityCase>) {
         "loader/import-registry",
         "loader-gap",
         "registry imports are outside the Phase 9 local-loader compatibility subset",
+    ));
+    cases.push(expected_gap_case(
+        "stdlib/strings-full-surface",
+        "stdlib-gap",
+        "only high-frequency strings functions are implemented; remaining upstream strings \
+         builtins are tracked separately",
+    ));
+    cases.push(expected_gap_case(
+        "stdlib/list-full-surface",
+        "stdlib-gap",
+        "only high-frequency list functions are implemented; validators, sorting, and aggregate \
+         list builtins remain gaps",
+    ));
+    cases.push(expected_gap_case(
+        "syntax/string-interpolation",
+        "parser-gap",
+        "scanner currently tokenizes strings as literals and does not split interpolation segments",
+    ));
+    cases.push(expected_gap_case(
+        "syntax/comprehensions",
+        "parser-gap",
+        "for/if comprehensions require dedicated AST and ADT forms before evaluation",
+    ));
+    cases.push(expected_gap_case(
+        "syntax/dynamic-labels",
+        "parser-gap",
+        "dynamic and pattern labels are not yet represented as first-class labels",
+    ));
+    cases.push(expected_gap_case(
+        "compile/aliases",
+        "compiler-gap",
+        "alias declarations and alias labels are not lowered into lexical references yet",
+    ));
+    cases.push(expected_gap_case(
+        "eval/open-list-ellipsis",
+        "semantic-gap",
+        "ellipsis list tails are parsed as expressions instead of open-list constraints",
+    ));
+    cases.push(expected_gap_case(
+        "eval/cycle-scheduler",
+        "semantic-gap",
+        "structural cycle detection still relies on depth limits instead of upstream-style \
+         scheduling",
+    ));
+    cases.push(expected_gap_case(
+        "eval/closedness-patterns",
+        "semantic-gap",
+        "closedness is limited to close() and does not include definitions with pattern \
+         constraints",
     ));
 }
 

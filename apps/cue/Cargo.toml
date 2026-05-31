@@ -1,5 +1,5 @@
 [package]
-name = "cue"
+name = "cue-rs"
 description = "Command-line interface for cue-rust."
 version.workspace = true
 authors.workspace = true
@@ -11,7 +11,7 @@ homepage.workspace = true
 readme.workspace = true
 
 [[bin]]
-name = "cue"
+name = "cue-rs"
 path = "src/main.rs"
 
 [dependencies]
