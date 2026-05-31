@@ -233,7 +233,7 @@ impl<'tokens> Parser<'tokens> {
     }
 
     fn parse_field(&mut self) -> Decl {
-        let label = self.parse_label();
+        let (alias, label) = self.parse_field_head();
         let marker = self.parse_field_marker();
         self.expect_kind(
             TokenKind::Colon,
@@ -244,6 +244,7 @@ impl<'tokens> Parser<'tokens> {
         self.skip_attributes();
         let span = merge_span(label.span(), value.span());
         Decl::Field(FieldDecl {
+            alias,
             label,
             marker,
             value,
@@ -256,7 +257,7 @@ impl<'tokens> Parser<'tokens> {
             return self.parse_expr(0);
         }
 
-        let label = self.parse_label();
+        let (alias, label) = self.parse_field_head();
         let marker = self.parse_field_marker();
         self.expect_kind(
             TokenKind::Colon,
@@ -267,6 +268,7 @@ impl<'tokens> Parser<'tokens> {
         let span = merge_span(label.span(), value.span());
         Expr::Struct(
             vec![Decl::Field(FieldDecl {
+                alias,
                 label,
                 marker,
                 value,
@@ -274,6 +276,27 @@ impl<'tokens> Parser<'tokens> {
             })],
             span,
         )
+    }
+
+    fn parse_field_head(&mut self) -> (Option<String>, Label) {
+        let first = self.parse_label();
+        if !(self.at(TokenKind::Operator) && self.peek_text() == Some("=")) {
+            return (None, first);
+        }
+        let alias = match &first {
+            Label::Identifier(name, _) => Some(name.clone()),
+            other => {
+                self.diagnostics.push(Diagnostic::new(
+                    Severity::Error,
+                    "cue.parse.invalid_alias_label",
+                    "field alias must be an identifier",
+                    Some(other.span()),
+                ));
+                None
+            }
+        };
+        self.bump();
+        (alias, self.parse_label())
     }
 
     fn parse_label(&mut self) -> Label {
@@ -742,6 +765,31 @@ impl<'tokens> Parser<'tokens> {
         }
         let first_after_label = self.cursor.checked_add(1)?;
         let next = self.tokens.get(first_after_label)?;
+        if next.kind() == TokenKind::Operator && next.text() == "=" {
+            return self.alias_marker_colon_offset(first_after_label.checked_add(1)?);
+        }
+        if next.kind() == TokenKind::Colon {
+            return Some(first_after_label);
+        }
+        if next.kind() == TokenKind::Operator
+            && matches!(next.text(), "?" | "!")
+            && self
+                .tokens
+                .get(first_after_label.checked_add(1)?)
+                .is_some_and(|token| token.kind() == TokenKind::Colon)
+        {
+            return first_after_label.checked_add(1);
+        }
+        None
+    }
+
+    fn alias_marker_colon_offset(&self, label_index: usize) -> Option<usize> {
+        let label = self.tokens.get(label_index)?;
+        if !matches!(label.kind(), TokenKind::Identifier | TokenKind::String) {
+            return None;
+        }
+        let first_after_label = label_index.checked_add(1)?;
+        let next = self.tokens.get(first_after_label)?;
         if next.kind() == TokenKind::Colon {
             return Some(first_after_label);
         }
@@ -893,6 +941,25 @@ mod tests {
         assert_eq!(
             Some(
                 "file\n  field x\n    list\n      number 1\n      number 2\n      ellipsis\n        binary &\n          unary >=\n            number 4\n          unary <=\n            number 5\n  field y\n    list\n      ellipsis\n        ellipsis"
+                    .to_owned(),
+            ),
+            tree,
+        );
+    }
+
+    #[test]
+    fn test_should_parse_field_alias_labels() {
+        let result = parse_bytes(
+            "test.cue",
+            b"t: {\n  a=_a: _\n  c=d: 3\n}\n",
+            ParseConfig::default(),
+        );
+        assert!(!result.diagnostics().has_errors());
+        let tree = result.ast().map(crate::AstFile::to_debug_tree);
+        assert_eq!(
+            Some(
+                "file\n  field t\n    struct\n      field a=_a\n        ident _\n      field \
+                 c=d\n        number 3"
                     .to_owned(),
             ),
             tree,

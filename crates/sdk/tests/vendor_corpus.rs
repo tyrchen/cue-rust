@@ -182,6 +182,7 @@ async fn test_should_run_supported_upstream_core_eval_fixtures() -> TestResult {
     assert_upstream_strings_and_bytes(&context, &root).await?;
     assert_upstream_escaping(&context, &root).await?;
     assert_upstream_definitions_and_export_profiles(&context, &root).await?;
+    assert_upstream_alias_labels(&context, &root).await?;
     Ok(())
 }
 
@@ -227,6 +228,32 @@ async fn assert_upstream_definitions_and_export_profiles(
         "x?: 1\ny: x\n",
     )?;
     assert!(encode_value(&optional_reference, EncodeOptions::default()).is_err());
+    Ok(())
+}
+
+async fn assert_upstream_alias_labels(context: &Context, root: &Path) -> TestResult {
+    let aliases = TxtarArchive::read(
+        &root.join("vendors/cue/cue/testdata/basicrewrite/aliases/aliases.txtar"),
+    )
+    .await?;
+    let upstream_source = aliases.file("in.cue")?;
+    assert!(upstream_source.contains("a=_a: _"));
+    assert!(upstream_source.contains("c=d: 3"));
+
+    let value = context.compile_source(
+        "basicrewrite/aliases/in.cue",
+        "t0: {\n  a=_a: _\n  let _b = a\n  _out: _b\n}\nt1: {\n  _a: b\n  let b = c\n  c=d: 3\n}\n",
+    )?;
+    assert_eq!(ValueKind::Top, value.lookup_path(&["t0", "_out"])?.kind()?);
+    assert_eq!(
+        EvaluatedValue::Number("3".to_owned()),
+        value.lookup_path(&["t1", "_a"])?.evaluate()?,
+    );
+    assert_eq!(
+        EvaluatedValue::Number("3".to_owned()),
+        value.lookup_path(&["t1", "d"])?.evaluate()?,
+    );
+    assert!(value.lookup_path(&["t1", "c"]).is_err());
     Ok(())
 }
 

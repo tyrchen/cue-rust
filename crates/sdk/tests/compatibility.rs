@@ -106,6 +106,8 @@ fn push_semantic_cases(
             == cue_rust::EvaluatedValue::Number("1".to_owned()),
     ));
 
+    push_alias_cases(context, cases)?;
+
     let call_value = context.compile_source("call.cue", "x: len([1, 2, 3])\n")?;
     cases.push(supported_case(
         "eval/builtin-len-call",
@@ -187,6 +189,24 @@ fn push_semantic_cases(
                 .lookup_path(&["bad"])?
                 .validate(ValidateOptions::default())
                 .is_err(),
+    ));
+    Ok(())
+}
+
+fn push_alias_cases(
+    context: &Context,
+    cases: &mut Vec<CompatibilityCase>,
+) -> Result<(), Box<dyn Error>> {
+    let alias_value =
+        context.compile_source("alias.cue", "t: {\n  _a: b\n  let b = c\n  c=d: 3\n}\n")?;
+    cases.push(supported_case(
+        "compile/aliases",
+        "semantic",
+        alias_value.lookup_path(&["t", "_a"])?.evaluate()?
+            == cue_rust::EvaluatedValue::Number("3".to_owned())
+            && alias_value.lookup_path(&["t", "d"])?.evaluate()?
+                == cue_rust::EvaluatedValue::Number("3".to_owned())
+            && alias_value.lookup_path(&["t", "c"]).is_err(),
     ));
     Ok(())
 }
@@ -297,11 +317,6 @@ fn push_known_gap_cases(context: &Context, cases: &mut Vec<CompatibilityCase>) {
         "syntax/dynamic-labels",
         "parser-gap",
         "dynamic and pattern labels are not yet represented as first-class labels",
-    ));
-    cases.push(expected_gap_case(
-        "compile/aliases",
-        "compiler-gap",
-        "alias declarations and alias labels are not lowered into lexical references yet",
     ));
     cases.push(expected_gap_case(
         "eval/cycle-scheduler",

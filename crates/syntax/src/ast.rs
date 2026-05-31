@@ -89,7 +89,14 @@ impl Decl {
         let indent = "  ".repeat(depth);
         match self {
             Self::Field(field) => {
-                lines.push(format!("{indent}field {}", field.label.display_name()));
+                if let Some(alias) = &field.alias {
+                    lines.push(format!(
+                        "{indent}field {alias}={}",
+                        field.label.display_name(),
+                    ));
+                } else {
+                    lines.push(format!("{indent}field {}", field.label.display_name()));
+                }
                 field.value.push_debug(lines, depth + 1);
             }
             Self::Let(let_decl) => {
@@ -105,6 +112,8 @@ impl Decl {
 /// Field declaration.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct FieldDecl {
+    /// Optional local alias for referencing this field's value.
+    pub alias: Option<String>,
     /// Field label.
     pub label: Label,
     /// Field presence marker.

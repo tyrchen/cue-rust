@@ -3,7 +3,7 @@
 #![forbid(unsafe_code)]
 #![warn(rust_2024_compatibility, missing_docs, missing_debug_implementations)]
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 
 use cue_rust_adt::{
     AdtError, BaseValue, Bottom, Conjunct, Environment, ExprId, Feature, FeatureKind, FieldExpr,
@@ -11,7 +11,7 @@ use cue_rust_adt::{
 };
 use cue_rust_loader::BuildInstance;
 use cue_rust_source::{Diagnostic, DiagnosticReport, Severity, Span};
-use cue_rust_syntax::{AstFile, Decl, Expr, FieldMarker, Label};
+use cue_rust_syntax::{AstFile, Decl, Expr, FieldDecl, FieldMarker, Label};
 use thiserror::Error;
 
 /// Compiler options shared by lowering passes.
@@ -67,7 +67,7 @@ pub struct Compiler<'runtime> {
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 struct Scope {
-    fields: BTreeSet<String>,
+    fields: BTreeMap<String, String>,
     imports: BTreeMap<String, String>,
     lets: BTreeMap<String, ExprId>,
 }
@@ -119,7 +119,7 @@ impl<'runtime> Compiler<'runtime> {
         for file in files {
             for declaration in &file.declarations {
                 if let Decl::Field(field) = declaration {
-                    scope.fields.insert(label_name(&field.label));
+                    register_field_bindings(&mut scope, field);
                 }
             }
         }
@@ -351,20 +351,21 @@ impl<'runtime> Compiler<'runtime> {
     fn lower_struct_expr(&mut self, declarations: &[Decl]) -> Result<SemanticExpr, CompileError> {
         let mut scope = Scope::default();
         for declaration in declarations {
-            match declaration {
-                Decl::Field(field) => {
-                    scope.fields.insert(label_name(&field.label));
-                }
-                Decl::Let(let_decl) => {
-                    let expression = self.lower_expr(&let_decl.value)?;
-                    scope.lets.insert(let_decl.name.clone(), expression);
-                }
-                _ => {}
+            if let Decl::Field(field) = declaration {
+                register_field_bindings(&mut scope, field);
             }
         }
 
         let mut fields = Vec::new();
         self.scopes.push(scope);
+        for declaration in declarations {
+            if let Decl::Let(let_decl) = declaration {
+                let expression = self.lower_expr(&let_decl.value)?;
+                if let Some(scope) = self.scopes.last_mut() {
+                    scope.lets.insert(let_decl.name.clone(), expression);
+                }
+            }
+        }
         for declaration in declarations {
             if let Decl::Field(field) = declaration {
                 let expression = self.lower_expr(&field.value)?;
@@ -389,8 +390,8 @@ impl<'runtime> Compiler<'runtime> {
         if let Some(path) = self.resolve_import(name) {
             return SemanticExpr::ImportReference { path };
         }
-        if self.resolve_field(name) {
-            let feature = self.feature_for_name(name);
+        if let Some(label) = self.resolve_field(name) {
+            let feature = self.feature_for_name(&label);
             return SemanticExpr::FieldReference {
                 feature,
                 up_count: 0,
@@ -453,11 +454,11 @@ impl<'runtime> Compiler<'runtime> {
             .find_map(|scope| scope.imports.get(name).cloned())
     }
 
-    fn resolve_field(&self, name: &str) -> bool {
+    fn resolve_field(&self, name: &str) -> Option<String> {
         self.scopes
             .iter()
             .rev()
-            .any(|scope| scope.fields.contains(name))
+            .find_map(|scope| scope.fields.get(name).cloned())
     }
 
     fn import_path_for_selector_base(&self, base: &Expr) -> Option<String> {
@@ -486,6 +487,14 @@ fn label_name(label: &Label) -> String {
         Label::String(name, _) => unquote_string(name),
         Label::Bad(_) => "<bad>".to_owned(),
         _ => label.display_name().to_owned(),
+    }
+}
+
+fn register_field_bindings(scope: &mut Scope, field: &FieldDecl) {
+    let label = label_name(&field.label);
+    scope.fields.insert(label.clone(), label.clone());
+    if let Some(alias) = &field.alias {
+        scope.fields.insert(alias.clone(), label);
     }
 }
 

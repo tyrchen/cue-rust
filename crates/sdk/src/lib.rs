@@ -940,6 +940,34 @@ mod tests {
     }
 
     #[test]
+    fn test_should_resolve_field_alias_labels() -> Result<(), Box<dyn std::error::Error>> {
+        let context = Context::new();
+        let value = context.compile_source(
+            "aliases.cue",
+            "t0: {\n  a=_a: _\n  let _b = a\n  _out: _b\n}\nt1: {\n  _a: b\n  let b = c\n  c=d: \
+             3\n}\n",
+        )?;
+        assert_eq!(ValueKind::Top, value.lookup_path(&["t0", "_out"])?.kind()?);
+        assert_eq!(
+            EvaluatedValue::Number("3".to_owned()),
+            value.lookup_path(&["t1", "_a"])?.evaluate()?,
+        );
+        assert_eq!(
+            EvaluatedValue::Number("3".to_owned()),
+            value.lookup_path(&["t1", "d"])?.evaluate()?,
+        );
+        assert!(value.lookup_path(&["t1", "c"]).is_err());
+
+        let mut cue_options = EncodeOptions::default();
+        cue_options.encoding = Encoding::Cue;
+        cue_options.concrete = false;
+        let output = encode_value(&value.lookup_path(&["t1"])?, cue_options)?;
+        assert!(output.contains("d: 3"));
+        assert!(!output.contains("c:"));
+        Ok(())
+    }
+
+    #[test]
     fn test_should_report_unsupported_import_as_compile_diagnostic() {
         let context = Context::new();
         let result =
