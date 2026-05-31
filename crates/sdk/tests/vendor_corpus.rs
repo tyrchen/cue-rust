@@ -166,6 +166,7 @@ async fn test_should_run_supported_upstream_core_eval_fixtures() -> TestResult {
     assert_upstream_list_index_and_slice(&context, &root).await?;
     assert_upstream_arithmetic(&context, &root).await?;
     assert_upstream_integer_arithmetic(&context, &root).await?;
+    assert_upstream_booleans(&context, &root).await?;
     assert_upstream_len(&context, &root).await?;
     assert_upstream_strings_and_bytes(&context, &root).await?;
     assert_upstream_escaping(&context, &root).await?;
@@ -299,6 +300,56 @@ async fn assert_upstream_integer_arithmetic(context: &Context, root: &Path) -> T
                 .is_err(),
         );
     }
+    Ok(())
+}
+
+async fn assert_upstream_booleans(context: &Context, root: &Path) -> TestResult {
+    let booleans =
+        TxtarArchive::read(&root.join("vendors/cue/cue/testdata/basicrewrite/004_booleans.txtar"))
+            .await?;
+    let boolean_value =
+        context.compile_source("basicrewrite/004_booleans/in.cue", booleans.file("in.cue")?)?;
+    assert_eq!(
+        EvaluatedValue::Bool(true),
+        boolean_value.lookup_path(&["t"])?.evaluate()?,
+    );
+    assert_eq!(
+        EvaluatedValue::Bool(false),
+        boolean_value.lookup_path(&["f"])?.evaluate()?,
+    );
+    assert!(
+        boolean_value
+            .lookup_path(&["e"])?
+            .validate(ValidateOptions::default())
+            .is_err(),
+    );
+
+    let boolean_arithmetic = TxtarArchive::read(
+        &root.join("vendors/cue/cue/testdata/basicrewrite/005_boolean_arithmetic.txtar"),
+    )
+    .await?;
+    let value = context.compile_source(
+        "basicrewrite/005_boolean_arithmetic/in.cue",
+        boolean_arithmetic.file("in.cue")?,
+    )?;
+    for (path, expected) in [
+        ("a", true),
+        ("b", true),
+        ("c", false),
+        ("d", true),
+        ("e", true),
+    ] {
+        assert_eq!(
+            EvaluatedValue::Bool(expected),
+            value.lookup_path(&[path])?.evaluate()?,
+        );
+    }
+    assert!(
+        value
+            .lookup_path(&["f"])?
+            .validate(ValidateOptions::default())
+            .is_err(),
+    );
     Ok(())
 }
 
