@@ -6,6 +6,9 @@
 use cue_rust_adt::Runtime;
 pub use cue_rust_compiler::CompiledInstance;
 use cue_rust_compiler::{CompileError, CompileOptions, Compiler};
+pub use cue_rust_encoding::{
+    DecodeError, DecodeOptions, EncodeError, EncodeOptions, Encoding, decode_bytes, encode_value,
+};
 pub use cue_rust_eval::{
     EvalError, EvalOptions, EvaluatedValue, ValidateOptions, Value, ValueKind,
 };
@@ -22,7 +25,7 @@ use thiserror::Error;
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 /// Top-level SDK error.
-#[derive(Clone, Debug, Error, Eq, PartialEq)]
+#[derive(Debug, Error)]
 pub enum CueError {
     /// Compilation infrastructure failed.
     #[error(transparent)]
@@ -30,6 +33,12 @@ pub enum CueError {
     /// Evaluation failed.
     #[error(transparent)]
     Eval(#[from] EvalError),
+    /// Data decoding failed.
+    #[error(transparent)]
+    Decode(#[from] DecodeError),
+    /// Data encoding failed.
+    #[error(transparent)]
+    Encode(#[from] EncodeError),
     /// Source, parse, compile, or validation diagnostics were emitted.
     #[error("operation produced diagnostics")]
     Diagnostics(DiagnosticReport),

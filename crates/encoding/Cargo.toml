@@ -11,9 +11,14 @@ homepage.workspace = true
 readme.workspace = true
 
 [dependencies]
+cue-rust-eval.workspace = true
+cue-rust-source.workspace = true
+indexmap.workspace = true
+noyalib.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
+toml.workspace = true
 
 [lints]
 workspace = true

@@ -5,12 +5,16 @@
 
 use std::{
     io::{self, Write},
-    path::PathBuf,
+    path::{Path, PathBuf},
     process::ExitCode,
 };
 
 use anyhow::{Context as AnyhowContext, Result, anyhow};
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
+use cue_rust::{
+    CueError, DecodeOptions, EncodeError, EncodeOptions, Encoding, EvalError, Value, decode_bytes,
+    encode_value,
+};
 
 /// cue-rust command-line arguments.
 #[derive(Debug, Parser)]
@@ -35,8 +39,56 @@ enum Command {
         /// Files to scan.
         files: Vec<PathBuf>,
     },
+    /// Evaluate CUE files and print CUE-like value syntax.
+    Eval {
+        /// CUE files to evaluate.
+        files: Vec<PathBuf>,
+    },
+    /// Export concrete CUE values as external data.
+    Export {
+        /// Output format.
+        #[arg(long, value_enum, default_value_t = OutputFormat::Json)]
+        out: OutputFormat,
+        /// CUE files to export.
+        files: Vec<PathBuf>,
+    },
+    /// Validate CUE values, optionally against external data files.
+    Vet {
+        /// CUE schema/value files.
+        files: Vec<PathBuf>,
+        /// External data files to validate against the first CUE file.
+        #[arg(long)]
+        data: Vec<PathBuf>,
+        /// External data format. Defaults to file extension inference.
+        #[arg(long, value_enum)]
+        data_format: Option<OutputFormat>,
+    },
     /// Print the cue-rust version.
     Version,
+}
+
+/// CLI output/data format flag.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+enum OutputFormat {
+    /// CUE-like value syntax.
+    Cue,
+    /// JSON.
+    Json,
+    /// YAML.
+    Yaml,
+    /// TOML.
+    Toml,
+}
+
+impl OutputFormat {
+    fn encoding(self) -> Encoding {
+        match self {
+            Self::Cue => Encoding::Cue,
+            Self::Json => Encoding::Json,
+            Self::Yaml => Encoding::Yaml,
+            Self::Toml => Encoding::Toml,
+        }
+    }
 }
 
 fn main() -> ExitCode {
@@ -62,12 +114,199 @@ async fn run() -> Result<ExitCode> {
 
     match cli.command {
         Command::Parse { files } => scan_files(&files).await,
+        Command::Eval { files } => eval_files(&files).await,
+        Command::Export { out, files } => export_files(out, &files).await,
+        Command::Vet {
+            files,
+            data,
+            data_format,
+        } => vet_files(&files, &data, data_format).await,
         Command::Version => {
             let mut stdout = io::stdout().lock();
             writeln!(stdout, "{}", cue_rust::VERSION).context("failed to write version output")?;
             Ok(ExitCode::SUCCESS)
         }
     }
+}
+
+async fn eval_files(files: &[PathBuf]) -> Result<ExitCode> {
+    write_encoded_files(files, OutputFormat::Cue, false).await
+}
+
+async fn export_files(out: OutputFormat, files: &[PathBuf]) -> Result<ExitCode> {
+    write_encoded_files(files, out, true).await
+}
+
+async fn write_encoded_files(
+    files: &[PathBuf],
+    output_format: OutputFormat,
+    concrete: bool,
+) -> Result<ExitCode> {
+    if files.is_empty() {
+        return Err(anyhow!("at least one CUE file is required"));
+    }
+
+    let ctx = cue_rust::Context::new();
+    let mut saw_error = false;
+    for file in files {
+        let Some(value) = compile_cue_file(&ctx, file).await? else {
+            saw_error = true;
+            continue;
+        };
+        let mut options = EncodeOptions::default();
+        options.encoding = output_format.encoding();
+        options.concrete = concrete;
+        match encode_value(&value, options) {
+            Ok(output) => {
+                let mut stdout = io::stdout().lock();
+                writeln!(stdout, "{output}").context("failed to write encoded value")?;
+            }
+            Err(error) => {
+                if write_encode_error(error)? {
+                    saw_error = true;
+                }
+            }
+        }
+    }
+
+    if saw_error {
+        Ok(ExitCode::from(1))
+    } else {
+        Ok(ExitCode::SUCCESS)
+    }
+}
+
+async fn vet_files(
+    files: &[PathBuf],
+    data_files: &[PathBuf],
+    data_format: Option<OutputFormat>,
+) -> Result<ExitCode> {
+    if files.is_empty() {
+        return Err(anyhow!("at least one CUE file is required"));
+    }
+
+    let ctx = cue_rust::Context::new();
+    let Some(schema) = compile_cue_file(&ctx, files.first().context("missing CUE file")?).await?
+    else {
+        return Ok(ExitCode::from(1));
+    };
+
+    let mut saw_error = false;
+    if data_files.is_empty() {
+        for file in files {
+            match compile_cue_file(&ctx, file).await? {
+                Some(value) => {
+                    if let Err(error) = value.validate(cue_rust::ValidateOptions::default()) {
+                        write_eval_error(error)?;
+                        saw_error = true;
+                    }
+                }
+                None => {
+                    saw_error = true;
+                }
+            }
+        }
+    } else {
+        for data_file in data_files {
+            let data = read_data_file(data_file, data_format).await?;
+            match schema.unify(&data).and_then(|value| {
+                value.validate(cue_rust::ValidateOptions::default())?;
+                Ok(value)
+            }) {
+                Ok(_) => {}
+                Err(error) => {
+                    write_eval_error(error)?;
+                    saw_error = true;
+                }
+            }
+        }
+    }
+
+    if saw_error {
+        Ok(ExitCode::from(1))
+    } else {
+        Ok(ExitCode::SUCCESS)
+    }
+}
+
+async fn compile_cue_file(ctx: &cue_rust::Context, file: &Path) -> Result<Option<Value>> {
+    let bytes = tokio::fs::read(file)
+        .await
+        .with_context(|| format!("failed to read input file {}", file.display()))?;
+    let name = file.to_string_lossy().into_owned();
+    match ctx.compile_source_bytes(name, &bytes) {
+        Ok(value) => Ok(Some(value)),
+        Err(CueError::Diagnostics(report)) => {
+            write_diagnostics(&report)?;
+            Ok(None)
+        }
+        Err(error) => Err(anyhow!("{error}")),
+    }
+}
+
+async fn read_data_file(file: &Path, format: Option<OutputFormat>) -> Result<Value> {
+    let bytes = tokio::fs::read(file)
+        .await
+        .with_context(|| format!("failed to read data file {}", file.display()))?;
+    let output_format = format.unwrap_or_else(|| infer_format(file));
+    match output_format {
+        OutputFormat::Cue => {
+            let ctx = cue_rust::Context::new();
+            match ctx.compile_source_bytes(file.to_string_lossy().into_owned(), &bytes) {
+                Ok(value) => Ok(value),
+                Err(CueError::Diagnostics(report)) => {
+                    write_diagnostics(&report)?;
+                    Err(anyhow!("data file {} has diagnostics", file.display()))
+                }
+                Err(error) => Err(anyhow!("{error}")),
+            }
+        }
+        OutputFormat::Json | OutputFormat::Yaml | OutputFormat::Toml => {
+            decode_bytes(output_format.encoding(), &bytes, DecodeOptions::default())
+                .map_err(|error| anyhow!("{error}"))
+        }
+    }
+}
+
+fn infer_format(file: &Path) -> OutputFormat {
+    match file.extension().and_then(|extension| extension.to_str()) {
+        Some("cue") => OutputFormat::Cue,
+        Some("yaml" | "yml") => OutputFormat::Yaml,
+        Some("toml") => OutputFormat::Toml,
+        _ => OutputFormat::Json,
+    }
+}
+
+fn write_encode_error(error: EncodeError) -> Result<bool> {
+    match error {
+        EncodeError::Eval(error) => {
+            write_eval_error(error)?;
+            Ok(true)
+        }
+        error => Err(anyhow!("{error}")),
+    }
+}
+
+fn write_eval_error(error: EvalError) -> Result<()> {
+    match error {
+        EvalError::Diagnostics(report) => write_diagnostics(&report),
+        EvalError::Adt(error) => Err(anyhow!("{error}")),
+    }
+}
+
+fn write_diagnostics(report: &cue_rust::DiagnosticReport) -> Result<()> {
+    for diagnostic in report.diagnostics() {
+        let mut stderr = io::stderr().lock();
+        writeln!(
+            stderr,
+            "{:?}: {}: {}",
+            diagnostic.severity(),
+            diagnostic.code(),
+            diagnostic,
+        )
+        .context("failed to write diagnostic")?;
+    }
+    Ok(())
 }
 
 async fn scan_files(files: &[PathBuf]) -> Result<ExitCode> {
@@ -80,17 +319,7 @@ async fn scan_files(files: &[PathBuf]) -> Result<ExitCode> {
             .with_context(|| format!("failed to read input file {}", file.display()))?;
         let name = file.to_string_lossy().into_owned();
         let result = ctx.parse_source_bytes(name, &bytes);
-        for diagnostic in result.diagnostics().diagnostics() {
-            let mut stderr = io::stderr().lock();
-            writeln!(
-                stderr,
-                "{:?}: {}: {}",
-                diagnostic.severity(),
-                diagnostic.code(),
-                diagnostic,
-            )
-            .context("failed to write diagnostic")?;
-        }
+        write_diagnostics(result.diagnostics())?;
         if !result.diagnostics().has_errors()
             && let Some(ast) = result.ast()
         {

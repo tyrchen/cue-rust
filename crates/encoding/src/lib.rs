@@ -3,14 +3,393 @@
 #![forbid(unsafe_code)]
 #![warn(rust_2024_compatibility, missing_docs, missing_debug_implementations)]
 
+use std::{str, str::FromStr};
+
+use cue_rust_eval::{EvalError, EvaluatedValue, ValidateOptions, Value};
+use cue_rust_source::SourceLimits;
+use noyalib::{Mapping as YamlMapping, Number as YamlNumber, Value as YamlValue};
+use serde_json::{Map as JsonMap, Number as JsonNumber, Value as JsonValue};
+use thiserror::Error;
+use toml::{Table as TomlTable, Value as TomlValue};
+
 /// Supported external data encodings.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[non_exhaustive]
 pub enum Encoding {
+    /// CUE-like value syntax.
+    Cue,
     /// JavaScript Object Notation.
     Json,
     /// YAML data streams.
     Yaml,
     /// TOML documents.
     Toml,
+}
+
+/// Options shared by data decoders.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[non_exhaustive]
+pub struct DecodeOptions {
+    /// Source byte limits.
+    pub source_limits: SourceLimits,
+}
+
+/// Options shared by data encoders.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[non_exhaustive]
+pub struct EncodeOptions {
+    /// Output encoding.
+    pub encoding: Encoding,
+    /// Require concrete values before encoding.
+    pub concrete: bool,
+}
+
+impl Default for EncodeOptions {
+    fn default() -> Self {
+        Self {
+            encoding: Encoding::Json,
+            concrete: true,
+        }
+    }
+}
+
+/// Errors produced while decoding external data.
+#[derive(Debug, Error)]
+pub enum DecodeError {
+    /// Input exceeded the configured byte limit.
+    #[error("input is too large: {actual} bytes exceeds limit {limit} bytes")]
+    SourceTooLarge {
+        /// Observed byte length.
+        actual: usize,
+        /// Configured limit.
+        limit: usize,
+    },
+    /// Input bytes were not valid UTF-8.
+    #[error(transparent)]
+    Utf8(#[from] str::Utf8Error),
+    /// JSON parsing failed.
+    #[error(transparent)]
+    Json(#[from] serde_json::Error),
+    /// YAML parsing failed.
+    #[error("YAML decode failed: {0}")]
+    Yaml(String),
+    /// TOML parsing failed.
+    #[error(transparent)]
+    Toml(#[from] toml::de::Error),
+    /// The decoded data uses a value unsupported by the CUE core subset.
+    #[error("unsupported decoded value: {0}")]
+    Unsupported(String),
+}
+
+/// Errors produced while encoding CUE values.
+#[derive(Debug, Error)]
+pub enum EncodeError {
+    /// Evaluation failed before encoding.
+    #[error(transparent)]
+    Eval(#[from] EvalError),
+    /// JSON encoding failed.
+    #[error(transparent)]
+    Json(#[from] serde_json::Error),
+    /// YAML encoding failed.
+    #[error("YAML encode failed: {0}")]
+    Yaml(String),
+    /// TOML encoding failed.
+    #[error(transparent)]
+    Toml(#[from] toml::ser::Error),
+    /// The value cannot be represented in the requested encoding.
+    #[error("unsupported value for {encoding:?}: {message}")]
+    Unsupported {
+        /// Requested encoding.
+        encoding: Encoding,
+        /// Human-readable message.
+        message: String,
+    },
+}
+
+/// Decodes bytes in an external data format into a value.
+///
+/// # Errors
+///
+/// Returns [`DecodeError`] when parsing fails or the input exceeds limits.
+pub fn decode_bytes(
+    encoding: Encoding,
+    bytes: &[u8],
+    options: DecodeOptions,
+) -> Result<Value, DecodeError> {
+    validate_size(bytes, options.source_limits)?;
+    let evaluated = match encoding {
+        Encoding::Json => json_to_evaluated(serde_json::from_slice(bytes)?)?,
+        Encoding::Yaml => {
+            let value: JsonValue =
+                noyalib::from_slice(bytes).map_err(|error| DecodeError::Yaml(error.to_string()))?;
+            json_to_evaluated(value)?
+        }
+        Encoding::Toml => {
+            let input = str::from_utf8(bytes)?;
+            toml_to_evaluated(toml::from_str(input)?)?
+        }
+        Encoding::Cue => {
+            return Err(DecodeError::Unsupported(
+                "CUE source decoding is handled by the syntax/compiler pipeline".to_owned(),
+            ));
+        }
+    };
+    Ok(Value::from_evaluated(evaluated))
+}
+
+/// Encodes a value into the requested external data format.
+///
+/// # Errors
+///
+/// Returns [`EncodeError`] when evaluation fails or the value is not concrete.
+pub fn encode_value(value: &Value, options: EncodeOptions) -> Result<String, EncodeError> {
+    if options.concrete {
+        let mut validate_options = ValidateOptions::default();
+        validate_options.all_errors = true;
+        value.validate(validate_options)?;
+    }
+
+    let evaluated = value.evaluate()?;
+    match options.encoding {
+        Encoding::Cue => Ok(format_cue_value(&evaluated)),
+        Encoding::Json => Ok(serde_json::to_string_pretty(&evaluated_to_json(
+            evaluated,
+        )?)?),
+        Encoding::Yaml => {
+            let yaml = evaluated_to_yaml(evaluated)?;
+            noyalib::to_string(&yaml).map_err(|error| EncodeError::Yaml(error.to_string()))
+        }
+        Encoding::Toml => {
+            let toml = evaluated_to_toml(evaluated)?;
+            Ok(toml::to_string_pretty(&toml)?)
+        }
+    }
+}
+
+fn validate_size(bytes: &[u8], limits: SourceLimits) -> Result<(), DecodeError> {
+    if bytes.len() > limits.max_file_bytes() {
+        return Err(DecodeError::SourceTooLarge {
+            actual: bytes.len(),
+            limit: limits.max_file_bytes(),
+        });
+    }
+    Ok(())
+}
+
+fn json_to_evaluated(value: JsonValue) -> Result<EvaluatedValue, DecodeError> {
+    match value {
+        JsonValue::Null => Ok(EvaluatedValue::Null),
+        JsonValue::Bool(value) => Ok(EvaluatedValue::Bool(value)),
+        JsonValue::Number(value) => Ok(EvaluatedValue::Number(value.to_string())),
+        JsonValue::String(value) => Ok(EvaluatedValue::String(value)),
+        JsonValue::Array(values) => values
+            .into_iter()
+            .map(json_to_evaluated)
+            .collect::<Result<Vec<_>, _>>()
+            .map(EvaluatedValue::List),
+        JsonValue::Object(values) => values
+            .into_iter()
+            .map(|(key, value)| json_to_evaluated(value).map(|value| (key, value)))
+            .collect::<Result<indexmap::IndexMap<_, _>, _>>()
+            .map(EvaluatedValue::Struct),
+    }
+}
+
+fn toml_to_evaluated(value: TomlValue) -> Result<EvaluatedValue, DecodeError> {
+    match value {
+        TomlValue::String(value) => Ok(EvaluatedValue::String(value)),
+        TomlValue::Integer(value) => Ok(EvaluatedValue::Number(value.to_string())),
+        TomlValue::Float(value) => Ok(EvaluatedValue::Number(value.to_string())),
+        TomlValue::Boolean(value) => Ok(EvaluatedValue::Bool(value)),
+        TomlValue::Datetime(value) => Ok(EvaluatedValue::String(value.to_string())),
+        TomlValue::Array(values) => values
+            .into_iter()
+            .map(toml_to_evaluated)
+            .collect::<Result<Vec<_>, _>>()
+            .map(EvaluatedValue::List),
+        TomlValue::Table(values) => values
+            .into_iter()
+            .map(|(key, value)| toml_to_evaluated(value).map(|value| (key, value)))
+            .collect::<Result<indexmap::IndexMap<_, _>, _>>()
+            .map(EvaluatedValue::Struct),
+    }
+}
+
+fn evaluated_to_json(value: EvaluatedValue) -> Result<JsonValue, EncodeError> {
+    match value {
+        EvaluatedValue::Top => unsupported(Encoding::Json, "incomplete value"),
+        EvaluatedValue::Null => Ok(JsonValue::Null),
+        EvaluatedValue::Bool(value) => Ok(JsonValue::Bool(value)),
+        EvaluatedValue::Number(value) => JsonNumber::from_str(&value)
+            .map(JsonValue::Number)
+            .map_err(|_| unsupported_error(Encoding::Json, "invalid JSON number")),
+        EvaluatedValue::String(value) => Ok(JsonValue::String(value)),
+        EvaluatedValue::Bytes(_) => unsupported(Encoding::Json, "bytes require binary encoding"),
+        EvaluatedValue::Struct(values) => {
+            let mut object = JsonMap::new();
+            for (key, value) in values {
+                object.insert(key, evaluated_to_json(value)?);
+            }
+            Ok(JsonValue::Object(object))
+        }
+        EvaluatedValue::List(values) => values
+            .into_iter()
+            .map(evaluated_to_json)
+            .collect::<Result<Vec<_>, _>>()
+            .map(JsonValue::Array),
+        EvaluatedValue::Bottom(bottom) => unsupported(Encoding::Json, bottom.message),
+        _ => unsupported(Encoding::Json, "unsupported value"),
+    }
+}
+
+fn evaluated_to_toml(value: EvaluatedValue) -> Result<TomlValue, EncodeError> {
+    match value {
+        EvaluatedValue::Top => unsupported(Encoding::Toml, "incomplete value"),
+        EvaluatedValue::Null => unsupported(Encoding::Toml, "TOML has no null value"),
+        EvaluatedValue::Bool(value) => Ok(TomlValue::Boolean(value)),
+        EvaluatedValue::Number(value) => number_to_toml(&value),
+        EvaluatedValue::String(value) => Ok(TomlValue::String(value)),
+        EvaluatedValue::Bytes(_) => unsupported(Encoding::Toml, "bytes require binary encoding"),
+        EvaluatedValue::Struct(values) => {
+            let mut table = TomlTable::new();
+            for (key, value) in values {
+                table.insert(key, evaluated_to_toml(value)?);
+            }
+            Ok(TomlValue::Table(table))
+        }
+        EvaluatedValue::List(values) => values
+            .into_iter()
+            .map(evaluated_to_toml)
+            .collect::<Result<Vec<_>, _>>()
+            .map(TomlValue::Array),
+        EvaluatedValue::Bottom(bottom) => unsupported(Encoding::Toml, bottom.message),
+        _ => unsupported(Encoding::Toml, "unsupported value"),
+    }
+}
+
+fn evaluated_to_yaml(value: EvaluatedValue) -> Result<YamlValue, EncodeError> {
+    match value {
+        EvaluatedValue::Top => unsupported(Encoding::Yaml, "incomplete value"),
+        EvaluatedValue::Null => Ok(YamlValue::Null),
+        EvaluatedValue::Bool(value) => Ok(YamlValue::Bool(value)),
+        EvaluatedValue::Number(value) => number_to_yaml(&value),
+        EvaluatedValue::String(value) => Ok(YamlValue::String(value)),
+        EvaluatedValue::Bytes(_) => unsupported(Encoding::Yaml, "bytes require binary encoding"),
+        EvaluatedValue::Struct(values) => {
+            let entries = values
+                .into_iter()
+                .map(|(key, value)| evaluated_to_yaml(value).map(|value| (key, value)))
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(YamlValue::Mapping(YamlMapping::from(entries)))
+        }
+        EvaluatedValue::List(values) => values
+            .into_iter()
+            .map(evaluated_to_yaml)
+            .collect::<Result<Vec<_>, _>>()
+            .map(YamlValue::Sequence),
+        EvaluatedValue::Bottom(bottom) => unsupported(Encoding::Yaml, bottom.message),
+        _ => unsupported(Encoding::Yaml, "unsupported value"),
+    }
+}
+
+fn number_to_toml(value: &str) -> Result<TomlValue, EncodeError> {
+    if let Ok(integer) = value.parse::<i64>() {
+        return Ok(TomlValue::Integer(integer));
+    }
+    if let Ok(float) = value.parse::<f64>() {
+        return Ok(TomlValue::Float(float));
+    }
+    unsupported(Encoding::Toml, "invalid TOML number")
+}
+
+fn number_to_yaml(value: &str) -> Result<YamlValue, EncodeError> {
+    if let Ok(integer) = value.parse::<i64>() {
+        return Ok(YamlValue::Number(YamlNumber::Integer(integer)));
+    }
+    if let Ok(float) = value.parse::<f64>() {
+        return Ok(YamlValue::Number(YamlNumber::Float(float)));
+    }
+    unsupported(Encoding::Yaml, "invalid YAML number")
+}
+
+fn unsupported<T>(encoding: Encoding, message: impl Into<String>) -> Result<T, EncodeError> {
+    Err(unsupported_error(encoding, message))
+}
+
+fn unsupported_error(encoding: Encoding, message: impl Into<String>) -> EncodeError {
+    EncodeError::Unsupported {
+        encoding,
+        message: message.into(),
+    }
+}
+
+fn format_cue_value(value: &EvaluatedValue) -> String {
+    match value {
+        EvaluatedValue::Top => "_".to_owned(),
+        EvaluatedValue::Null => "null".to_owned(),
+        EvaluatedValue::Bool(value) => value.to_string(),
+        EvaluatedValue::Number(value) => value.clone(),
+        EvaluatedValue::String(value) => format!("{value:?}"),
+        EvaluatedValue::Bytes(value) => format!("{value:?}"),
+        EvaluatedValue::Struct(fields) => format_cue_struct(fields),
+        EvaluatedValue::List(values) => {
+            let rendered = values
+                .iter()
+                .map(format_cue_value)
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!("[{rendered}]")
+        }
+        EvaluatedValue::Bottom(bottom) => format!("_|_({:?})", bottom.message),
+        _ => "_|_(\"unsupported value\")".to_owned(),
+    }
+}
+
+fn format_cue_struct(fields: &indexmap::IndexMap<String, EvaluatedValue>) -> String {
+    if fields.is_empty() {
+        return "{}".to_owned();
+    }
+    let body = fields
+        .iter()
+        .map(|(key, value)| format!("{key}: {}", format_cue_value(value)))
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!("{{{body}}}")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{DecodeOptions, EncodeOptions, Encoding, decode_bytes, encode_value};
+
+    #[test]
+    fn test_should_decode_json_and_encode_cue() -> Result<(), Box<dyn std::error::Error>> {
+        let value = decode_bytes(Encoding::Json, br#"{"x":1}"#, DecodeOptions::default())?;
+        assert_eq!(
+            "{x: 1}",
+            encode_value(
+                &value,
+                EncodeOptions {
+                    encoding: Encoding::Cue,
+                    concrete: true
+                }
+            )?
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_should_decode_yaml_and_encode_json() -> Result<(), Box<dyn std::error::Error>> {
+        let value = decode_bytes(Encoding::Yaml, b"x: 1\n", DecodeOptions::default())?;
+        let output = encode_value(&value, EncodeOptions::default())?;
+        assert!(output.contains("\"x\": 1"));
+        Ok(())
+    }
+
+    #[test]
+    fn test_should_decode_toml_and_encode_json() -> Result<(), Box<dyn std::error::Error>> {
+        let value = decode_bytes(Encoding::Toml, b"x = 1\n", DecodeOptions::default())?;
+        let output = encode_value(&value, EncodeOptions::default())?;
+        assert!(output.contains("\"x\": 1"));
+        Ok(())
+    }
 }

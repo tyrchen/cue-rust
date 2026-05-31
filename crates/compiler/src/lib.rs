@@ -210,7 +210,7 @@ impl<'runtime> Compiler<'runtime> {
         let lowered = match expression {
             Expr::Identifier(name, span) => self.lower_identifier(name, *span),
             Expr::Number(value, _) => SemanticExpr::Base(BaseValue::Number(value.clone())),
-            Expr::String(value, _) => SemanticExpr::Base(BaseValue::String(value.clone())),
+            Expr::String(value, _) => SemanticExpr::Base(BaseValue::String(unquote_string(value))),
             Expr::Bool(value, _) => SemanticExpr::Base(BaseValue::Bool(*value)),
             Expr::Null(_) => SemanticExpr::Base(BaseValue::Null),
             Expr::Struct(declarations, _) => {
@@ -305,6 +305,13 @@ impl<'runtime> Compiler<'runtime> {
     fn feature_for_label(&mut self, label: &Label) -> Feature {
         self.runtime.features.string(label.display_name())
     }
+}
+
+fn unquote_string(value: &str) -> String {
+    value
+        .strip_prefix('"')
+        .and_then(|value| value.strip_suffix('"'))
+        .map_or_else(|| value.to_owned(), ToOwned::to_owned)
 }
 
 #[cfg(test)]

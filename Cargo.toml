@@ -18,12 +18,14 @@ camino = "1.2.2"
 clap = { version = "4.6.1", features = ["derive"] }
 indexmap = "2.14.0"
 miette = { version = "7.6.0", default-features = false }
+noyalib = "0.0.6"
 proptest = "1.11.0"
 rstest = "0.26.1"
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = { version = "1.0.150", features = ["arbitrary_precision"] }
 thiserror = "2.0.18"
-tokio = { version = "1.52", features = ["fs", "rt", "rt-multi-thread", "macros"] }
+tokio = { version = "1.52", features = ["fs", "process", "rt", "rt-multi-thread", "macros"] }
+toml = "1.1.2"
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter", "fmt"] }
 
