@@ -353,7 +353,11 @@ fn push_stdlib_math_case(
          math.Round(-2.5)\neven: math.RoundToEven(2.5)\nabs: math.Abs(-2.2)\nmultiple: 12 & \
          math.MultipleOf(2) & math.MultipleOf(3)\nbounded: 4 & math.MultipleOf(2) & >3\nbad: 10 & \
          math.MultipleOf(3)\nsign: math.Signbit(-4)\nsignZero: math.Signbit(-0)\npow10: \
-         math.Pow10(-2)\ncopySign: math.Copysign(5, -2.2)\ndim: math.Dim(3, 2.5)\n",
+         math.Pow10(-2)\ncopySign: math.Copysign(5, -2.2)\ndim: math.Dim(3, 2.5)\njacobi: \
+         math.Jacobi(1000, 201)\njacobiNeg: math.Jacobi(-1, 3)\njacobiZero: math.Jacobi(0, \
+         3)\njacobiCommon: math.Jacobi(3, 9)\njacobiNegDenom: math.Jacobi(1, -3)\njacobiBig: \
+         math.Jacobi(1, 170141183460469231731687303715884105729)\njacobiBad: math.Jacobi(1000, \
+         2000)\n",
     )?;
     cases.push(supported_case(
         "eval/stdlib-math-exact-surface",
@@ -389,7 +393,23 @@ fn push_stdlib_math_case(
             && exact_math.lookup_path(&["copySign"])?.evaluate()?
                 == cue_rust::EvaluatedValue::Number("-5".to_owned())
             && exact_math.lookup_path(&["dim"])?.evaluate()?
-                == cue_rust::EvaluatedValue::Number("0.5".to_owned()),
+                == cue_rust::EvaluatedValue::Number("0.5".to_owned())
+            && exact_math.lookup_path(&["jacobi"])?.evaluate()?
+                == cue_rust::EvaluatedValue::Number("1".to_owned())
+            && exact_math.lookup_path(&["jacobiNeg"])?.evaluate()?
+                == cue_rust::EvaluatedValue::Number("-1".to_owned())
+            && exact_math.lookup_path(&["jacobiZero"])?.evaluate()?
+                == cue_rust::EvaluatedValue::Number("0".to_owned())
+            && exact_math.lookup_path(&["jacobiCommon"])?.evaluate()?
+                == cue_rust::EvaluatedValue::Number("0".to_owned())
+            && exact_math.lookup_path(&["jacobiNegDenom"])?.evaluate()?
+                == cue_rust::EvaluatedValue::Number("1".to_owned())
+            && exact_math.lookup_path(&["jacobiBig"])?.evaluate()?
+                == cue_rust::EvaluatedValue::Number("1".to_owned())
+            && exact_math
+                .lookup_path(&["jacobiBad"])?
+                .validate(ValidateOptions::default())
+                .is_err(),
     ));
     Ok(())
 }

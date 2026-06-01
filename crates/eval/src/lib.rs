@@ -19,6 +19,7 @@ use cue_rust_adt::{
 };
 use cue_rust_source::{Diagnostic, DiagnosticReport, Severity, Span};
 use indexmap::IndexMap;
+use num_bigint::{BigInt, Sign};
 use regex::{Regex, RegexBuilder};
 use thiserror::Error;
 
@@ -3454,6 +3455,7 @@ fn evaluate_builtin_call(name: &str, args: Vec<EvaluatedValue>) -> EvaluatedValu
         "math.Copysign" => evaluate_math_copysign(args),
         "math.Dim" => evaluate_math_dim(args),
         "math.Floor" => evaluate_math_rounding("math.Floor", args, RoundingMode::Floor),
+        "math.Jacobi" => evaluate_math_jacobi(args),
         "math.MultipleOf" => evaluate_math_multiple_of(args),
         "math.Pow10" => evaluate_math_pow10(args),
         "math.Round" => evaluate_math_rounding("math.Round", args, RoundingMode::HalfUp),
@@ -3571,6 +3573,21 @@ fn evaluate_math_dim(args: Vec<EvaluatedValue>) -> EvaluatedValue {
     }
 }
 
+fn evaluate_math_jacobi(args: Vec<EvaluatedValue>) -> EvaluatedValue {
+    let Some((left, right)) = two_bigint_args(args) else {
+        return invalid_math_builtin_arg("math.Jacobi");
+    };
+    let Some(value) = jacobi_symbol(left, right) else {
+        return EvaluatedValue::Bottom(Bottom::new(
+            "cue.eval.invalid_builtin_arg",
+            "math.Jacobi second argument must be an odd integer",
+            None,
+            false,
+        ));
+    };
+    EvaluatedValue::Number(value.to_string())
+}
+
 fn evaluate_math_pow10(args: Vec<EvaluatedValue>) -> EvaluatedValue {
     let Some(exponent) = single_integer_arg("math.Pow10", args) else {
         return invalid_math_builtin_arg("math.Pow10");
@@ -3657,6 +3674,16 @@ fn two_decimal_args(name: &str, args: Vec<EvaluatedValue>) -> Option<(BigDecimal
     Some((parse_exact_decimal(&left)?, parse_exact_decimal(&right)?))
 }
 
+fn two_bigint_args(args: Vec<EvaluatedValue>) -> Option<(BigInt, BigInt)> {
+    if args.len() != 2 {
+        return None;
+    }
+    let mut args = args.into_iter().map(resolve_default_value);
+    let left = bigint_valued_arg(args.next()?)?;
+    let right = bigint_valued_arg(args.next()?)?;
+    Some((left, right))
+}
+
 fn number_text(value: EvaluatedValue) -> Option<String> {
     let EvaluatedValue::Number(value) = value else {
         return None;
@@ -3688,6 +3715,88 @@ fn numeric_literal_has_negative_sign(value: &str) -> bool {
         .strip_prefix('+')
         .unwrap_or(&compact)
         .starts_with('-')
+}
+
+fn bigint_valued_arg(value: EvaluatedValue) -> Option<BigInt> {
+    let EvaluatedValue::Number(value) = value else {
+        return None;
+    };
+    bigint_valued_number(&value)
+}
+
+fn bigint_valued_number(value: &str) -> Option<BigInt> {
+    let parsed = parse_decimal_number(value)?;
+    if parsed.scale > 0 {
+        return None;
+    }
+    let extra_zeroes = usize::try_from(parsed.scale.checked_neg()?).ok()?;
+    let total_digits = parsed.digits.len().checked_add(extra_zeroes)?;
+    if total_digits > MAX_BUILTIN_GENERATED_BYTES {
+        return None;
+    }
+    let mut digits = String::with_capacity(total_digits);
+    digits.push_str(&parsed.digits);
+    digits.extend(std::iter::repeat_n('0', extra_zeroes));
+    let magnitude = BigInt::from_str(&digits).ok()?;
+    if parsed.sign < 0 {
+        Some(-magnitude)
+    } else {
+        Some(magnitude)
+    }
+}
+
+fn jacobi_symbol(left: BigInt, right: BigInt) -> Option<i8> {
+    if right.is_zero() || (&right % BigInt::from(2_u8)).is_zero() {
+        return None;
+    }
+
+    let mut numerator = left;
+    let mut denominator = right;
+    let mut result = 1_i8;
+
+    if denominator.sign() == Sign::Minus {
+        if numerator.sign() == Sign::Minus {
+            result = -result;
+        }
+        denominator = -denominator;
+    }
+
+    numerator = positive_mod(numerator, &denominator);
+
+    while !numerator.is_zero() {
+        let shifts = numerator.trailing_zeros()?;
+        if shifts % 2 == 1 {
+            let residue = low_bits(&denominator, 7);
+            if residue == 3 || residue == 5 {
+                result = -result;
+            }
+        }
+        numerator >>= shifts;
+
+        std::mem::swap(&mut numerator, &mut denominator);
+        if low_bits(&numerator, 3) == 3 && low_bits(&denominator, 3) == 3 {
+            result = -result;
+        }
+        numerator = positive_mod(numerator, &denominator);
+    }
+
+    if denominator == BigInt::from(1_u8) {
+        Some(result)
+    } else {
+        Some(0)
+    }
+}
+
+fn positive_mod(value: BigInt, modulus: &BigInt) -> BigInt {
+    let mut remainder = value % modulus;
+    if remainder.sign() == Sign::Minus {
+        remainder += modulus;
+    }
+    remainder
+}
+
+fn low_bits(value: &BigInt, mask: u64) -> u64 {
+    value.to_u64_digits().1.first().copied().unwrap_or_default() & mask
 }
 
 fn invalid_math_builtin_arg(name: &str) -> EvaluatedValue {

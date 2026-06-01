@@ -1606,6 +1606,13 @@ copySign: math.Copysign(5, -2.2)
 copySignZero: math.Copysign(0, -1)
 dimPositive: math.Dim(3, 2.5)
 dimZero: math.Dim(5, 7.2)
+jacobi: math.Jacobi(1000, 201)
+jacobiEven: math.Jacobi(1000, 2000)
+jacobiNegative: math.Jacobi(-1, 3)
+jacobiZero: math.Jacobi(0, 3)
+jacobiCommonFactor: math.Jacobi(3, 9)
+jacobiNegativeDenominator: math.Jacobi(1, -3)
+jacobiBig: math.Jacobi(1, 170141183460469231731687303715884105729)
 multipleBool: math.MultipleOf(5, 2.5)
 multipleConstraint: 9 & math.MultipleOf(3)
 multiConstraint: 12 & math.MultipleOf(2) & math.MultipleOf(3)
@@ -1686,6 +1693,32 @@ pow10Neg: math.Pow10(-2)
             &EvaluatedValue::Number("0.5".to_owned()),
         )?;
         assert_evaluated_path(&value, "dimZero", &EvaluatedValue::Number("0".to_owned()))?;
+        assert_evaluated_path(&value, "jacobi", &EvaluatedValue::Number("1".to_owned()))?;
+        assert!(matches!(
+            value.lookup_path(&["jacobiEven"])?.evaluate()?,
+            EvaluatedValue::Bottom(_),
+        ));
+        assert_evaluated_path(
+            &value,
+            "jacobiNegative",
+            &EvaluatedValue::Number("-1".to_owned()),
+        )?;
+        assert_evaluated_path(
+            &value,
+            "jacobiZero",
+            &EvaluatedValue::Number("0".to_owned()),
+        )?;
+        assert_evaluated_path(
+            &value,
+            "jacobiCommonFactor",
+            &EvaluatedValue::Number("0".to_owned()),
+        )?;
+        assert_evaluated_path(
+            &value,
+            "jacobiNegativeDenominator",
+            &EvaluatedValue::Number("1".to_owned()),
+        )?;
+        assert_evaluated_path(&value, "jacobiBig", &EvaluatedValue::Number("1".to_owned()))?;
         assert_evaluated_path(&value, "multipleBool", &EvaluatedValue::Bool(true))?;
         assert_evaluated_path(
             &value,

@@ -789,6 +789,8 @@ async fn assert_upstream_stdlib_surface_builtins(context: &Context, root: &Path)
     assert!(math_round.file("in.cue")?.contains("math.Floor(math.Pi)"));
     let math_gen =
         TxtarArchive::read(&root.join("vendors/cue/pkg/math/testdata/gen.txtar")).await?;
+    assert!(math_gen.file("in.cue")?.contains("math.Jacobi(1000, 201)"));
+    assert!(math_gen.file("in.cue")?.contains("math.Jacobi(1000, 2000)"));
     assert!(math_gen.file("in.cue")?.contains("math.Copysign(5, -2.2)"));
     assert!(math_gen.file("in.cue")?.contains("math.Dim(3, 2.5)"));
     assert!(
@@ -803,9 +805,13 @@ async fn assert_upstream_stdlib_surface_builtins(context: &Context, root: &Path)
          math.Floor(math.Pi)\nfloor: math.Floor(-2.2)\nceil: math.Ceil(-2.2)\ntrunc: \
          math.Trunc(-2.9)\nround: math.Round(-2.5)\neven: math.RoundToEven(2.5)\nabs: \
          math.Abs(-2.2)\ncopySign: math.Copysign(5, -2.2)\ndimPositive: math.Dim(3, \
-         2.5)\ndimZero: math.Dim(5, 7.2)\nmultipleBool: math.MultipleOf(5, \
-         2.5)\nmultipleConstraint: 9 & math.MultipleOf(3)\nmultipleBoth: 12 & math.MultipleOf(2) \
-         & math.MultipleOf(3)\nmultipleBad: 10 & math.MultipleOf(3)\nzero: math.MultipleOf(5, \
+         2.5)\ndimZero: math.Dim(5, 7.2)\njacobi: math.Jacobi(1000, 201)\njacobiNeg: \
+         math.Jacobi(-1, 3)\njacobiZero: math.Jacobi(0, 3)\njacobiCommon: math.Jacobi(3, \
+         9)\njacobiNegDenom: math.Jacobi(1, -3)\njacobiBig: math.Jacobi(1, \
+         170141183460469231731687303715884105729)\njacobiBad: math.Jacobi(1000, \
+         2000)\nmultipleBool: math.MultipleOf(5, 2.5)\nmultipleConstraint: 9 & \
+         math.MultipleOf(3)\nmultipleBoth: 12 & math.MultipleOf(2) & \
+         math.MultipleOf(3)\nmultipleBad: 10 & math.MultipleOf(3)\nzero: math.MultipleOf(5, \
          0)\nsign: math.Signbit(-4)\npow10: math.Pow10(4)\npow10Neg: math.Pow10(-2)\n",
     )?;
     assert_eq!(
@@ -857,6 +863,36 @@ async fn assert_upstream_stdlib_surface_builtins(context: &Context, root: &Path)
     assert_eq!(
         EvaluatedValue::Number("0".to_owned()),
         math_value.lookup_path(&["dimZero"])?.evaluate()?,
+    );
+    assert_eq!(
+        EvaluatedValue::Number("1".to_owned()),
+        math_value.lookup_path(&["jacobi"])?.evaluate()?,
+    );
+    assert_eq!(
+        EvaluatedValue::Number("-1".to_owned()),
+        math_value.lookup_path(&["jacobiNeg"])?.evaluate()?,
+    );
+    assert_eq!(
+        EvaluatedValue::Number("0".to_owned()),
+        math_value.lookup_path(&["jacobiZero"])?.evaluate()?,
+    );
+    assert_eq!(
+        EvaluatedValue::Number("0".to_owned()),
+        math_value.lookup_path(&["jacobiCommon"])?.evaluate()?,
+    );
+    assert_eq!(
+        EvaluatedValue::Number("1".to_owned()),
+        math_value.lookup_path(&["jacobiNegDenom"])?.evaluate()?,
+    );
+    assert_eq!(
+        EvaluatedValue::Number("1".to_owned()),
+        math_value.lookup_path(&["jacobiBig"])?.evaluate()?,
+    );
+    assert!(
+        math_value
+            .lookup_path(&["jacobiBad"])?
+            .validate(ValidateOptions::default())
+            .is_err(),
     );
     assert_eq!(
         EvaluatedValue::Bool(true),
