@@ -791,6 +791,7 @@ async fn assert_upstream_stdlib_surface_builtins(context: &Context, root: &Path)
         TxtarArchive::read(&root.join("vendors/cue/pkg/math/testdata/gen.txtar")).await?;
     assert!(math_gen.file("in.cue")?.contains("math.Jacobi(1000, 201)"));
     assert!(math_gen.file("in.cue")?.contains("math.Jacobi(1000, 2000)"));
+    assert!(math_gen.file("in.cue")?.contains("math.Pow(8, 4)"));
     assert!(math_gen.file("in.cue")?.contains("math.Copysign(5, -2.2)"));
     assert!(math_gen.file("in.cue")?.contains("math.Dim(3, 2.5)"));
     assert!(
@@ -812,7 +813,10 @@ async fn assert_upstream_stdlib_surface_builtins(context: &Context, root: &Path)
          2000)\nmultipleBool: math.MultipleOf(5, 2.5)\nmultipleConstraint: 9 & \
          math.MultipleOf(3)\nmultipleBoth: 12 & math.MultipleOf(2) & \
          math.MultipleOf(3)\nmultipleBad: 10 & math.MultipleOf(3)\nzero: math.MultipleOf(5, \
-         0)\nsign: math.Signbit(-4)\npow10: math.Pow10(4)\npow10Neg: math.Pow10(-2)\n",
+         0)\nsign: math.Signbit(-4)\npow: math.Pow(8, 4)\npowDecimal: math.Pow(2.5, 2)\npowNeg: \
+         math.Pow(-2, 3)\npowNegEven: math.Pow(-2, 4)\npowNegExp: math.Pow(2, \
+         -3)\npowNegDecimalExp: math.Pow(1.25, -2)\npowNegZero: math.Pow(-0, 3)\npow10: \
+         math.Pow10(4)\npow10Neg: math.Pow10(-2)\n",
     )?;
     assert_eq!(
         EvaluatedValue::Number(
@@ -921,6 +925,34 @@ async fn assert_upstream_stdlib_surface_builtins(context: &Context, root: &Path)
     assert_eq!(
         EvaluatedValue::Bool(true),
         math_value.lookup_path(&["sign"])?.evaluate()?,
+    );
+    assert_eq!(
+        EvaluatedValue::Number("4096".to_owned()),
+        math_value.lookup_path(&["pow"])?.evaluate()?,
+    );
+    assert_eq!(
+        EvaluatedValue::Number("6.25".to_owned()),
+        math_value.lookup_path(&["powDecimal"])?.evaluate()?,
+    );
+    assert_eq!(
+        EvaluatedValue::Number("-8".to_owned()),
+        math_value.lookup_path(&["powNeg"])?.evaluate()?,
+    );
+    assert_eq!(
+        EvaluatedValue::Number("16".to_owned()),
+        math_value.lookup_path(&["powNegEven"])?.evaluate()?,
+    );
+    assert_eq!(
+        EvaluatedValue::Number("0.125".to_owned()),
+        math_value.lookup_path(&["powNegExp"])?.evaluate()?,
+    );
+    assert_eq!(
+        EvaluatedValue::Number("0.64".to_owned()),
+        math_value.lookup_path(&["powNegDecimalExp"])?.evaluate()?,
+    );
+    assert_eq!(
+        EvaluatedValue::Number("-0".to_owned()),
+        math_value.lookup_path(&["powNegZero"])?.evaluate()?,
     );
     assert_eq!(
         EvaluatedValue::Number("10000".to_owned()),

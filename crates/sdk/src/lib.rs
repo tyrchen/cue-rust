@@ -1628,6 +1628,13 @@ sign: math.Signbit(-4)
 signZero: math.Signbit(-0)
 pow10: math.Pow10(4)
 pow10Neg: math.Pow10(-2)
+pow: math.Pow(8, 4)
+powDecimal: math.Pow(2.5, 2)
+powNegative: math.Pow(-2, 3)
+powNegativeEven: math.Pow(-2, 4)
+powNegativeExponent: math.Pow(2, -3)
+powNegativeDecimalExponent: math.Pow(1.25, -2)
+powNegativeZero: math.Pow(-0, 3)
 "#,
         )?;
 
@@ -1766,6 +1773,37 @@ pow10Neg: math.Pow10(-2)
             &value,
             "pow10Neg",
             &EvaluatedValue::Number("0.01".to_owned()),
+        )?;
+        assert_evaluated_path(&value, "pow", &EvaluatedValue::Number("4096".to_owned()))?;
+        assert_evaluated_path(
+            &value,
+            "powDecimal",
+            &EvaluatedValue::Number("6.25".to_owned()),
+        )?;
+        assert_evaluated_path(
+            &value,
+            "powNegative",
+            &EvaluatedValue::Number("-8".to_owned()),
+        )?;
+        assert_evaluated_path(
+            &value,
+            "powNegativeEven",
+            &EvaluatedValue::Number("16".to_owned()),
+        )?;
+        assert_evaluated_path(
+            &value,
+            "powNegativeExponent",
+            &EvaluatedValue::Number("0.125".to_owned()),
+        )?;
+        assert_evaluated_path(
+            &value,
+            "powNegativeDecimalExponent",
+            &EvaluatedValue::Number("0.64".to_owned()),
+        )?;
+        assert_evaluated_path(
+            &value,
+            "powNegativeZero",
+            &EvaluatedValue::Number("-0".to_owned()),
         )?;
 
         let mut cue_options = EncodeOptions::default();

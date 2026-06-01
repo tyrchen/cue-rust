@@ -357,7 +357,9 @@ fn push_stdlib_math_case(
          math.Jacobi(1000, 201)\njacobiNeg: math.Jacobi(-1, 3)\njacobiZero: math.Jacobi(0, \
          3)\njacobiCommon: math.Jacobi(3, 9)\njacobiNegDenom: math.Jacobi(1, -3)\njacobiBig: \
          math.Jacobi(1, 170141183460469231731687303715884105729)\njacobiBad: math.Jacobi(1000, \
-         2000)\n",
+         2000)\npow: math.Pow(8, 4)\npowDecimal: math.Pow(2.5, 2)\npowNeg: math.Pow(-2, \
+         3)\npowNegEven: math.Pow(-2, 4)\npowNegExp: math.Pow(2, -3)\npowNegDecimalExp: \
+         math.Pow(1.25, -2)\npowNegZero: math.Pow(-0, 3)\n",
     )?;
     cases.push(supported_case(
         "eval/stdlib-math-exact-surface",
@@ -409,7 +411,21 @@ fn push_stdlib_math_case(
             && exact_math
                 .lookup_path(&["jacobiBad"])?
                 .validate(ValidateOptions::default())
-                .is_err(),
+                .is_err()
+            && exact_math.lookup_path(&["pow"])?.evaluate()?
+                == cue_rust::EvaluatedValue::Number("4096".to_owned())
+            && exact_math.lookup_path(&["powDecimal"])?.evaluate()?
+                == cue_rust::EvaluatedValue::Number("6.25".to_owned())
+            && exact_math.lookup_path(&["powNeg"])?.evaluate()?
+                == cue_rust::EvaluatedValue::Number("-8".to_owned())
+            && exact_math.lookup_path(&["powNegEven"])?.evaluate()?
+                == cue_rust::EvaluatedValue::Number("16".to_owned())
+            && exact_math.lookup_path(&["powNegExp"])?.evaluate()?
+                == cue_rust::EvaluatedValue::Number("0.125".to_owned())
+            && exact_math.lookup_path(&["powNegDecimalExp"])?.evaluate()?
+                == cue_rust::EvaluatedValue::Number("0.64".to_owned())
+            && exact_math.lookup_path(&["powNegZero"])?.evaluate()?
+                == cue_rust::EvaluatedValue::Number("-0".to_owned()),
     ));
     Ok(())
 }
@@ -467,6 +483,13 @@ async fn push_known_gap_cases(
          cases, and disjunction/default fixpoint cycles are covered by supported parity cases; \
          remaining upstream parity work is broader cycle-diagnostic coverage and exact diagnostic \
          shaping",
+    ));
+    cases.push(expected_gap_case(
+        "stdlib/math-pow-fractional-decimal",
+        "stdlib-gap",
+        "math.Pow now covers exact integer exponents, including finite negative-exponent \
+         decimals; fractional exponents still require APD-compatible decimal transcendental \
+         semantics",
     ));
     Ok(())
 }

@@ -3457,6 +3457,7 @@ fn evaluate_builtin_call(name: &str, args: Vec<EvaluatedValue>) -> EvaluatedValu
         "math.Floor" => evaluate_math_rounding("math.Floor", args, RoundingMode::Floor),
         "math.Jacobi" => evaluate_math_jacobi(args),
         "math.MultipleOf" => evaluate_math_multiple_of(args),
+        "math.Pow" => evaluate_math_pow(args),
         "math.Pow10" => evaluate_math_pow10(args),
         "math.Round" => evaluate_math_rounding("math.Round", args, RoundingMode::HalfUp),
         "math.RoundToEven" => {
@@ -3548,7 +3549,7 @@ fn evaluate_math_signbit(args: Vec<EvaluatedValue>) -> EvaluatedValue {
 }
 
 fn evaluate_math_copysign(args: Vec<EvaluatedValue>) -> EvaluatedValue {
-    let Some((magnitude, sign)) = two_number_arg_texts("math.Copysign", args) else {
+    let Some((magnitude, sign)) = two_number_arg_texts(args) else {
         return invalid_math_builtin_arg("math.Copysign");
     };
     let Some(magnitude) = absolute_decimal_text("math.Copysign", &magnitude) else {
@@ -3562,7 +3563,7 @@ fn evaluate_math_copysign(args: Vec<EvaluatedValue>) -> EvaluatedValue {
 }
 
 fn evaluate_math_dim(args: Vec<EvaluatedValue>) -> EvaluatedValue {
-    let Some((left, right)) = two_decimal_args("math.Dim", args) else {
+    let Some((left, right)) = two_decimal_args(args) else {
         return invalid_math_builtin_arg("math.Dim");
     };
     let difference = left - right;
@@ -3586,6 +3587,18 @@ fn evaluate_math_jacobi(args: Vec<EvaluatedValue>) -> EvaluatedValue {
         ));
     };
     EvaluatedValue::Number(value.to_string())
+}
+
+fn evaluate_math_pow(args: Vec<EvaluatedValue>) -> EvaluatedValue {
+    let Some((base, exponent)) = two_number_arg_texts(args) else {
+        return invalid_math_builtin_arg("math.Pow");
+    };
+    match exact_integer_power(&base, &exponent) {
+        Ok(ExactPowerValue::Decimal(value)) => evaluated_decimal_number("math.Pow", &value),
+        Ok(ExactPowerValue::NegativeZero) => EvaluatedValue::Number("-0".to_owned()),
+        Err(ExactPowerError::Invalid) => invalid_math_builtin_arg("math.Pow"),
+        Err(ExactPowerError::ResourceExhausted) => builtin_resource_exhausted("math.Pow"),
+    }
 }
 
 fn evaluate_math_pow10(args: Vec<EvaluatedValue>) -> EvaluatedValue {
@@ -3659,7 +3672,7 @@ fn decimal_value(value: &EvaluatedValue) -> Option<BigDecimal> {
     parse_exact_decimal(value)
 }
 
-fn two_number_arg_texts(_name: &str, args: Vec<EvaluatedValue>) -> Option<(String, String)> {
+fn two_number_arg_texts(args: Vec<EvaluatedValue>) -> Option<(String, String)> {
     if args.len() != 2 {
         return None;
     }
@@ -3669,8 +3682,8 @@ fn two_number_arg_texts(_name: &str, args: Vec<EvaluatedValue>) -> Option<(Strin
     Some((left, right))
 }
 
-fn two_decimal_args(name: &str, args: Vec<EvaluatedValue>) -> Option<(BigDecimal, BigDecimal)> {
-    let (left, right) = two_number_arg_texts(name, args)?;
+fn two_decimal_args(args: Vec<EvaluatedValue>) -> Option<(BigDecimal, BigDecimal)> {
+    let (left, right) = two_number_arg_texts(args)?;
     Some((parse_exact_decimal(&left)?, parse_exact_decimal(&right)?))
 }
 
@@ -3743,6 +3756,197 @@ fn bigint_valued_number(value: &str) -> Option<BigInt> {
     } else {
         Some(magnitude)
     }
+}
+
+#[derive(Debug, Eq, PartialEq)]
+enum ExactPowerValue {
+    Decimal(BigDecimal),
+    NegativeZero,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ExactPowerError {
+    Invalid,
+    ResourceExhausted,
+}
+
+fn exact_integer_power(base: &str, exponent: &str) -> Result<ExactPowerValue, ExactPowerError> {
+    let parsed_base = parse_decimal_number(base).ok_or(ExactPowerError::Invalid)?;
+    let exponent = integer_valued_number(exponent).ok_or(ExactPowerError::Invalid)?;
+    if exponent == 0 {
+        return Ok(ExactPowerValue::Decimal(BigDecimal::from(1)));
+    }
+    if parsed_base.sign == 0 {
+        if exponent < 0 {
+            return Err(ExactPowerError::Invalid);
+        }
+        if numeric_literal_has_negative_sign(base) && exponent % 2 != 0 {
+            return Ok(ExactPowerValue::NegativeZero);
+        }
+        return Ok(ExactPowerValue::Decimal(BigDecimal::zero()));
+    }
+    if parsed_base.digits == "1" && parsed_base.scale == 0 {
+        return Ok(ExactPowerValue::Decimal(unit_power(
+            parsed_base.sign,
+            exponent,
+        )));
+    }
+
+    let exponent_magnitude = exponent.unsigned_abs();
+    let exponent_magnitude =
+        u64::try_from(exponent_magnitude).map_err(|_| ExactPowerError::ResourceExhausted)?;
+    if exponent > 0 {
+        decimal_positive_integer_power(&parsed_base, exponent_magnitude)
+            .map(ExactPowerValue::Decimal)
+    } else {
+        decimal_negative_integer_power(&parsed_base, exponent_magnitude)
+            .map(ExactPowerValue::Decimal)
+    }
+}
+
+fn unit_power(sign: i8, exponent: i128) -> BigDecimal {
+    if sign < 0 && exponent % 2 != 0 {
+        BigDecimal::from(-1)
+    } else {
+        BigDecimal::from(1)
+    }
+}
+
+fn decimal_positive_integer_power(
+    base: &DecimalNumber,
+    exponent: u64,
+) -> Result<BigDecimal, ExactPowerError> {
+    checked_power_digit_budget(base.digits.len(), exponent)?;
+    let scale = checked_scale_product(base.scale, exponent)?;
+    let magnitude = decimal_magnitude_bigint(base)?;
+    let magnitude = checked_bigint_pow(&magnitude, exponent)?;
+    Ok(BigDecimal::new(magnitude, scale))
+}
+
+fn decimal_negative_integer_power(
+    base: &DecimalNumber,
+    exponent: u64,
+) -> Result<BigDecimal, ExactPowerError> {
+    let mut magnitude = decimal_magnitude_bigint(base)?;
+    if base.sign < 0 {
+        magnitude = -magnitude;
+    }
+    let twos = remove_factor(&mut magnitude, 2)?;
+    let fives = remove_factor(&mut magnitude, 5)?;
+    if magnitude != BigInt::from(1_u8) {
+        return Err(ExactPowerError::Invalid);
+    }
+
+    let decimal_shift = i128::from(base.scale)
+        .checked_mul(i128::from(exponent))
+        .ok_or(ExactPowerError::ResourceExhausted)?;
+    let twos = i128::from(twos)
+        .checked_mul(i128::from(exponent))
+        .ok_or(ExactPowerError::ResourceExhausted)?;
+    let fives = i128::from(fives)
+        .checked_mul(i128::from(exponent))
+        .ok_or(ExactPowerError::ResourceExhausted)?;
+    let two_power = decimal_shift
+        .checked_sub(twos)
+        .ok_or(ExactPowerError::ResourceExhausted)?;
+    let five_power = decimal_shift
+        .checked_sub(fives)
+        .ok_or(ExactPowerError::ResourceExhausted)?;
+    let scale = two_power
+        .min(five_power)
+        .min(0)
+        .checked_neg()
+        .ok_or(ExactPowerError::ResourceExhausted)?;
+    let unscaled_two_power = checked_non_negative_power(
+        two_power
+            .checked_add(scale)
+            .ok_or(ExactPowerError::ResourceExhausted)?,
+    )?;
+    let unscaled_five_power = checked_non_negative_power(
+        five_power
+            .checked_add(scale)
+            .ok_or(ExactPowerError::ResourceExhausted)?,
+    )?;
+    let scale = i64::try_from(scale).map_err(|_| ExactPowerError::ResourceExhausted)?;
+
+    let mut unscaled = checked_bigint_pow(&BigInt::from(2_u8), unscaled_two_power)?;
+    unscaled *= checked_bigint_pow(&BigInt::from(5_u8), unscaled_five_power)?;
+    if base.sign < 0 && exponent % 2 == 1 {
+        unscaled = -unscaled;
+    }
+    Ok(BigDecimal::new(unscaled, scale))
+}
+
+fn decimal_magnitude_bigint(value: &DecimalNumber) -> Result<BigInt, ExactPowerError> {
+    if value.digits.len() > MAX_BUILTIN_GENERATED_BYTES {
+        return Err(ExactPowerError::ResourceExhausted);
+    }
+    let mut magnitude = BigInt::from_str(&value.digits).map_err(|_| ExactPowerError::Invalid)?;
+    if value.sign < 0 {
+        magnitude = -magnitude;
+    }
+    Ok(magnitude)
+}
+
+fn checked_power_digit_budget(digits: usize, exponent: u64) -> Result<(), ExactPowerError> {
+    let exponent = usize::try_from(exponent).map_err(|_| ExactPowerError::ResourceExhausted)?;
+    let budget = digits
+        .checked_mul(exponent)
+        .ok_or(ExactPowerError::ResourceExhausted)?;
+    if budget > MAX_BUILTIN_GENERATED_BYTES {
+        return Err(ExactPowerError::ResourceExhausted);
+    }
+    Ok(())
+}
+
+fn checked_bigint_pow(base: &BigInt, exponent: u64) -> Result<BigInt, ExactPowerError> {
+    let max_exponent = u64::try_from(MAX_BUILTIN_GENERATED_BYTES)
+        .map_err(|_| ExactPowerError::ResourceExhausted)?;
+    if exponent > max_exponent {
+        return Err(ExactPowerError::ResourceExhausted);
+    }
+    let mut result = BigInt::from(1_u8);
+    let mut factor = base.clone();
+    let mut remaining = exponent;
+    while remaining > 0 {
+        if remaining % 2 == 1 {
+            result *= &factor;
+        }
+        remaining /= 2;
+        if remaining > 0 {
+            factor = &factor * &factor;
+        }
+    }
+    Ok(result)
+}
+
+fn checked_scale_product(scale: i64, exponent: u64) -> Result<i64, ExactPowerError> {
+    i128::from(scale)
+        .checked_mul(i128::from(exponent))
+        .and_then(|scale| i64::try_from(scale).ok())
+        .ok_or(ExactPowerError::ResourceExhausted)
+}
+
+fn checked_non_negative_power(value: i128) -> Result<u64, ExactPowerError> {
+    let value = u64::try_from(value).map_err(|_| ExactPowerError::ResourceExhausted)?;
+    let max_power = u64::try_from(MAX_BUILTIN_GENERATED_BYTES)
+        .map_err(|_| ExactPowerError::ResourceExhausted)?;
+    if value > max_power {
+        return Err(ExactPowerError::ResourceExhausted);
+    }
+    Ok(value)
+}
+
+fn remove_factor(value: &mut BigInt, factor: u8) -> Result<u64, ExactPowerError> {
+    let factor = BigInt::from(factor);
+    let mut count = 0_u64;
+    while (&*value % &factor).is_zero() {
+        *value /= &factor;
+        count = count
+            .checked_add(1)
+            .ok_or(ExactPowerError::ResourceExhausted)?;
+    }
+    Ok(count)
 }
 
 fn jacobi_symbol(left: BigInt, right: BigInt) -> Option<i8> {
