@@ -1602,13 +1602,26 @@ roundNeg: math.Round(-2.5)
 even: math.RoundToEven(2.5)
 evenNeg: math.RoundToEven(-2.5)
 abs: math.Abs(-2.2)
+acos: math.Acos(0.5)
+acosh: math.Acosh(1)
+asin: math.Asin(0.5)
+asinOverflow: math.Asin(2.0e400)
+asinh: math.Asinh(0)
+atan: math.Atan(1)
+atan2: math.Atan2(1, 1)
+atanh: math.Atanh(0.5)
+floatUnderflow: math.Sin(1e-400)
 copySign: math.Copysign(5, -2.2)
 copySignZero: math.Copysign(0, -1)
 cbrt: math.Cbrt(2)
 cbrtNegative: math.Cbrt(-8)
 cbrtNegativeZero: math.Cbrt(-0)
+cos: math.Cos(0)
+cosh: math.Cosh(0)
 dimPositive: math.Dim(3, 2.5)
 dimZero: math.Dim(5, 7.2)
+expm1: math.Expm1(1)
+hypot: math.Hypot(3, 4)
 jacobi: math.Jacobi(1000, 201)
 jacobiEven: math.Jacobi(1000, 2000)
 jacobiNegative: math.Jacobi(-1, 3)
@@ -1627,8 +1640,18 @@ multipleBad: 10 & math.MultipleOf(3)
 multiBad: 10 & math.MultipleOf(2) & math.MultipleOf(3)
 badZero: math.MultipleOf(5, 0)
 bareConstraint: math.MultipleOf(3)
+log1p: math.Log1p(1)
+logb: math.Logb(8)
+logbMax: math.Logb(1.7976931348623157e308)
+logbSubnormal: math.Logb(5e-324)
+mod: math.Mod(5.5, 2)
 sign: math.Signbit(-4)
 signZero: math.Signbit(-0)
+sin: math.Sin(0)
+sinh: math.Sinh(0)
+sqrt: math.Sqrt(9)
+tan: math.Tan(0)
+tanh: math.Tanh(0)
 pow10: math.Pow10(4)
 pow10Neg: math.Pow10(-2)
 pow: math.Pow(8, 4)
@@ -1691,6 +1714,41 @@ powNegativeZero: math.Pow(-0, 3)
         assert_evaluated_path(&value, "even", &EvaluatedValue::Number("2".to_owned()))?;
         assert_evaluated_path(&value, "evenNeg", &EvaluatedValue::Number("-2".to_owned()))?;
         assert_evaluated_path(&value, "abs", &EvaluatedValue::Number("2.2".to_owned()))?;
+        assert_evaluated_path(
+            &value,
+            "acos",
+            &EvaluatedValue::Number("1.0471975511965979".to_owned()),
+        )?;
+        assert_evaluated_path(&value, "acosh", &EvaluatedValue::Number("0".to_owned()))?;
+        assert_evaluated_path(
+            &value,
+            "asin",
+            &EvaluatedValue::Number("0.5235987755982989".to_owned()),
+        )?;
+        assert!(matches!(
+            value.lookup_path(&["asinOverflow"])?.evaluate()?,
+            EvaluatedValue::Bottom(_),
+        ));
+        assert_evaluated_path(&value, "asinh", &EvaluatedValue::Number("0".to_owned()))?;
+        assert_evaluated_path(
+            &value,
+            "atan",
+            &EvaluatedValue::Number("0.7853981633974483".to_owned()),
+        )?;
+        assert_evaluated_path(
+            &value,
+            "atan2",
+            &EvaluatedValue::Number("0.7853981633974483".to_owned()),
+        )?;
+        assert_evaluated_path(
+            &value,
+            "atanh",
+            &EvaluatedValue::Number("0.5493061443340548".to_owned()),
+        )?;
+        assert!(matches!(
+            value.lookup_path(&["floatUnderflow"])?.evaluate()?,
+            EvaluatedValue::Bottom(_),
+        ));
         assert_evaluated_path(&value, "copySign", &EvaluatedValue::Number("-5".to_owned()))?;
         assert_evaluated_path(
             &value,
@@ -1712,12 +1770,20 @@ powNegativeZero: math.Pow(-0, 3)
             "cbrtNegativeZero",
             &EvaluatedValue::Number("-0".to_owned()),
         )?;
+        assert_evaluated_path(&value, "cos", &EvaluatedValue::Number("1".to_owned()))?;
+        assert_evaluated_path(&value, "cosh", &EvaluatedValue::Number("1".to_owned()))?;
         assert_evaluated_path(
             &value,
             "dimPositive",
             &EvaluatedValue::Number("0.5".to_owned()),
         )?;
         assert_evaluated_path(&value, "dimZero", &EvaluatedValue::Number("0".to_owned()))?;
+        assert_evaluated_path(
+            &value,
+            "expm1",
+            &EvaluatedValue::Number("1.718281828459045".to_owned()),
+        )?;
+        assert_evaluated_path(&value, "hypot", &EvaluatedValue::Number("5".to_owned()))?;
         assert_evaluated_path(&value, "jacobi", &EvaluatedValue::Number("1".to_owned()))?;
         assert!(matches!(
             value.lookup_path(&["jacobiEven"])?.evaluate()?,
@@ -1784,8 +1850,30 @@ powNegativeZero: math.Pow(-0, 3)
             ValueKind::Number,
             value.lookup_path(&["bareConstraint"])?.kind()?,
         );
+        assert_evaluated_path(
+            &value,
+            "log1p",
+            &EvaluatedValue::Number("0.6931471805599453".to_owned()),
+        )?;
+        assert_evaluated_path(&value, "logb", &EvaluatedValue::Number("3".to_owned()))?;
+        assert_evaluated_path(
+            &value,
+            "logbMax",
+            &EvaluatedValue::Number("1023".to_owned()),
+        )?;
+        assert_evaluated_path(
+            &value,
+            "logbSubnormal",
+            &EvaluatedValue::Number("-1074".to_owned()),
+        )?;
+        assert_evaluated_path(&value, "mod", &EvaluatedValue::Number("1.5".to_owned()))?;
         assert_evaluated_path(&value, "sign", &EvaluatedValue::Bool(true))?;
         assert_evaluated_path(&value, "signZero", &EvaluatedValue::Bool(true))?;
+        assert_evaluated_path(&value, "sin", &EvaluatedValue::Number("0".to_owned()))?;
+        assert_evaluated_path(&value, "sinh", &EvaluatedValue::Number("0".to_owned()))?;
+        assert_evaluated_path(&value, "sqrt", &EvaluatedValue::Number("3".to_owned()))?;
+        assert_evaluated_path(&value, "tan", &EvaluatedValue::Number("0".to_owned()))?;
+        assert_evaluated_path(&value, "tanh", &EvaluatedValue::Number("0".to_owned()))?;
         assert_evaluated_path(&value, "pow10", &EvaluatedValue::Number("10000".to_owned()))?;
         assert_evaluated_path(
             &value,

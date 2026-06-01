@@ -350,7 +350,10 @@ fn push_stdlib_math_case(
     let exact_math = context.compile_source(
         "stdlib-math.cue",
         "import \"math\"\npi: math.Pi\nmaxExp: math.MaxExp\nfloor: math.Floor(math.Pi)\nround: \
-         math.Round(-2.5)\neven: math.RoundToEven(2.5)\nabs: math.Abs(-2.2)\nmultiple: 12 & \
+         math.Round(-2.5)\neven: math.RoundToEven(2.5)\nabs: math.Abs(-2.2)\nacos: \
+         math.Acos(0.5)\nacosh: math.Acosh(1)\nasin: math.Asin(0.5)\nasinOverflow: \
+         math.Asin(2.0e400)\nasinh: math.Asinh(0)\natan: math.Atan(1)\natan2: math.Atan2(1, \
+         1)\natanh: math.Atanh(0.5)\nfloatUnderflow: math.Sin(1e-400)\nmultiple: 12 & \
          math.MultipleOf(2) & math.MultipleOf(3)\nbounded: 4 & math.MultipleOf(2) & >3\nbad: 10 & \
          math.MultipleOf(3)\nsign: math.Signbit(-4)\nsignZero: math.Signbit(-0)\npow10: \
          math.Pow10(-2)\ncopySign: math.Copysign(5, -2.2)\ndim: math.Dim(3, 2.5)\njacobi: \
@@ -360,81 +363,76 @@ fn push_stdlib_math_case(
          2000)\npow: math.Pow(8, 4)\npowDecimal: math.Pow(2.5, 2)\npowNeg: math.Pow(-2, \
          3)\npowNegEven: math.Pow(-2, 4)\npowNegExp: math.Pow(2, -3)\npowNegDecimalExp: \
          math.Pow(1.25, -2)\npowNegZero: math.Pow(-0, 3)\ncbrt: math.Cbrt(2)\ncbrtNeg: \
-         math.Cbrt(-8)\ncbrtNegZero: math.Cbrt(-0)\n",
+         math.Cbrt(-8)\ncbrtNegZero: math.Cbrt(-0)\ncos: math.Cos(0)\ncosh: math.Cosh(0)\nexpm1: \
+         math.Expm1(1)\nhypot: math.Hypot(3, 4)\nlog1p: math.Log1p(1)\nlogb: \
+         math.Logb(8)\nlogbMax: math.Logb(1.7976931348623157e308)\nlogbSubnormal: \
+         math.Logb(5e-324)\nmod: math.Mod(5.5, 2)\nsin: math.Sin(0)\nsinh: math.Sinh(0)\nsqrt: \
+         math.Sqrt(9)\ntan: math.Tan(0)\ntanh: math.Tanh(0)\n",
     )?;
+    let expected_numbers = [
+        (
+            "pi",
+            "3.14159265358979323846264338327950288419716939937510582097494459",
+        ),
+        ("maxExp", "2147483647"),
+        ("floor", "3"),
+        ("round", "-3"),
+        ("even", "2"),
+        ("abs", "2.2"),
+        ("acos", "1.0471975511965979"),
+        ("acosh", "0"),
+        ("asin", "0.5235987755982989"),
+        ("asinh", "0"),
+        ("atan", "0.7853981633974483"),
+        ("atan2", "0.7853981633974483"),
+        ("atanh", "0.5493061443340548"),
+        ("multiple", "12"),
+        ("bounded", "4"),
+        ("pow10", "0.01"),
+        ("copySign", "-5"),
+        ("dim", "0.5"),
+        ("jacobi", "1"),
+        ("jacobiNeg", "-1"),
+        ("jacobiZero", "0"),
+        ("jacobiCommon", "0"),
+        ("jacobiNegDenom", "1"),
+        ("jacobiBig", "1"),
+        ("pow", "4096"),
+        ("powDecimal", "6.25"),
+        ("powNeg", "-8"),
+        ("powNegEven", "16"),
+        ("powNegExp", "0.125"),
+        ("powNegDecimalExp", "0.64"),
+        ("powNegZero", "-0"),
+        ("cbrt", "1.259921049894873164767210607278228"),
+        ("cbrtNeg", "-2"),
+        ("cbrtNegZero", "-0"),
+        ("cos", "1"),
+        ("cosh", "1"),
+        ("expm1", "1.718281828459045"),
+        ("hypot", "5"),
+        ("log1p", "0.6931471805599453"),
+        ("logb", "3"),
+        ("logbMax", "1023"),
+        ("logbSubnormal", "-1074"),
+        ("mod", "1.5"),
+        ("sin", "0"),
+        ("sinh", "0"),
+        ("sqrt", "3"),
+        ("tan", "0"),
+        ("tanh", "0"),
+    ];
+    let passed = number_paths_match(&exact_math, &expected_numbers)?
+        && bottom_path(&exact_math, "asinOverflow")?
+        && bottom_path(&exact_math, "floatUnderflow")?
+        && bool_path_matches(&exact_math, "sign", true)?
+        && bool_path_matches(&exact_math, "signZero", true)?
+        && validation_fails(&exact_math, "bad")?
+        && validation_fails(&exact_math, "jacobiBad")?;
     cases.push(supported_case(
         "eval/stdlib-math-exact-surface",
         "semantic",
-        exact_math.lookup_path(&["pi"])?.evaluate()?
-            == cue_rust::EvaluatedValue::Number(
-                "3.14159265358979323846264338327950288419716939937510582097494459".to_owned(),
-            )
-            && exact_math.lookup_path(&["maxExp"])?.evaluate()?
-                == cue_rust::EvaluatedValue::Number("2147483647".to_owned())
-            && exact_math.lookup_path(&["floor"])?.evaluate()?
-                == cue_rust::EvaluatedValue::Number("3".to_owned())
-            && exact_math.lookup_path(&["round"])?.evaluate()?
-                == cue_rust::EvaluatedValue::Number("-3".to_owned())
-            && exact_math.lookup_path(&["even"])?.evaluate()?
-                == cue_rust::EvaluatedValue::Number("2".to_owned())
-            && exact_math.lookup_path(&["abs"])?.evaluate()?
-                == cue_rust::EvaluatedValue::Number("2.2".to_owned())
-            && exact_math.lookup_path(&["multiple"])?.evaluate()?
-                == cue_rust::EvaluatedValue::Number("12".to_owned())
-            && exact_math.lookup_path(&["bounded"])?.evaluate()?
-                == cue_rust::EvaluatedValue::Number("4".to_owned())
-            && exact_math
-                .lookup_path(&["bad"])?
-                .validate(ValidateOptions::default())
-                .is_err()
-            && exact_math.lookup_path(&["sign"])?.evaluate()?
-                == cue_rust::EvaluatedValue::Bool(true)
-            && exact_math.lookup_path(&["signZero"])?.evaluate()?
-                == cue_rust::EvaluatedValue::Bool(true)
-            && exact_math.lookup_path(&["pow10"])?.evaluate()?
-                == cue_rust::EvaluatedValue::Number("0.01".to_owned())
-            && exact_math.lookup_path(&["copySign"])?.evaluate()?
-                == cue_rust::EvaluatedValue::Number("-5".to_owned())
-            && exact_math.lookup_path(&["dim"])?.evaluate()?
-                == cue_rust::EvaluatedValue::Number("0.5".to_owned())
-            && exact_math.lookup_path(&["jacobi"])?.evaluate()?
-                == cue_rust::EvaluatedValue::Number("1".to_owned())
-            && exact_math.lookup_path(&["jacobiNeg"])?.evaluate()?
-                == cue_rust::EvaluatedValue::Number("-1".to_owned())
-            && exact_math.lookup_path(&["jacobiZero"])?.evaluate()?
-                == cue_rust::EvaluatedValue::Number("0".to_owned())
-            && exact_math.lookup_path(&["jacobiCommon"])?.evaluate()?
-                == cue_rust::EvaluatedValue::Number("0".to_owned())
-            && exact_math.lookup_path(&["jacobiNegDenom"])?.evaluate()?
-                == cue_rust::EvaluatedValue::Number("1".to_owned())
-            && exact_math.lookup_path(&["jacobiBig"])?.evaluate()?
-                == cue_rust::EvaluatedValue::Number("1".to_owned())
-            && exact_math
-                .lookup_path(&["jacobiBad"])?
-                .validate(ValidateOptions::default())
-                .is_err()
-            && exact_math.lookup_path(&["pow"])?.evaluate()?
-                == cue_rust::EvaluatedValue::Number("4096".to_owned())
-            && exact_math.lookup_path(&["powDecimal"])?.evaluate()?
-                == cue_rust::EvaluatedValue::Number("6.25".to_owned())
-            && exact_math.lookup_path(&["powNeg"])?.evaluate()?
-                == cue_rust::EvaluatedValue::Number("-8".to_owned())
-            && exact_math.lookup_path(&["powNegEven"])?.evaluate()?
-                == cue_rust::EvaluatedValue::Number("16".to_owned())
-            && exact_math.lookup_path(&["powNegExp"])?.evaluate()?
-                == cue_rust::EvaluatedValue::Number("0.125".to_owned())
-            && exact_math.lookup_path(&["powNegDecimalExp"])?.evaluate()?
-                == cue_rust::EvaluatedValue::Number("0.64".to_owned())
-            && exact_math.lookup_path(&["powNegZero"])?.evaluate()?
-                == cue_rust::EvaluatedValue::Number("-0".to_owned())
-            && exact_math.lookup_path(&["cbrt"])?.evaluate()?
-                == cue_rust::EvaluatedValue::Number(
-                    "1.259921049894873164767210607278228".to_owned(),
-                )
-            && exact_math.lookup_path(&["cbrtNeg"])?.evaluate()?
-                == cue_rust::EvaluatedValue::Number("-2".to_owned())
-            && exact_math.lookup_path(&["cbrtNegZero"])?.evaluate()?
-                == cue_rust::EvaluatedValue::Number("-0".to_owned()),
+        passed,
     ));
     Ok(())
 }
@@ -499,6 +497,12 @@ async fn push_known_gap_cases(
         "math.Pow now covers exact integer exponents, including finite negative-exponent \
          decimals; fractional exponents still require APD-compatible decimal transcendental \
          semantics",
+    ));
+    cases.push(expected_gap_case(
+        "stdlib/math-float64-nonfinite-results",
+        "stdlib-gap",
+        "finite float64 math builtins are supported where CUE delegates to Go float64; NaN and \
+         infinity results still need an explicit evaluator representation and encoding policy",
     ));
     Ok(())
 }
@@ -918,6 +922,46 @@ fn custom_sort_field_order(
             Ok(value.clone())
         })
         .collect()
+}
+
+fn number_paths_match(
+    value: &cue_rust::Value,
+    expected: &[(&str, &str)],
+) -> Result<bool, Box<dyn Error>> {
+    expected.iter().try_fold(true, |passed, (field, expected)| {
+        Ok(passed && number_path_matches(value, field, expected)?)
+    })
+}
+
+fn number_path_matches(
+    value: &cue_rust::Value,
+    field: &str,
+    expected: &str,
+) -> Result<bool, Box<dyn Error>> {
+    Ok(value.lookup_path(&[field])?.evaluate()?
+        == cue_rust::EvaluatedValue::Number(expected.to_owned()))
+}
+
+fn bool_path_matches(
+    value: &cue_rust::Value,
+    field: &str,
+    expected: bool,
+) -> Result<bool, Box<dyn Error>> {
+    Ok(value.lookup_path(&[field])?.evaluate()? == cue_rust::EvaluatedValue::Bool(expected))
+}
+
+fn bottom_path(value: &cue_rust::Value, field: &str) -> Result<bool, Box<dyn Error>> {
+    Ok(matches!(
+        value.lookup_path(&[field])?.evaluate()?,
+        cue_rust::EvaluatedValue::Bottom(_),
+    ))
+}
+
+fn validation_fails(value: &cue_rust::Value, field: &str) -> Result<bool, Box<dyn Error>> {
+    Ok(value
+        .lookup_path(&[field])?
+        .validate(ValidateOptions::default())
+        .is_err())
 }
 
 fn supported_case(name: &'static str, category: &'static str, passed: bool) -> CompatibilityCase {

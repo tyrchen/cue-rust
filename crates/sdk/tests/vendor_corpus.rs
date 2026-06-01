@@ -791,6 +791,7 @@ async fn assert_upstream_stdlib_surface_builtins(context: &Context, root: &Path)
         TxtarArchive::read(&root.join("vendors/cue/pkg/math/testdata/gen.txtar")).await?;
     assert!(math_gen.file("in.cue")?.contains("math.Jacobi(1000, 201)"));
     assert!(math_gen.file("in.cue")?.contains("math.Jacobi(1000, 2000)"));
+    assert!(math_gen.file("in.cue")?.contains("math.Asin(2.0e400)"));
     assert!(math_gen.file("in.cue")?.contains("math.Pow(8, 4)"));
     assert!(math_gen.file("in.cue")?.contains("math.Cbrt(2)"));
     assert!(math_gen.file("in.cue")?.contains("math.Copysign(5, -2.2)"));
@@ -806,19 +807,26 @@ async fn assert_upstream_stdlib_surface_builtins(context: &Context, root: &Path)
         "import \"math\"\npi: math.Pi\nmaxPrec: math.MaxPrec\nfloorPi: \
          math.Floor(math.Pi)\nfloor: math.Floor(-2.2)\nceil: math.Ceil(-2.2)\ntrunc: \
          math.Trunc(-2.9)\nround: math.Round(-2.5)\neven: math.RoundToEven(2.5)\nabs: \
-         math.Abs(-2.2)\ncopySign: math.Copysign(5, -2.2)\ncbrt: math.Cbrt(2)\ncbrtNeg: \
-         math.Cbrt(-8)\ncbrtNegZero: math.Cbrt(-0)\ndimPositive: math.Dim(3, 2.5)\ndimZero: \
-         math.Dim(5, 7.2)\njacobi: math.Jacobi(1000, 201)\njacobiNeg: math.Jacobi(-1, \
-         3)\njacobiZero: math.Jacobi(0, 3)\njacobiCommon: math.Jacobi(3, 9)\njacobiNegDenom: \
-         math.Jacobi(1, -3)\njacobiBig: math.Jacobi(1, \
-         170141183460469231731687303715884105729)\njacobiBad: math.Jacobi(1000, \
+         math.Abs(-2.2)\nacos: math.Acos(0.5)\nacosh: math.Acosh(1)\nasin: \
+         math.Asin(0.5)\nasinOverflow: math.Asin(2.0e400)\nasinh: math.Asinh(0)\natan: \
+         math.Atan(1)\natan2: math.Atan2(1, 1)\natanh: math.Atanh(0.5)\nfloatUnderflow: \
+         math.Sin(1e-400)\ncopySign: math.Copysign(5, -2.2)\ncbrt: math.Cbrt(2)\ncbrtNeg: \
+         math.Cbrt(-8)\ncbrtNegZero: math.Cbrt(-0)\ncos: math.Cos(0)\ncosh: \
+         math.Cosh(0)\ndimPositive: math.Dim(3, 2.5)\ndimZero: math.Dim(5, 7.2)\njacobi: \
+         math.Jacobi(1000, 201)\njacobiNeg: math.Jacobi(-1, 3)\njacobiZero: math.Jacobi(0, \
+         3)\njacobiCommon: math.Jacobi(3, 9)\njacobiNegDenom: math.Jacobi(1, -3)\njacobiBig: \
+         math.Jacobi(1, 170141183460469231731687303715884105729)\njacobiBad: math.Jacobi(1000, \
          2000)\nmultipleBool: math.MultipleOf(5, 2.5)\nmultipleConstraint: 9 & \
          math.MultipleOf(3)\nmultipleBoth: 12 & math.MultipleOf(2) & \
          math.MultipleOf(3)\nmultipleBad: 10 & math.MultipleOf(3)\nzero: math.MultipleOf(5, \
-         0)\nsign: math.Signbit(-4)\npow: math.Pow(8, 4)\npowDecimal: math.Pow(2.5, 2)\npowNeg: \
-         math.Pow(-2, 3)\npowNegEven: math.Pow(-2, 4)\npowNegExp: math.Pow(2, \
-         -3)\npowNegDecimalExp: math.Pow(1.25, -2)\npowNegZero: math.Pow(-0, 3)\npow10: \
-         math.Pow10(4)\npow10Neg: math.Pow10(-2)\n",
+         0)\nexpm1: math.Expm1(1)\nhypot: math.Hypot(3, 4)\nlog1p: math.Log1p(1)\nlogb: \
+         math.Logb(8)\nlogbMax: math.Logb(1.7976931348623157e308)\nlogbSubnormal: \
+         math.Logb(5e-324)\nmod: math.Mod(5.5, 2)\nsign: math.Signbit(-4)\nsin: \
+         math.Sin(0)\nsinh: math.Sinh(0)\nsqrt: math.Sqrt(9)\ntan: math.Tan(0)\ntanh: \
+         math.Tanh(0)\npow: math.Pow(8, 4)\npowDecimal: math.Pow(2.5, 2)\npowNeg: math.Pow(-2, \
+         3)\npowNegEven: math.Pow(-2, 4)\npowNegExp: math.Pow(2, -3)\npowNegDecimalExp: \
+         math.Pow(1.25, -2)\npowNegZero: math.Pow(-0, 3)\npow10: math.Pow10(4)\npow10Neg: \
+         math.Pow10(-2)\n",
     )?;
     assert_eq!(
         EvaluatedValue::Number(
@@ -859,6 +867,42 @@ async fn assert_upstream_stdlib_surface_builtins(context: &Context, root: &Path)
         math_value.lookup_path(&["abs"])?.evaluate()?,
     );
     assert_eq!(
+        EvaluatedValue::Number("1.0471975511965979".to_owned()),
+        math_value.lookup_path(&["acos"])?.evaluate()?,
+    );
+    assert_eq!(
+        EvaluatedValue::Number("0".to_owned()),
+        math_value.lookup_path(&["acosh"])?.evaluate()?,
+    );
+    assert_eq!(
+        EvaluatedValue::Number("0.5235987755982989".to_owned()),
+        math_value.lookup_path(&["asin"])?.evaluate()?,
+    );
+    assert!(matches!(
+        math_value.lookup_path(&["asinOverflow"])?.evaluate()?,
+        EvaluatedValue::Bottom(_),
+    ));
+    assert_eq!(
+        EvaluatedValue::Number("0".to_owned()),
+        math_value.lookup_path(&["asinh"])?.evaluate()?,
+    );
+    assert_eq!(
+        EvaluatedValue::Number("0.7853981633974483".to_owned()),
+        math_value.lookup_path(&["atan"])?.evaluate()?,
+    );
+    assert_eq!(
+        EvaluatedValue::Number("0.7853981633974483".to_owned()),
+        math_value.lookup_path(&["atan2"])?.evaluate()?,
+    );
+    assert_eq!(
+        EvaluatedValue::Number("0.5493061443340548".to_owned()),
+        math_value.lookup_path(&["atanh"])?.evaluate()?,
+    );
+    assert!(matches!(
+        math_value.lookup_path(&["floatUnderflow"])?.evaluate()?,
+        EvaluatedValue::Bottom(_),
+    ));
+    assert_eq!(
         EvaluatedValue::Number("-5".to_owned()),
         math_value.lookup_path(&["copySign"])?.evaluate()?,
     );
@@ -873,6 +917,14 @@ async fn assert_upstream_stdlib_surface_builtins(context: &Context, root: &Path)
     assert_eq!(
         EvaluatedValue::Number("-0".to_owned()),
         math_value.lookup_path(&["cbrtNegZero"])?.evaluate()?,
+    );
+    assert_eq!(
+        EvaluatedValue::Number("1".to_owned()),
+        math_value.lookup_path(&["cos"])?.evaluate()?,
+    );
+    assert_eq!(
+        EvaluatedValue::Number("1".to_owned()),
+        math_value.lookup_path(&["cosh"])?.evaluate()?,
     );
     assert_eq!(
         EvaluatedValue::Number("0.5".to_owned()),
@@ -937,8 +989,56 @@ async fn assert_upstream_stdlib_surface_builtins(context: &Context, root: &Path)
         EvaluatedValue::Bottom(_),
     ));
     assert_eq!(
+        EvaluatedValue::Number("1.718281828459045".to_owned()),
+        math_value.lookup_path(&["expm1"])?.evaluate()?,
+    );
+    assert_eq!(
+        EvaluatedValue::Number("5".to_owned()),
+        math_value.lookup_path(&["hypot"])?.evaluate()?,
+    );
+    assert_eq!(
+        EvaluatedValue::Number("0.6931471805599453".to_owned()),
+        math_value.lookup_path(&["log1p"])?.evaluate()?,
+    );
+    assert_eq!(
+        EvaluatedValue::Number("3".to_owned()),
+        math_value.lookup_path(&["logb"])?.evaluate()?,
+    );
+    assert_eq!(
+        EvaluatedValue::Number("1023".to_owned()),
+        math_value.lookup_path(&["logbMax"])?.evaluate()?,
+    );
+    assert_eq!(
+        EvaluatedValue::Number("-1074".to_owned()),
+        math_value.lookup_path(&["logbSubnormal"])?.evaluate()?,
+    );
+    assert_eq!(
+        EvaluatedValue::Number("1.5".to_owned()),
+        math_value.lookup_path(&["mod"])?.evaluate()?,
+    );
+    assert_eq!(
         EvaluatedValue::Bool(true),
         math_value.lookup_path(&["sign"])?.evaluate()?,
+    );
+    assert_eq!(
+        EvaluatedValue::Number("0".to_owned()),
+        math_value.lookup_path(&["sin"])?.evaluate()?,
+    );
+    assert_eq!(
+        EvaluatedValue::Number("0".to_owned()),
+        math_value.lookup_path(&["sinh"])?.evaluate()?,
+    );
+    assert_eq!(
+        EvaluatedValue::Number("3".to_owned()),
+        math_value.lookup_path(&["sqrt"])?.evaluate()?,
+    );
+    assert_eq!(
+        EvaluatedValue::Number("0".to_owned()),
+        math_value.lookup_path(&["tan"])?.evaluate()?,
+    );
+    assert_eq!(
+        EvaluatedValue::Number("0".to_owned()),
+        math_value.lookup_path(&["tanh"])?.evaluate()?,
     );
     assert_eq!(
         EvaluatedValue::Number("4096".to_owned()),

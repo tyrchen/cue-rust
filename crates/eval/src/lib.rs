@@ -19,6 +19,10 @@ use cue_rust_adt::{
 };
 use cue_rust_source::{Diagnostic, DiagnosticReport, Severity, Span};
 use indexmap::IndexMap;
+use libm::{
+    acos, acosh, asin, asinh, atan, atan2, atanh, cos, cosh, expm1, fmod, hypot, ilogb, log1p, sin,
+    sinh, sqrt, tan, tanh,
+};
 use num_bigint::{BigInt, Sign};
 use regex::{Regex, RegexBuilder};
 use thiserror::Error;
@@ -33,6 +37,7 @@ const MAX_COMPREHENSION_GENERATED_ITEMS: usize = MAX_BUILTIN_GENERATED_ITEMS;
 const MAX_SCHEMA_SORT_ITEMS: usize = 100_000;
 const MAX_FIXPOINT_ITERATIONS: usize = 64;
 const CUE_DECIMAL_PRECISION: u64 = 34;
+const MIN_FLOAT64_DECIMAL_EXPONENT: i64 = -324;
 const INVALID_DYNAMIC_LABEL_FIELD: &str = "<invalid-dynamic-label>";
 const INVALID_PATTERN_LABEL_FIELD: &str = "<invalid-pattern-label>";
 const MATH_E: &str = "2.71828182845904523536028747135266249775724709369995957496696763";
@@ -3428,6 +3433,16 @@ fn evaluate_builtin_call(name: &str, args: Vec<EvaluatedValue>) -> EvaluatedValu
         "close" => evaluate_close(args),
         "div" | "mod" | "quo" | "rem" => evaluate_integer_builtin(name, args),
         "len" => evaluate_len(args),
+        "or" => evaluate_or(args),
+        _ if name.starts_with("list.") => evaluate_list_builtin(name, args),
+        _ if name.starts_with("math.") => evaluate_math_builtin(name, args),
+        _ if name.starts_with("strings.") => evaluate_strings_builtin(name, args),
+        _ => unsupported_builtin(name),
+    }
+}
+
+fn evaluate_list_builtin(name: &str, args: Vec<EvaluatedValue>) -> EvaluatedValue {
+    match name {
         "list.Concat" => evaluate_list_concat(args),
         "list.Contains" => evaluate_list_contains(args),
         "list.Drop" => evaluate_list_drop(args),
@@ -3451,13 +3466,33 @@ fn evaluate_builtin_call(name: &str, args: Vec<EvaluatedValue>) -> EvaluatedValu
         "list.Sum" => evaluate_list_numeric_aggregate("list.Sum", args, NumericAggregate::Sum),
         "list.Take" => evaluate_list_take(args),
         "list.UniqueItems" => evaluate_list_unique_items(args),
+        _ => unsupported_builtin(name),
+    }
+}
+
+fn evaluate_math_builtin(name: &str, args: Vec<EvaluatedValue>) -> EvaluatedValue {
+    match name {
         "math.Abs" => evaluate_math_abs(args),
+        "math.Acos" => evaluate_math_float_unary("math.Acos", args, acos),
+        "math.Acosh" => evaluate_math_float_unary("math.Acosh", args, acosh),
+        "math.Asin" => evaluate_math_float_unary("math.Asin", args, asin),
+        "math.Asinh" => evaluate_math_float_unary("math.Asinh", args, asinh),
+        "math.Atan" => evaluate_math_float_unary("math.Atan", args, atan),
+        "math.Atan2" => evaluate_math_float_binary("math.Atan2", args, atan2),
+        "math.Atanh" => evaluate_math_float_unary("math.Atanh", args, atanh),
         "math.Ceil" => evaluate_math_rounding("math.Ceil", args, RoundingMode::Ceiling),
         "math.Cbrt" => evaluate_math_cbrt(args),
+        "math.Cos" => evaluate_math_float_unary("math.Cos", args, cos),
+        "math.Cosh" => evaluate_math_float_unary("math.Cosh", args, cosh),
         "math.Copysign" => evaluate_math_copysign(args),
         "math.Dim" => evaluate_math_dim(args),
+        "math.Expm1" => evaluate_math_float_unary("math.Expm1", args, expm1),
         "math.Floor" => evaluate_math_rounding("math.Floor", args, RoundingMode::Floor),
+        "math.Hypot" => evaluate_math_float_binary("math.Hypot", args, hypot),
         "math.Jacobi" => evaluate_math_jacobi(args),
+        "math.Log1p" => evaluate_math_float_unary("math.Log1p", args, log1p),
+        "math.Logb" => evaluate_math_float_unary("math.Logb", args, float_logb),
+        "math.Mod" => evaluate_math_float_binary("math.Mod", args, fmod),
         "math.MultipleOf" => evaluate_math_multiple_of(args),
         "math.Pow" => evaluate_math_pow(args),
         "math.Pow10" => evaluate_math_pow10(args),
@@ -3466,8 +3501,18 @@ fn evaluate_builtin_call(name: &str, args: Vec<EvaluatedValue>) -> EvaluatedValu
             evaluate_math_rounding("math.RoundToEven", args, RoundingMode::HalfEven)
         }
         "math.Signbit" => evaluate_math_signbit(args),
+        "math.Sin" => evaluate_math_float_unary("math.Sin", args, sin),
+        "math.Sinh" => evaluate_math_float_unary("math.Sinh", args, sinh),
+        "math.Sqrt" => evaluate_math_float_unary("math.Sqrt", args, sqrt),
+        "math.Tan" => evaluate_math_float_unary("math.Tan", args, tan),
+        "math.Tanh" => evaluate_math_float_unary("math.Tanh", args, tanh),
         "math.Trunc" => evaluate_math_rounding("math.Trunc", args, RoundingMode::Down),
-        "or" => evaluate_or(args),
+        _ => unsupported_builtin(name),
+    }
+}
+
+fn evaluate_strings_builtin(name: &str, args: Vec<EvaluatedValue>) -> EvaluatedValue {
+    match name {
         "strings.ByteAt" => evaluate_strings_byte_at(args),
         "strings.ByteSlice" => evaluate_strings_byte_slice(args),
         "strings.Compare" => evaluate_strings_compare(args),
@@ -3502,13 +3547,17 @@ fn evaluate_builtin_call(name: &str, args: Vec<EvaluatedValue>) -> EvaluatedValu
         "strings.TrimRight" => evaluate_strings_trim_right(args),
         "strings.TrimSpace" => evaluate_strings_trim_space(args),
         "strings.TrimSuffix" => evaluate_strings_trim_suffix(args),
-        _ => EvaluatedValue::Bottom(Bottom::new(
-            "cue.eval.unsupported_builtin",
-            format!("unsupported builtin `{name}`"),
-            None,
-            false,
-        )),
+        _ => unsupported_builtin(name),
     }
+}
+
+fn unsupported_builtin(name: &str) -> EvaluatedValue {
+    EvaluatedValue::Bottom(Bottom::new(
+        "cue.eval.unsupported_builtin",
+        format!("unsupported builtin `{name}`"),
+        None,
+        false,
+    ))
 }
 
 fn evaluate_math_abs(args: Vec<EvaluatedValue>) -> EvaluatedValue {
@@ -3521,6 +3570,28 @@ fn evaluate_math_abs(args: Vec<EvaluatedValue>) -> EvaluatedValue {
         value
     };
     evaluated_decimal_number("math.Abs", &value)
+}
+
+fn evaluate_math_float_unary(
+    name: &str,
+    args: Vec<EvaluatedValue>,
+    function: fn(f64) -> f64,
+) -> EvaluatedValue {
+    let Some(value) = single_float_arg(args) else {
+        return invalid_math_builtin_arg(name);
+    };
+    finite_float_result(name, function(value))
+}
+
+fn evaluate_math_float_binary(
+    name: &str,
+    args: Vec<EvaluatedValue>,
+    function: fn(f64, f64) -> f64,
+) -> EvaluatedValue {
+    let Some((left, right)) = two_float_args(args) else {
+        return invalid_math_builtin_arg(name);
+    };
+    finite_float_result(name, function(left, right))
 }
 
 fn evaluate_math_rounding(
@@ -3669,6 +3740,11 @@ fn single_decimal_arg(_name: &str, args: Vec<EvaluatedValue>) -> Option<BigDecim
     parse_exact_decimal(&value)
 }
 
+fn single_float_arg(args: Vec<EvaluatedValue>) -> Option<f64> {
+    let value = single_number_text(args)?;
+    parse_finite_f64(&value)
+}
+
 fn single_integer_arg(_name: &str, args: Vec<EvaluatedValue>) -> Option<i128> {
     if args.len() != 1 {
         return None;
@@ -3707,6 +3783,11 @@ fn two_number_arg_texts(args: Vec<EvaluatedValue>) -> Option<(String, String)> {
 fn two_decimal_args(args: Vec<EvaluatedValue>) -> Option<(BigDecimal, BigDecimal)> {
     let (left, right) = two_number_arg_texts(args)?;
     Some((parse_exact_decimal(&left)?, parse_exact_decimal(&right)?))
+}
+
+fn two_float_args(args: Vec<EvaluatedValue>) -> Option<(f64, f64)> {
+    let (left, right) = two_number_arg_texts(args)?;
+    Some((parse_finite_f64(&left)?, parse_finite_f64(&right)?))
 }
 
 fn two_bigint_args(args: Vec<EvaluatedValue>) -> Option<(BigInt, BigInt)> {
@@ -4025,9 +4106,34 @@ fn low_bits(value: &BigInt, mask: u64) -> u64 {
     value.to_u64_digits().1.first().copied().unwrap_or_default() & mask
 }
 
+fn float_logb(value: f64) -> f64 {
+    if is_zero(value) {
+        f64::NEG_INFINITY
+    } else {
+        f64::from(ilogb(value))
+    }
+}
+
+fn finite_float_result(name: &str, value: f64) -> EvaluatedValue {
+    if value.is_finite() {
+        EvaluatedValue::Number(format_number(value))
+    } else {
+        invalid_math_float_result(name)
+    }
+}
+
 fn cue_decimal_context() -> Option<DecimalContext> {
     NonZeroU64::new(CUE_DECIMAL_PRECISION)
         .map(|precision| DecimalContext::new(precision, RoundingMode::HalfEven))
+}
+
+fn invalid_math_float_result(name: &str) -> EvaluatedValue {
+    EvaluatedValue::Bottom(Bottom::new(
+        "cue.eval.invalid_builtin_result",
+        format!("{name} produced a non-finite result"),
+        None,
+        false,
+    ))
 }
 
 fn invalid_math_builtin_arg(name: &str) -> EvaluatedValue {
@@ -6072,6 +6178,15 @@ impl DecimalNumber {
             scale: 0,
         }
     }
+
+    fn is_nonzero_below_float64_range(&self) -> bool {
+        self.sign != 0 && self.decimal_exponent() < MIN_FLOAT64_DECIMAL_EXPONENT
+    }
+
+    fn decimal_exponent(&self) -> i64 {
+        let digit_count = i64::try_from(self.digits.len()).unwrap_or(i64::MAX);
+        digit_count.saturating_sub(self.scale).saturating_sub(1)
+    }
 }
 
 fn evaluate_disjunction(left: EvaluatedValue, right: EvaluatedValue) -> EvaluatedValue {
@@ -6464,6 +6579,10 @@ fn number_operand(value: EvaluatedValue) -> Result<f64, Bottom> {
 }
 
 fn parse_finite_f64(value: &str) -> Option<f64> {
+    let decimal = parse_decimal_number(value)?;
+    if decimal.is_nonzero_below_float64_range() {
+        return None;
+    }
     value
         .replace('_', "")
         .parse::<f64>()

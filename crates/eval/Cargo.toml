@@ -15,6 +15,7 @@ bigdecimal.workspace = true
 cue-rust-adt.workspace = true
 cue-rust-source.workspace = true
 indexmap.workspace = true
+libm.workspace = true
 num-bigint.workspace = true
 regex.workspace = true
 thiserror.workspace = true
