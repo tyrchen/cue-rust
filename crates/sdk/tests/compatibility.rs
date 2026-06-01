@@ -354,9 +354,10 @@ async fn push_known_gap_cases(
     cases.push(expected_gap_case(
         "eval/cycle-scheduler",
         "semantic-gap",
-        "inline structural and list cycles now resolve for the currently covered vendor cases, \
-         but full upstream cycle scheduling still needs top-level cycle resolution, public \
-         structural-cycle diagnostics, and lazy disjunction/default fixpoint support",
+        "inline and top-level structural/list cycles now resolve for the currently covered vendor \
+         cases, but full upstream cycle scheduling still needs public structural-cycle \
+         diagnostics, broader structural-cycle coverage, and lazy disjunction/default fixpoint \
+         support",
     ));
     Ok(())
 }
@@ -412,9 +413,11 @@ fn push_phase9_parity_cases(context: &Context, cases: &mut Vec<CompatibilityCase
          \"ok\"}\nclosedPatternBad: close({[=~\"^a\"]: string}) & {banana: \
          \"bad\"}\ncloseShallow: close({a: b: int}) & {a: c: int}\ntautologicalList: {t0: c: \
          [c[0]], pair: c: [c[1], c[0]]}\ngroundedList: {a: 100, p1: c: [c[1], a], p2: c: [a, \
-         c[0]]}\nstructCycle: {self: s1: s1 & {a: 1}, two: {s1: s2 & {a: 1}, s2: s1 & {b: 2}}, \
-         three: {s1: s2 & {a: 1}, s2: s3 & {b: 2}, s3: s1 & {c: 3}}}\nstructuralBad: {a: c: \
-         a}\ninvalidDynamic: {(1): 1}\ncycle: cycle\n",
+         c[0]]}\nrootListValue: 100\nrootListT0: [rootListT0[0]]\nrootListPair: [rootListPair[1], \
+         rootListPair[0]]\nrootListGrounded: [rootListGrounded[1], rootListValue]\nstructCycle: \
+         {self: s1: s1 & {a: 1}, two: {s1: s2 & {a: 1}, s2: s1 & {b: 2}}, three: {s1: s2 & {a: \
+         1}, s2: s3 & {b: 2}, s3: s1 & {c: 3}}}\nstructuralBad: {a: c: a}\ninvalidDynamic: {(1): \
+         1}\ncycle: cycle\n",
     ) else {
         cases.push(supported_case("phase9/parity-tranche", "semantic", false));
         return;
@@ -559,85 +562,70 @@ fn push_phase9_semantic_cases(value: &cue_rust::Value, cases: &mut Vec<Compatibi
 }
 
 fn push_phase9_cycle_cases(value: &cue_rust::Value, cases: &mut Vec<CompatibilityCase>) {
-    let tautological_list_passed = value
-        .lookup_path(&["tautologicalList", "t0", "c"])
-        .and_then(|value| value.evaluate())
-        .is_ok_and(|value| {
-            value == cue_rust::EvaluatedValue::List(vec![cue_rust::EvaluatedValue::Top])
-        })
-        && value
-            .lookup_path(&["tautologicalList", "pair", "c"])
-            .and_then(|value| value.evaluate())
-            .is_ok_and(|value| {
-                value
-                    == cue_rust::EvaluatedValue::List(vec![
-                        cue_rust::EvaluatedValue::Top,
-                        cue_rust::EvaluatedValue::Top,
-                    ])
-            });
     cases.push(supported_case(
         "eval/tautological-list-cycle",
         "semantic-gap",
-        tautological_list_passed,
+        tautological_list_cycles_pass(value),
     ));
 
-    let grounded_list_passed = value
-        .lookup_path(&["groundedList", "p1", "c"])
-        .and_then(|value| value.evaluate())
-        .is_ok_and(|value| {
-            value
-                == cue_rust::EvaluatedValue::List(vec![
-                    cue_rust::EvaluatedValue::Number("100".to_owned()),
-                    cue_rust::EvaluatedValue::Number("100".to_owned()),
-                ])
-        })
-        && value
-            .lookup_path(&["groundedList", "p2", "c"])
-            .and_then(|value| value.evaluate())
-            .is_ok_and(|value| {
-                value
-                    == cue_rust::EvaluatedValue::List(vec![
-                        cue_rust::EvaluatedValue::Number("100".to_owned()),
-                        cue_rust::EvaluatedValue::Number("100".to_owned()),
-                    ])
-            });
     cases.push(supported_case(
         "eval/grounded-list-cycle",
         "semantic-gap",
-        grounded_list_passed,
+        grounded_list_cycles_pass(value),
     ));
 
-    let structural_cycle_passed = value
-        .lookup_path(&["structCycle", "self", "s1", "a"])
-        .and_then(|value| value.evaluate())
-        .is_ok_and(|value| value == cue_rust::EvaluatedValue::Number("1".to_owned()))
-        && value
-            .lookup_path(&["structCycle", "two", "s1", "b"])
-            .and_then(|value| value.evaluate())
-            .is_ok_and(|value| value == cue_rust::EvaluatedValue::Number("2".to_owned()))
-        && value
-            .lookup_path(&["structCycle", "two", "s2", "a"])
-            .and_then(|value| value.evaluate())
-            .is_ok_and(|value| value == cue_rust::EvaluatedValue::Number("1".to_owned()))
-        && value
-            .lookup_path(&["structCycle", "three", "s1", "c"])
-            .and_then(|value| value.evaluate())
-            .is_ok_and(|value| value == cue_rust::EvaluatedValue::Number("3".to_owned()))
-        && value
-            .lookup_path(&["structCycle", "three", "s2", "a"])
-            .and_then(|value| value.evaluate())
-            .is_ok_and(|value| value == cue_rust::EvaluatedValue::Number("1".to_owned()))
-        && value
-            .lookup_path(&["structCycle", "three", "s3", "b"])
-            .and_then(|value| value.evaluate())
-            .is_ok_and(|value| value == cue_rust::EvaluatedValue::Number("2".to_owned()));
+    cases.push(supported_case(
+        "eval/top-level-list-cycle",
+        "semantic-gap",
+        top_level_list_cycles_pass(value),
+    ));
+
     cases.push(supported_case(
         "eval/structural-cycle-fixpoint",
         "semantic-gap",
-        structural_cycle_passed,
+        structural_cycle_fixpoints_pass(value),
     ));
 
-    let structural_bottom_passed = value
+    cases.push(supported_case(
+        "eval/structural-cycle-bottom",
+        "semantic-gap",
+        structural_cycle_bottom_passes(value),
+    ));
+}
+
+fn tautological_list_cycles_pass(value: &cue_rust::Value) -> bool {
+    evaluated_path_eq(
+        value,
+        &["tautologicalList", "t0", "c"],
+        &cue_rust::EvaluatedValue::List(vec![cue_rust::EvaluatedValue::Top]),
+    ) && evaluated_path_eq(value, &["tautologicalList", "pair", "c"], &top_pair_value())
+}
+
+fn grounded_list_cycles_pass(value: &cue_rust::Value) -> bool {
+    evaluated_path_eq(value, &["groundedList", "p1", "c"], &hundred_pair_value())
+        && evaluated_path_eq(value, &["groundedList", "p2", "c"], &hundred_pair_value())
+}
+
+fn top_level_list_cycles_pass(value: &cue_rust::Value) -> bool {
+    evaluated_path_eq(
+        value,
+        &["rootListT0"],
+        &cue_rust::EvaluatedValue::List(vec![cue_rust::EvaluatedValue::Top]),
+    ) && evaluated_path_eq(value, &["rootListPair"], &top_pair_value())
+        && evaluated_path_eq(value, &["rootListGrounded"], &hundred_pair_value())
+}
+
+fn structural_cycle_fixpoints_pass(value: &cue_rust::Value) -> bool {
+    evaluated_path_number(value, &["structCycle", "self", "s1", "a"], "1")
+        && evaluated_path_number(value, &["structCycle", "two", "s1", "b"], "2")
+        && evaluated_path_number(value, &["structCycle", "two", "s2", "a"], "1")
+        && evaluated_path_number(value, &["structCycle", "three", "s1", "c"], "3")
+        && evaluated_path_number(value, &["structCycle", "three", "s2", "a"], "1")
+        && evaluated_path_number(value, &["structCycle", "three", "s3", "b"], "2")
+}
+
+fn structural_cycle_bottom_passes(value: &cue_rust::Value) -> bool {
+    value
         .lookup_path(&["structuralBad", "a", "c"])
         .and_then(|value| value.evaluate())
         .is_ok_and(|value| {
@@ -646,12 +634,40 @@ fn push_phase9_cycle_cases(value: &cue_rust::Value, cases: &mut Vec<Compatibilit
                 cue_rust::EvaluatedValue::Bottom(bottom)
                     if bottom.code == "cue.eval.structural_cycle"
             )
-        });
-    cases.push(supported_case(
-        "eval/structural-cycle-bottom",
-        "semantic-gap",
-        structural_bottom_passed,
-    ));
+        })
+}
+
+fn evaluated_path_number(value: &cue_rust::Value, path: &[&str], expected: &str) -> bool {
+    evaluated_path_eq(
+        value,
+        path,
+        &cue_rust::EvaluatedValue::Number(expected.to_owned()),
+    )
+}
+
+fn evaluated_path_eq(
+    value: &cue_rust::Value,
+    path: &[&str],
+    expected: &cue_rust::EvaluatedValue,
+) -> bool {
+    value
+        .lookup_path(path)
+        .and_then(|value| value.evaluate())
+        .is_ok_and(|value| value == *expected)
+}
+
+fn top_pair_value() -> cue_rust::EvaluatedValue {
+    cue_rust::EvaluatedValue::List(vec![
+        cue_rust::EvaluatedValue::Top,
+        cue_rust::EvaluatedValue::Top,
+    ])
+}
+
+fn hundred_pair_value() -> cue_rust::EvaluatedValue {
+    cue_rust::EvaluatedValue::List(vec![
+        cue_rust::EvaluatedValue::Number("100".to_owned()),
+        cue_rust::EvaluatedValue::Number("100".to_owned()),
+    ])
 }
 
 fn sorted_number_list_matches(value: &cue_rust::Value, field: &str, expected: &[&str]) -> bool {

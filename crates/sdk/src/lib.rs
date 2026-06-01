@@ -219,6 +219,30 @@ mod tests {
         )
     }
 
+    const TOP_LEVEL_CYCLE_SOURCE: &str =
+        "ordinary: {x: y, y: x}\nstructural: a: c: a\naTop: 100\nrootListT0: \
+         [rootListT0[0]]\nrootListPair: [rootListPair[1], rootListPair[0]]\nrootListGrounded: \
+         [rootListGrounded[1], aTop]\nrootListConj: [rootListConj[0]] & [1]\nselectorOk: {b: \
+         selectorOk.c, c: 1}\nselectorFixpoint: {b: selectorFixpoint.c, c: c & 1}\nselectorConj: \
+         {b: selectorConj.c} & {c: 1}\nselectorConjFixpoint: {b: selectorConjFixpoint.c} & {c: c \
+         & 1}\nnotSelfList: {b: [notSelfList[0]], c: notSelfList}\nselectorGenerated: {b: \
+         selectorGenerated.c, for k, v in {c: 1} {\"\\(k)\": v}}\nselectorDynamicKey: \
+         \"c\"\nselectorDynamic: {b: selectorDynamic.c, (selectorDynamicKey): \
+         1}\nselectorGeneratedMerge: {b: selectorGeneratedMerge.c, c: int, for k, v in {c: 1} \
+         {\"\\(k)\": v}}\nselectorDynamicMergeKey: \"c\"\nselectorDynamicMerge: {b: \
+         selectorDynamicMerge.c, c: int, (selectorDynamicMergeKey): \
+         1}\nselectorDynamicConflictKey: \"c\"\nselectorDynamicConflict: {b: \
+         selectorDynamicConflict.c, c: 1, (selectorDynamicConflictKey): \
+         2}\nselectorPatternConflict: {b: selectorPatternConflict.c, [=~\"^c$\"]: int, c: \
+         \"bad\"}\nselectorGeneratedPatternConflict: {b: selectorGeneratedPatternConflict.c, \
+         [=~\"^c$\"]: int, for k, v in {c: \"bad\"} {\"\\(k)\": v}}\n";
+
+    fn compile_top_level_cycle_fixture() -> Result<Value, Box<dyn std::error::Error>> {
+        Context::new()
+            .compile_source("test.cue", TOP_LEVEL_CYCLE_SOURCE)
+            .map_err(Into::into)
+    }
+
     fn number_list(items: &[&str]) -> EvaluatedValue {
         EvaluatedValue::List(
             items
@@ -499,6 +523,116 @@ mod tests {
             "b",
             &EvaluatedValue::Number("2".to_owned()),
         )?;
+        Ok(())
+    }
+
+    #[test]
+    fn test_should_resolve_top_level_vertex_cycles() -> Result<(), Box<dyn std::error::Error>> {
+        let value = compile_top_level_cycle_fixture()?;
+
+        assert_eq!(
+            EvaluatedValue::Top,
+            value.lookup_path(&["ordinary", "x"])?.evaluate()?,
+        );
+        assert_eq!(
+            EvaluatedValue::Top,
+            value.lookup_path(&["ordinary", "y"])?.evaluate()?,
+        );
+        assert!(matches!(
+            value.lookup_path(&["structural", "a", "c"])?.evaluate()?,
+            EvaluatedValue::Bottom(bottom) if bottom.code == "cue.eval.structural_cycle",
+        ));
+        assert_eq!(
+            EvaluatedValue::List(vec![EvaluatedValue::Top]),
+            value.lookup_path(&["rootListT0"])?.evaluate()?,
+        );
+        assert_eq!(
+            EvaluatedValue::List(vec![EvaluatedValue::Top, EvaluatedValue::Top]),
+            value.lookup_path(&["rootListPair"])?.evaluate()?,
+        );
+        assert_eq!(
+            EvaluatedValue::List(vec![
+                EvaluatedValue::Number("100".to_owned()),
+                EvaluatedValue::Number("100".to_owned()),
+            ]),
+            value.lookup_path(&["rootListGrounded"])?.evaluate()?,
+        );
+        assert_eq!(
+            EvaluatedValue::List(vec![EvaluatedValue::Number("1".to_owned())]),
+            value.lookup_path(&["rootListConj"])?.evaluate()?,
+        );
+        assert!(matches!(
+            value.lookup_path(&["notSelfList", "b"])?.evaluate()?,
+            EvaluatedValue::List(items)
+                if matches!(
+                    items.first(),
+                    Some(EvaluatedValue::Bottom(bottom))
+                        if bottom.code == "cue.eval.structural_cycle"
+                ),
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn test_should_resolve_in_progress_selector_cycles() -> Result<(), Box<dyn std::error::Error>> {
+        let value = compile_top_level_cycle_fixture()?;
+
+        assert_eq!(
+            EvaluatedValue::Number("1".to_owned()),
+            value.lookup_path(&["selectorOk", "b"])?.evaluate()?,
+        );
+        assert_eq!(
+            EvaluatedValue::Number("1".to_owned()),
+            value.lookup_path(&["selectorFixpoint", "b"])?.evaluate()?,
+        );
+        assert_eq!(
+            EvaluatedValue::Number("1".to_owned()),
+            value.lookup_path(&["selectorConj", "b"])?.evaluate()?,
+        );
+        assert_eq!(
+            EvaluatedValue::Number("1".to_owned()),
+            value
+                .lookup_path(&["selectorConjFixpoint", "b"])?
+                .evaluate()?,
+        );
+        assert_eq!(
+            EvaluatedValue::Number("1".to_owned()),
+            value.lookup_path(&["selectorGenerated", "b"])?.evaluate()?,
+        );
+        assert_eq!(
+            EvaluatedValue::Number("1".to_owned()),
+            value.lookup_path(&["selectorDynamic", "b"])?.evaluate()?,
+        );
+        assert_eq!(
+            EvaluatedValue::Number("1".to_owned()),
+            value
+                .lookup_path(&["selectorGeneratedMerge", "b"])?
+                .evaluate()?,
+        );
+        assert_eq!(
+            EvaluatedValue::Number("1".to_owned()),
+            value
+                .lookup_path(&["selectorDynamicMerge", "b"])?
+                .evaluate()?,
+        );
+        assert!(matches!(
+            value
+                .lookup_path(&["selectorDynamicConflict", "b"])?
+                .evaluate()?,
+            EvaluatedValue::Bottom(_),
+        ));
+        assert!(matches!(
+            value
+                .lookup_path(&["selectorPatternConflict", "b"])?
+                .evaluate()?,
+            EvaluatedValue::Bottom(_),
+        ));
+        assert!(matches!(
+            value
+                .lookup_path(&["selectorGeneratedPatternConflict", "b"])?
+                .evaluate()?,
+            EvaluatedValue::Bottom(_),
+        ));
         Ok(())
     }
 

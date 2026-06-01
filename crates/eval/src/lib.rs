@@ -503,6 +503,8 @@ struct Evaluator<'runtime> {
     field_evaluation_stack: Vec<FieldEvaluation>,
     vertex_cache: HashMap<VertexId, EvaluatedValue>,
     evaluating_vertices: HashSet<VertexId>,
+    vertex_evaluation_stack: Vec<VertexId>,
+    vertex_list_self_index_features: Vec<Feature>,
     cycle_fallback_to_top: u32,
     defer_list_self_indexes: u32,
 }
@@ -517,6 +519,15 @@ struct LocalField {
 struct FieldEvaluation {
     scope_index: usize,
     feature: Feature,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct InProgressField {
+    expression: ExprId,
+    environment: EnvironmentId,
+    span: Option<Span>,
+    metadata: FieldMetadata,
+    local_fields: IndexMap<Feature, LocalField>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -560,6 +571,8 @@ impl<'runtime> Evaluator<'runtime> {
             field_evaluation_stack: Vec::new(),
             vertex_cache: HashMap::new(),
             evaluating_vertices: HashSet::new(),
+            vertex_evaluation_stack: Vec::new(),
+            vertex_list_self_index_features: Vec::new(),
             cycle_fallback_to_top: 0,
             defer_list_self_indexes: 0,
         }
@@ -590,15 +603,22 @@ impl<'runtime> Evaluator<'runtime> {
             return Ok(value.clone());
         }
         if !self.evaluating_vertices.insert(vertex_id) {
+            if self.defer_list_self_indexes > 0
+                && self
+                    .vertex_evaluation_stack
+                    .last()
+                    .is_some_and(|current| *current == vertex_id)
+            {
+                return Ok(EvaluatedValue::Bottom(structural_cycle_bottom()));
+            }
             if self.cycle_fallback_to_top > 0 {
                 return Ok(EvaluatedValue::Top);
             }
-            return Ok(EvaluatedValue::Bottom(Bottom::new(
-                "cue.eval.cycle",
-                "cyclic reference cannot be resolved by the current evaluator",
-                None,
-                true,
-            )));
+            return Ok(if self.is_structural_vertex_cycle(vertex_id)? {
+                EvaluatedValue::Bottom(structural_cycle_bottom())
+            } else {
+                EvaluatedValue::Top
+            });
         }
         if depth > self.options.max_depth {
             self.evaluating_vertices.remove(&vertex_id);
@@ -615,54 +635,90 @@ impl<'runtime> Evaluator<'runtime> {
             self.evaluating_vertices.remove(&vertex_id);
             return Ok(EvaluatedValue::Bottom(bottom.clone()));
         }
+        self.vertex_evaluation_stack.push(vertex_id);
 
-        let mut value = value_from_base(&vertex.base);
-        for conjunct_id in &vertex.conjuncts {
-            let conjunct = self.runtime.conjunct(*conjunct_id)?;
-            let expression =
-                self.evaluate_expr_at(conjunct.expression, conjunct.environment, depth + 1)?;
-            value = unify_values(value, expression, conjunct.span);
-        }
-
-        if !vertex.arcs.is_empty() {
-            let mut accumulator = match value {
-                EvaluatedValue::Top
-                | EvaluatedValue::Struct(_)
-                | EvaluatedValue::PatternedStruct { .. }
-                | EvaluatedValue::ClosedStruct(_)
-                | EvaluatedValue::ClosedPatternedStruct { .. } => into_struct_accumulator(value),
-                other => {
-                    self.evaluating_vertices.remove(&vertex_id);
-                    return Ok(conflict_bottom(
-                        other.kind(),
-                        ValueKind::Struct,
-                        None,
-                        "cue.eval.struct_conflict",
-                    ));
+        let result: Result<EvaluatedValue, EvalError> = (|| {
+            let mut value = value_from_base(&vertex.base);
+            for conjunct_id in &vertex.conjuncts {
+                let conjunct = self.runtime.conjunct(*conjunct_id)?;
+                let self_list_feature = if self.is_list_expr(conjunct.expression)? {
+                    vertex.feature
+                } else {
+                    None
+                };
+                if let Some(feature) = self_list_feature {
+                    self.vertex_list_self_index_features.push(feature);
                 }
-            };
-            for arc in vertex.arcs.values() {
-                if !self.should_emit_field(arc.metadata) {
-                    continue;
+                let expression_result =
+                    self.evaluate_expr_at(conjunct.expression, conjunct.environment, depth + 1);
+                if self_list_feature.is_some() {
+                    self.vertex_list_self_index_features.pop();
                 }
-                let label = self.feature_label(arc.feature);
-                let mut child = self.evaluate_vertex_at(arc.target, depth + 1)?;
-                if self.export_options.is_some() && is_optional_constraint(arc.metadata) {
-                    child = EvaluatedValue::OptionalField(Box::new(child));
-                }
-                merge_field_value(label, child, None, &mut accumulator.fields);
+                let expression = expression_result?;
+                value = unify_values(value, expression, conjunct.span);
             }
-            apply_struct_patterns(&accumulator.patterns, &mut accumulator.fields);
-            value = accumulator.into_value();
-        }
 
-        if self.is_definition_vertex(vertex_id)? {
-            value = close_recursive(value);
-        }
+            if !vertex.arcs.is_empty() {
+                let mut accumulator = match value {
+                    EvaluatedValue::Top
+                    | EvaluatedValue::Struct(_)
+                    | EvaluatedValue::PatternedStruct { .. }
+                    | EvaluatedValue::ClosedStruct(_)
+                    | EvaluatedValue::ClosedPatternedStruct { .. } => {
+                        into_struct_accumulator(value)
+                    }
+                    other => {
+                        return Ok(conflict_bottom(
+                            other.kind(),
+                            ValueKind::Struct,
+                            None,
+                            "cue.eval.struct_conflict",
+                        ));
+                    }
+                };
+                for arc in vertex.arcs.values() {
+                    if !self.should_emit_field(arc.metadata) {
+                        continue;
+                    }
+                    let label = self.feature_label(arc.feature);
+                    let mut child = self.evaluate_vertex_at(arc.target, depth + 1)?;
+                    if self.export_options.is_some() && is_optional_constraint(arc.metadata) {
+                        child = EvaluatedValue::OptionalField(Box::new(child));
+                    }
+                    merge_field_value(label, child, None, &mut accumulator.fields);
+                }
+                apply_struct_patterns(&accumulator.patterns, &mut accumulator.fields);
+                value = accumulator.into_value();
+            }
 
+            if self.is_definition_vertex(vertex_id)? {
+                value = close_recursive(value);
+            }
+
+            Ok(value)
+        })();
+        self.vertex_evaluation_stack.pop();
         self.evaluating_vertices.remove(&vertex_id);
+        let value = result?;
         self.vertex_cache.insert(vertex_id, value.clone());
         Ok(value)
+    }
+
+    fn is_structural_vertex_cycle(&self, vertex_id: VertexId) -> Result<bool, EvalError> {
+        let Some(current) = self.vertex_evaluation_stack.last().copied() else {
+            return Ok(false);
+        };
+        if current == vertex_id && !self.field_evaluation_stack.is_empty() {
+            return Ok(true);
+        }
+        let mut parent = self.runtime.vertex(current)?.parent;
+        while let Some(parent_id) = parent {
+            if parent_id == vertex_id {
+                return Ok(true);
+            }
+            parent = self.runtime.vertex(parent_id)?.parent;
+        }
+        Ok(false)
     }
 
     fn is_definition_vertex(&self, vertex_id: VertexId) -> Result<bool, EvalError> {
@@ -714,8 +770,7 @@ impl<'runtime> Evaluator<'runtime> {
                 self.evaluate_expr_at(*expression, environment, depth + 1)?
             }
             SemanticExpr::Selector { base, feature } => {
-                let base_value = self.evaluate_expr_at(*base, environment, depth + 1)?;
-                self.select_field(base_value, *feature)
+                self.evaluate_selector_expr(*base, *feature, environment, depth + 1)?
             }
             SemanticExpr::Index { base, index } => {
                 let base_value = self.evaluate_expr_at(*base, environment, depth + 1)?;
@@ -772,24 +827,7 @@ impl<'runtime> Evaluator<'runtime> {
     ) -> Result<EvaluatedValue, EvalError> {
         let mut values = IndexMap::new();
         let mut patterns = Vec::new();
-        let local_fields = members
-            .iter()
-            .filter_map(|member| {
-                let StructMember::Field(field) = member else {
-                    return None;
-                };
-                let FieldLabel::Static(feature) = &field.label else {
-                    return None;
-                };
-                Some((
-                    *feature,
-                    LocalField {
-                        expression: field.expression,
-                        metadata: field.metadata,
-                    },
-                ))
-            })
-            .collect();
+        let local_fields = static_local_fields(members);
         self.local_fields.push(local_fields);
         self.local_values.push(IndexMap::new());
         self.local_value_scopes.push(LocalValueScope::Struct);
@@ -949,20 +987,483 @@ impl<'runtime> Evaluator<'runtime> {
         depth: u32,
     ) -> Result<EvaluatedValue, EvalError> {
         let left = if op == "&" {
-            self.evaluate_with_cycle_fallback(|evaluator| {
-                evaluator.evaluate_expr_at(left, environment, depth)
-            })?
+            self.evaluate_cycle_fallback_operand(left, environment, depth)?
         } else {
             self.evaluate_expr_at(left, environment, depth)?
         };
         let right = if op == "&" {
-            self.evaluate_with_cycle_fallback(|evaluator| {
-                evaluator.evaluate_expr_at(right, environment, depth)
-            })?
+            self.evaluate_cycle_fallback_operand(right, environment, depth)?
         } else {
             self.evaluate_expr_at(right, environment, depth)?
         };
         Ok(evaluate_binary(op, left, right))
+    }
+
+    fn evaluate_cycle_fallback_operand(
+        &mut self,
+        expression: ExprId,
+        environment: EnvironmentId,
+        depth: u32,
+    ) -> Result<EvaluatedValue, EvalError> {
+        let self_list_feature = if self.is_list_expr(expression)? {
+            self.current_top_level_vertex_feature()?
+        } else {
+            None
+        };
+        if let Some(feature) = self_list_feature {
+            self.vertex_list_self_index_features.push(feature);
+        }
+        let result = self.evaluate_with_cycle_fallback(|evaluator| {
+            evaluator.evaluate_expr_at(expression, environment, depth)
+        });
+        if self_list_feature.is_some() {
+            self.vertex_list_self_index_features.pop();
+        }
+        result
+    }
+
+    fn current_top_level_vertex_feature(&self) -> Result<Option<Feature>, EvalError> {
+        if !self.field_evaluation_stack.is_empty() {
+            return Ok(None);
+        }
+        let Some(vertex_id) = self.vertex_evaluation_stack.last().copied() else {
+            return Ok(None);
+        };
+        Ok(self.runtime.vertex(vertex_id)?.feature)
+    }
+
+    fn evaluate_selector_expr(
+        &mut self,
+        base: ExprId,
+        feature: Feature,
+        environment: EnvironmentId,
+        depth: u32,
+    ) -> Result<EvaluatedValue, EvalError> {
+        if let Some(value) =
+            self.evaluate_selector_from_in_progress_vertex(base, feature, environment, depth)?
+        {
+            return Ok(value);
+        }
+        let base_value = self.evaluate_expr_at(base, environment, depth)?;
+        Ok(self.select_field(base_value, feature))
+    }
+
+    fn evaluate_selector_from_in_progress_vertex(
+        &mut self,
+        base: ExprId,
+        feature: Feature,
+        environment: EnvironmentId,
+        depth: u32,
+    ) -> Result<Option<EvaluatedValue>, EvalError> {
+        let base = self.skip_group_exprs(base)?;
+        let SemanticExpr::FieldReference {
+            feature: base_feature,
+            up_count,
+        } = self.runtime.expression(base)?
+        else {
+            return Ok(None);
+        };
+        if *up_count == 0 && self.has_local_reference_candidate(*base_feature) {
+            return Ok(None);
+        }
+        let Some(vertex_id) =
+            self.field_reference_target_vertex(environment, *base_feature, *up_count)?
+        else {
+            return Ok(None);
+        };
+        if !self.evaluating_vertices.contains(&vertex_id) {
+            return Ok(None);
+        }
+        let Some(value) = self.evaluate_in_progress_vertex_field(vertex_id, feature, depth)? else {
+            let label = self.feature_label(feature);
+            return Ok(Some(EvaluatedValue::Bottom(Bottom::new(
+                "cue.eval.missing_field",
+                format!("field `{label}` does not exist"),
+                None,
+                true,
+            ))));
+        };
+        Ok(Some(value))
+    }
+
+    fn evaluate_in_progress_vertex_field(
+        &mut self,
+        vertex_id: VertexId,
+        feature: Feature,
+        depth: u32,
+    ) -> Result<Option<EvaluatedValue>, EvalError> {
+        if self
+            .vertex_evaluation_stack
+            .last()
+            .is_some_and(|current| *current == vertex_id)
+            && self
+                .field_evaluation_stack
+                .last()
+                .is_some_and(|current| current.feature == feature)
+        {
+            return Ok(Some(EvaluatedValue::Top));
+        }
+
+        let mut value = None;
+        let target = self.runtime.vertex(vertex_id)?;
+        if let Some(arc) = target.arcs.get(&feature).cloned() {
+            if is_optional_constraint(arc.metadata) {
+                let label = self.feature_label(feature);
+                value = Some(optional_reference_bottom(&label));
+            } else {
+                value = Some(self.evaluate_vertex_at(arc.target, depth + 1)?);
+            }
+        }
+
+        let fields = self.in_progress_struct_field_exprs(vertex_id, feature)?;
+        for field in fields {
+            let next = if is_optional_constraint(field.metadata) {
+                let label = self.feature_label(feature);
+                optional_reference_bottom(&label)
+            } else {
+                self.evaluate_in_progress_static_field(feature, &field, depth + 1)?
+            };
+            value = Some(match value {
+                Some(value) => unify_values(value, next, field.span),
+                None => next,
+            });
+        }
+        if let Some(generated) =
+            self.evaluate_in_progress_generated_field(vertex_id, feature, depth + 1)?
+        {
+            value = Some(match value {
+                Some(value) => unify_values(value, generated, None),
+                None => generated,
+            });
+        }
+        value
+            .map(|value| self.apply_in_progress_patterns_to_field(vertex_id, feature, value, depth))
+            .transpose()
+    }
+
+    fn in_progress_struct_field_exprs(
+        &self,
+        vertex_id: VertexId,
+        feature: Feature,
+    ) -> Result<Vec<InProgressField>, EvalError> {
+        let mut fields = Vec::new();
+        let target = self.runtime.vertex(vertex_id)?;
+        for conjunct_id in &target.conjuncts {
+            let conjunct = self.runtime.conjunct(*conjunct_id)?;
+            self.collect_in_progress_struct_field_exprs(
+                conjunct.expression,
+                conjunct.environment,
+                conjunct.span,
+                feature,
+                &mut fields,
+            )?;
+        }
+        Ok(fields)
+    }
+
+    fn collect_in_progress_struct_field_exprs(
+        &self,
+        expression: ExprId,
+        environment: EnvironmentId,
+        span: Option<Span>,
+        feature: Feature,
+        fields: &mut Vec<InProgressField>,
+    ) -> Result<(), EvalError> {
+        let expression = self.skip_group_exprs(expression)?;
+        match self.runtime.expression(expression)? {
+            SemanticExpr::Struct(members) => {
+                let local_fields = static_local_fields(members);
+                for member in members {
+                    let StructMember::Field(field) = member else {
+                        continue;
+                    };
+                    if field.label == FieldLabel::Static(feature) {
+                        fields.push(InProgressField {
+                            expression: field.expression,
+                            environment,
+                            span: field.span.or(span),
+                            metadata: field.metadata,
+                            local_fields: local_fields.clone(),
+                        });
+                    }
+                }
+            }
+            SemanticExpr::Binary { op, left, right } if op == "&" => {
+                self.collect_in_progress_struct_field_exprs(
+                    *left,
+                    environment,
+                    span,
+                    feature,
+                    fields,
+                )?;
+                self.collect_in_progress_struct_field_exprs(
+                    *right,
+                    environment,
+                    span,
+                    feature,
+                    fields,
+                )?;
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    fn evaluate_in_progress_static_field(
+        &mut self,
+        feature: Feature,
+        field: &InProgressField,
+        depth: u32,
+    ) -> Result<EvaluatedValue, EvalError> {
+        self.local_fields.push(field.local_fields.clone());
+        self.local_values.push(IndexMap::new());
+        self.local_value_scopes.push(LocalValueScope::Struct);
+        self.local_evaluating.push(HashSet::new());
+        self.mark_local_feature_evaluating(feature);
+        self.field_evaluation_stack.push(FieldEvaluation {
+            scope_index: self.current_local_struct_scope_index(),
+            feature,
+        });
+        let result = self.evaluate_expr_at(field.expression, field.environment, depth);
+        self.field_evaluation_stack.pop();
+        self.unmark_local_feature_evaluating(feature);
+        self.local_evaluating.pop();
+        self.local_value_scopes.pop();
+        self.local_values.pop();
+        self.local_fields.pop();
+        result
+    }
+
+    fn evaluate_in_progress_generated_field(
+        &mut self,
+        vertex_id: VertexId,
+        feature: Feature,
+        depth: u32,
+    ) -> Result<Option<EvaluatedValue>, EvalError> {
+        let conjuncts = self.runtime.vertex(vertex_id)?.conjuncts.clone();
+        let mut value = None;
+        for conjunct_id in conjuncts {
+            let conjunct = self.runtime.conjunct(conjunct_id)?;
+            let next = self.evaluate_in_progress_generated_field_expr(
+                conjunct.expression,
+                conjunct.environment,
+                conjunct.span,
+                feature,
+                depth,
+            )?;
+            if let Some(next) = next {
+                value = Some(match value {
+                    Some(value) => unify_values(value, next, conjunct.span),
+                    None => next,
+                });
+            }
+        }
+        Ok(value)
+    }
+
+    fn evaluate_in_progress_generated_field_expr(
+        &mut self,
+        expression: ExprId,
+        environment: EnvironmentId,
+        span: Option<Span>,
+        feature: Feature,
+        depth: u32,
+    ) -> Result<Option<EvaluatedValue>, EvalError> {
+        let expression = self.skip_group_exprs(expression)?;
+        match self.runtime.expression(expression)?.clone() {
+            SemanticExpr::Struct(members) => self.evaluate_in_progress_generated_struct_fields(
+                &members,
+                environment,
+                feature,
+                depth + 1,
+            ),
+            SemanticExpr::Binary { op, left, right } if op == "&" => {
+                let left = self.evaluate_in_progress_generated_field_expr(
+                    left,
+                    environment,
+                    span,
+                    feature,
+                    depth + 1,
+                )?;
+                let right = self.evaluate_in_progress_generated_field_expr(
+                    right,
+                    environment,
+                    span,
+                    feature,
+                    depth + 1,
+                )?;
+                Ok(match (left, right) {
+                    (Some(left), Some(right)) => Some(unify_values(left, right, span)),
+                    (Some(value), None) | (None, Some(value)) => Some(value),
+                    (None, None) => None,
+                })
+            }
+            _ => Ok(None),
+        }
+    }
+
+    fn evaluate_in_progress_generated_struct_fields(
+        &mut self,
+        members: &[StructMember],
+        environment: EnvironmentId,
+        feature: Feature,
+        depth: u32,
+    ) -> Result<Option<EvaluatedValue>, EvalError> {
+        self.local_fields.push(static_local_fields(members));
+        self.local_values.push(IndexMap::new());
+        self.local_value_scopes.push(LocalValueScope::Struct);
+        self.local_evaluating.push(HashSet::new());
+        let result = (|| {
+            let mut values = IndexMap::new();
+            for member in members {
+                match member {
+                    StructMember::Field(field)
+                        if !matches!(
+                            field.label,
+                            FieldLabel::Static(_) | FieldLabel::Pattern(_)
+                        ) =>
+                    {
+                        self.evaluate_field_member(field, environment, depth, &mut values)?;
+                    }
+                    StructMember::Comprehension(comprehension) => {
+                        let value =
+                            self.evaluate_comprehension(comprehension, environment, depth, true)?;
+                        Self::merge_struct_member_value(value, None, &mut values);
+                    }
+                    _ => {}
+                }
+            }
+            Ok(values.get(&self.feature_label(feature)).cloned())
+        })();
+        self.local_evaluating.pop();
+        self.local_value_scopes.pop();
+        self.local_values.pop();
+        self.local_fields.pop();
+        result
+    }
+
+    fn apply_in_progress_patterns_to_field(
+        &mut self,
+        vertex_id: VertexId,
+        feature: Feature,
+        value: EvaluatedValue,
+        depth: u32,
+    ) -> Result<EvaluatedValue, EvalError> {
+        let patterns =
+            self.evaluate_in_progress_pattern_constraints(vertex_id, feature, &value, depth + 1)?;
+        let label = self.feature_label(feature);
+        let mut value = value;
+        for pattern in patterns {
+            if let Ok(true) = pattern_label_matches(&pattern.pattern, &label) {
+                value = unify_field_values(value, (*pattern.value).clone(), pattern.span);
+            }
+        }
+        Ok(value)
+    }
+
+    fn evaluate_in_progress_pattern_constraints(
+        &mut self,
+        vertex_id: VertexId,
+        feature: Feature,
+        value: &EvaluatedValue,
+        depth: u32,
+    ) -> Result<Vec<StructPatternConstraint>, EvalError> {
+        let conjuncts = self.runtime.vertex(vertex_id)?.conjuncts.clone();
+        let mut patterns = Vec::new();
+        for conjunct_id in conjuncts {
+            let conjunct = self.runtime.conjunct(conjunct_id)?;
+            self.collect_in_progress_pattern_constraints(
+                conjunct.expression,
+                conjunct.environment,
+                feature,
+                value,
+                depth,
+                &mut patterns,
+            )?;
+        }
+        Ok(patterns)
+    }
+
+    fn collect_in_progress_pattern_constraints(
+        &mut self,
+        expression: ExprId,
+        environment: EnvironmentId,
+        feature: Feature,
+        value: &EvaluatedValue,
+        depth: u32,
+        patterns: &mut Vec<StructPatternConstraint>,
+    ) -> Result<(), EvalError> {
+        let expression = self.skip_group_exprs(expression)?;
+        match self.runtime.expression(expression)?.clone() {
+            SemanticExpr::Struct(members) => self.collect_in_progress_struct_patterns(
+                &members,
+                environment,
+                feature,
+                value,
+                depth + 1,
+                patterns,
+            ),
+            SemanticExpr::Binary { op, left, right } if op == "&" => {
+                self.collect_in_progress_pattern_constraints(
+                    left,
+                    environment,
+                    feature,
+                    value,
+                    depth + 1,
+                    patterns,
+                )?;
+                self.collect_in_progress_pattern_constraints(
+                    right,
+                    environment,
+                    feature,
+                    value,
+                    depth + 1,
+                    patterns,
+                )
+            }
+            _ => Ok(()),
+        }
+    }
+
+    fn collect_in_progress_struct_patterns(
+        &mut self,
+        members: &[StructMember],
+        environment: EnvironmentId,
+        feature: Feature,
+        value: &EvaluatedValue,
+        depth: u32,
+        patterns: &mut Vec<StructPatternConstraint>,
+    ) -> Result<(), EvalError> {
+        let mut local_values = IndexMap::new();
+        local_values.insert(feature, value.clone());
+        self.local_fields.push(static_local_fields(members));
+        self.local_values.push(local_values);
+        self.local_value_scopes.push(LocalValueScope::Struct);
+        self.local_evaluating.push(HashSet::new());
+        let result = (|| {
+            let mut invalid_pattern_values = IndexMap::new();
+            for member in members {
+                let StructMember::Field(field) = member else {
+                    continue;
+                };
+                if matches!(&field.label, FieldLabel::Pattern(_))
+                    && let Some(pattern) = self.evaluate_pattern_field(
+                        field,
+                        environment,
+                        depth,
+                        &mut invalid_pattern_values,
+                    )?
+                {
+                    patterns.push(pattern);
+                }
+            }
+            Ok(())
+        })();
+        self.local_evaluating.pop();
+        self.local_value_scopes.pop();
+        self.local_values.pop();
+        self.local_fields.pop();
+        result
     }
 
     fn evaluate_list_item(
@@ -991,10 +1492,14 @@ impl<'runtime> Evaluator<'runtime> {
             return Ok(false);
         };
         Ok(*up_count == 0
-            && self
+            && (self
                 .field_evaluation_stack
                 .last()
-                .is_some_and(|current| current.feature == *feature))
+                .is_some_and(|current| current.feature == *feature)
+                || self
+                    .vertex_list_self_index_features
+                    .last()
+                    .is_some_and(|current| current == feature)))
     }
 
     fn skip_group_exprs(&self, expression: ExprId) -> Result<ExprId, EvalError> {
@@ -1008,6 +1513,14 @@ impl<'runtime> Evaluator<'runtime> {
             }
             current = *expr;
         }
+    }
+
+    fn is_list_expr(&self, expression: ExprId) -> Result<bool, EvalError> {
+        let expression = self.skip_group_exprs(expression)?;
+        Ok(matches!(
+            self.runtime.expression(expression)?,
+            SemanticExpr::List { .. }
+        ))
     }
 
     fn evaluate_list_expr(
@@ -1459,6 +1972,56 @@ impl<'runtime> Evaluator<'runtime> {
             return Ok(optional_reference_bottom(&label));
         }
         self.evaluate_vertex_at(arc.target, depth + 1)
+    }
+
+    fn field_reference_target_vertex(
+        &self,
+        environment: EnvironmentId,
+        feature: Feature,
+        up_count: u32,
+    ) -> Result<Option<VertexId>, EvalError> {
+        let mut environment_id = environment;
+        for _ in 0..up_count {
+            let environment = self.runtime.environment(environment_id)?;
+            let Some(parent) = environment.parent else {
+                return Ok(None);
+            };
+            environment_id = parent;
+        }
+
+        let environment = self.runtime.environment(environment_id)?;
+        let vertex = self.runtime.vertex(environment.vertex)?;
+        Ok(vertex.arcs.get(&feature).map(|arc| arc.target))
+    }
+
+    fn has_local_reference_candidate(&self, feature: Feature) -> bool {
+        let mut struct_scope_index = self.local_fields.len();
+        for (scope, values) in self
+            .local_value_scopes
+            .iter()
+            .zip(self.local_values.iter())
+            .rev()
+        {
+            match scope {
+                LocalValueScope::Overlay => {
+                    if values.contains_key(&feature) {
+                        return true;
+                    }
+                }
+                LocalValueScope::Struct => {
+                    struct_scope_index = struct_scope_index.saturating_sub(1);
+                    if values.contains_key(&feature)
+                        || self
+                            .local_fields
+                            .get(struct_scope_index)
+                            .is_some_and(|fields| fields.contains_key(&feature))
+                    {
+                        return true;
+                    }
+                }
+            }
+        }
+        false
     }
 
     fn evaluate_local_field_reference(
@@ -5744,6 +6307,27 @@ fn builtin_kind(name: &str) -> Option<ValueKind> {
         "string" => Some(ValueKind::String),
         _ => None,
     }
+}
+
+fn static_local_fields(members: &[StructMember]) -> IndexMap<Feature, LocalField> {
+    members
+        .iter()
+        .filter_map(|member| {
+            let StructMember::Field(field) = member else {
+                return None;
+            };
+            let FieldLabel::Static(feature) = &field.label else {
+                return None;
+            };
+            Some((
+                *feature,
+                LocalField {
+                    expression: field.expression,
+                    metadata: field.metadata,
+                },
+            ))
+        })
+        .collect()
 }
 
 fn single_diagnostic(
