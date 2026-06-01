@@ -169,6 +169,8 @@ fn push_semantic_cases(
             == cue_rust::EvaluatedValue::Number("1".to_owned()),
     ));
 
+    push_default_operand_case(context, cases)?;
+
     let schema = context.compile_source("schema.cue", "name: string\n")?;
     let data = context.compile_source("data.cue", "name: \"cue\"\n")?;
     cases.push(supported_case(
@@ -198,6 +200,40 @@ fn push_semantic_cases(
                 .lookup_path(&["bad"])?
                 .validate(ValidateOptions::default())
                 .is_err(),
+    ));
+    Ok(())
+}
+
+fn push_default_operand_case(
+    context: &Context,
+    cases: &mut Vec<CompatibilityCase>,
+) -> Result<(), Box<dyn Error>> {
+    let operand_disjunction = context.compile_source(
+        "disjunction-operands.cue",
+        "list: *[1] | [2]\ncondition: *true | false\nnum: *1 | 2\nobject: *{a: 1} | {a: \
+         2}\nforLoop: [for e in list {\"count: \\(e)\"}]\nconditional: {if condition {a: 3}, if \
+         num < 5 {b: 3}}\nselector: {a: object.a}\nindex: {a: list[0]}\nbinOp: {a: num + \
+         4}\nunaryOp: {a: -num}\n",
+    )?;
+    cases.push(supported_case(
+        "eval/default-disjunction-operands",
+        "semantic",
+        operand_disjunction
+            .lookup_path(&["conditional", "a"])?
+            .evaluate()?
+            == cue_rust::EvaluatedValue::Number("3".to_owned())
+            && operand_disjunction
+                .lookup_path(&["index", "a"])?
+                .evaluate()?
+                == cue_rust::EvaluatedValue::Number("1".to_owned())
+            && operand_disjunction
+                .lookup_path(&["binOp", "a"])?
+                .evaluate()?
+                == cue_rust::EvaluatedValue::Number("5".to_owned())
+            && operand_disjunction
+                .lookup_path(&["unaryOp", "a"])?
+                .evaluate()?
+                == cue_rust::EvaluatedValue::Number("-1".to_owned()),
     ));
     Ok(())
 }

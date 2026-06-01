@@ -401,6 +401,64 @@ async fn assert_upstream_disjunctions_and_defaults(context: &Context, root: &Pat
         return Err("expected close default to resolve to an empty struct".into());
     };
     assert!(fields.is_empty());
+
+    assert_upstream_default_operand_parity(context, root).await?;
+    Ok(())
+}
+
+async fn assert_upstream_default_operand_parity(context: &Context, root: &Path) -> TestResult {
+    let fixture =
+        TxtarArchive::read(&root.join("vendors/cue/cue/testdata/disjunctions/operands.txtar"))
+            .await?;
+    let source = fixture.file("in.cue")?;
+    for snippet in [
+        "forLoop:",
+        "if condition",
+        "if num < 5",
+        "a: object.a",
+        "a: list[0]",
+        "a: num + 4",
+        "a: -num",
+    ] {
+        assert!(
+            source.contains(snippet),
+            "upstream operand fixture no longer contains `{snippet}`",
+        );
+    }
+    let value = context.compile_source(
+        "disjunctions/operands/reduced.cue",
+        "list: *[1] | [2]\ncondition: *true | false\nnum: *1 | 2\nobject: *{a: 1} | {a: \
+         2}\nforLoop: [for e in list {\"count: \\(e)\"}]\nconditional: {if condition {a: 3}, if \
+         num < 5 {b: 3}}\nselector: {a: object.a}\nindex: {a: list[0]}\nbinOp: {a: num + \
+         4}\nunaryOp: {a: -num}\n",
+    )?;
+    assert_eq!(
+        EvaluatedValue::List(vec![EvaluatedValue::String("count: 1".to_owned())]),
+        value.lookup_path(&["forLoop"])?.evaluate()?,
+    );
+    for path in [&["conditional", "a"][..], &["conditional", "b"][..]] {
+        assert_eq!(
+            EvaluatedValue::Number("3".to_owned()),
+            value.lookup_path(path)?.evaluate()?,
+            "unexpected default operand value at {path:?}",
+        );
+    }
+    assert_eq!(
+        EvaluatedValue::Number("1".to_owned()),
+        value.lookup_path(&["selector", "a"])?.evaluate()?,
+    );
+    assert_eq!(
+        EvaluatedValue::Number("1".to_owned()),
+        value.lookup_path(&["index", "a"])?.evaluate()?,
+    );
+    assert_eq!(
+        EvaluatedValue::Number("5".to_owned()),
+        value.lookup_path(&["binOp", "a"])?.evaluate()?,
+    );
+    assert_eq!(
+        EvaluatedValue::Number("-1".to_owned()),
+        value.lookup_path(&["unaryOp", "a"])?.evaluate()?,
+    );
     Ok(())
 }
 

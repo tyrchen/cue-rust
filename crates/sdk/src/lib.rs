@@ -357,6 +357,47 @@ mod tests {
     }
 
     #[test]
+    fn test_should_evaluate_default_disjunction_operands() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let context = Context::new();
+        let value = context.compile_source(
+            "operands.cue",
+            "list: *[1] | [2]\ncondition: *true | false\nnum: *1 | 2\nobject: *{a: 1} | {a: \
+             2}\nforLoop: [for e in list {\"count: \\(e)\"}]\nconditional: {if condition {a: 3}, \
+             if num < 5 {b: 3}}\nselector: {a: object.a}\nindex: {a: list[0]}\nbinOp: {a: num + \
+             4}\nunaryOp: {a: -num}\n",
+        )?;
+        assert_eq!(
+            EvaluatedValue::List(vec![EvaluatedValue::String("count: 1".to_owned())]),
+            value.lookup_path(&["forLoop"])?.evaluate()?,
+        );
+        assert_eq!(
+            EvaluatedValue::Number("3".to_owned()),
+            value.lookup_path(&["conditional", "a"])?.evaluate()?,
+        );
+        assert_eq!(
+            EvaluatedValue::Number("3".to_owned()),
+            value.lookup_path(&["conditional", "b"])?.evaluate()?,
+        );
+        for path in [&["selector", "a"][..], &["index", "a"][..]] {
+            assert_eq!(
+                EvaluatedValue::Number("1".to_owned()),
+                value.lookup_path(path)?.evaluate()?,
+                "unexpected value at {path:?}",
+            );
+        }
+        assert_eq!(
+            EvaluatedValue::Number("5".to_owned()),
+            value.lookup_path(&["binOp", "a"])?.evaluate()?,
+        );
+        assert_eq!(
+            EvaluatedValue::Number("-1".to_owned()),
+            value.lookup_path(&["unaryOp", "a"])?.evaluate()?,
+        );
+        Ok(())
+    }
+
+    #[test]
     fn test_should_evaluate_recursive_equality() -> Result<(), Box<dyn std::error::Error>> {
         let context = Context::new();
         let value = context.compile_source(
@@ -778,6 +819,21 @@ mod tests {
                 EvaluatedValue::Bottom(bottom) if bottom.code == "cue.eval.cycle",
             ));
         }
+        Ok(())
+    }
+
+    #[test]
+    fn test_should_resolve_acyclic_defaults_while_solving_cycles()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let context = Context::new();
+        let value = context.compile_source(
+            "cycle-default-operands.cue",
+            "flag: *true | false\nx: y | {if flag {a: 1}}\ny: x & {a: 1}\n",
+        )?;
+        assert_eq!(
+            EvaluatedValue::Number("1".to_owned()),
+            value.lookup_path(&["x", "a"])?.evaluate()?,
+        );
         Ok(())
     }
 
