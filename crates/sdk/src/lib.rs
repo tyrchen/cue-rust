@@ -1604,6 +1604,9 @@ evenNeg: math.RoundToEven(-2.5)
 abs: math.Abs(-2.2)
 copySign: math.Copysign(5, -2.2)
 copySignZero: math.Copysign(0, -1)
+cbrt: math.Cbrt(2)
+cbrtNegative: math.Cbrt(-8)
+cbrtNegativeZero: math.Cbrt(-0)
 dimPositive: math.Dim(3, 2.5)
 dimZero: math.Dim(5, 7.2)
 jacobi: math.Jacobi(1000, 201)
@@ -1692,6 +1695,21 @@ powNegativeZero: math.Pow(-0, 3)
         assert_evaluated_path(
             &value,
             "copySignZero",
+            &EvaluatedValue::Number("-0".to_owned()),
+        )?;
+        assert_evaluated_path(
+            &value,
+            "cbrt",
+            &EvaluatedValue::Number("1.259921049894873164767210607278228".to_owned()),
+        )?;
+        assert_evaluated_path(
+            &value,
+            "cbrtNegative",
+            &EvaluatedValue::Number("-2".to_owned()),
+        )?;
+        assert_evaluated_path(
+            &value,
+            "cbrtNegativeZero",
             &EvaluatedValue::Number("-0".to_owned()),
         )?;
         assert_evaluated_path(

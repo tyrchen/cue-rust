@@ -7,11 +7,11 @@ use std::{
     cmp::Ordering,
     collections::{HashMap, HashSet},
     fmt, mem,
-    num::FpCategory,
+    num::{FpCategory, NonZeroU64},
     str::FromStr,
 };
 
-use bigdecimal::{BigDecimal, RoundingMode, Zero};
+use bigdecimal::{BigDecimal, Context as DecimalContext, RoundingMode, Zero};
 use cue_rust_adt::{
     AdtError, BaseValue, Bottom, Comprehension, ComprehensionClause, EnvironmentId, ExprId,
     Feature, FieldExpr, FieldLabel, FieldMetadata, Runtime, SemanticExpr, StringSegment,
@@ -32,6 +32,7 @@ const MAX_BUILTIN_GENERATED_ITEMS: usize = 1_000_000;
 const MAX_COMPREHENSION_GENERATED_ITEMS: usize = MAX_BUILTIN_GENERATED_ITEMS;
 const MAX_SCHEMA_SORT_ITEMS: usize = 100_000;
 const MAX_FIXPOINT_ITERATIONS: usize = 64;
+const CUE_DECIMAL_PRECISION: u64 = 34;
 const INVALID_DYNAMIC_LABEL_FIELD: &str = "<invalid-dynamic-label>";
 const INVALID_PATTERN_LABEL_FIELD: &str = "<invalid-pattern-label>";
 const MATH_E: &str = "2.71828182845904523536028747135266249775724709369995957496696763";
@@ -3452,6 +3453,7 @@ fn evaluate_builtin_call(name: &str, args: Vec<EvaluatedValue>) -> EvaluatedValu
         "list.UniqueItems" => evaluate_list_unique_items(args),
         "math.Abs" => evaluate_math_abs(args),
         "math.Ceil" => evaluate_math_rounding("math.Ceil", args, RoundingMode::Ceiling),
+        "math.Cbrt" => evaluate_math_cbrt(args),
         "math.Copysign" => evaluate_math_copysign(args),
         "math.Dim" => evaluate_math_dim(args),
         "math.Floor" => evaluate_math_rounding("math.Floor", args, RoundingMode::Floor),
@@ -3530,6 +3532,22 @@ fn evaluate_math_rounding(
         return invalid_math_builtin_arg(name);
     };
     evaluated_decimal_number(name, &value.with_scale_round(0, mode))
+}
+
+fn evaluate_math_cbrt(args: Vec<EvaluatedValue>) -> EvaluatedValue {
+    let Some(value) = single_number_text(args) else {
+        return invalid_math_builtin_arg("math.Cbrt");
+    };
+    let Some(parsed) = parse_exact_decimal(&value) else {
+        return invalid_math_builtin_arg("math.Cbrt");
+    };
+    if parsed.is_zero() && numeric_literal_has_negative_sign(&value) {
+        return EvaluatedValue::Number("-0".to_owned());
+    }
+    let Some(context) = cue_decimal_context() else {
+        return builtin_resource_exhausted("math.Cbrt");
+    };
+    evaluated_decimal_number("math.Cbrt", &parsed.cbrt_with_context(&context))
 }
 
 fn evaluate_math_signbit(args: Vec<EvaluatedValue>) -> EvaluatedValue {
@@ -3647,14 +3665,8 @@ fn evaluate_math_multiple_of(args: Vec<EvaluatedValue>) -> EvaluatedValue {
 }
 
 fn single_decimal_arg(_name: &str, args: Vec<EvaluatedValue>) -> Option<BigDecimal> {
-    if args.len() != 1 {
-        return None;
-    }
-    args.into_iter()
-        .next()
-        .map(resolve_default_value)
-        .as_ref()
-        .and_then(decimal_value)
+    let value = single_number_text(args)?;
+    parse_exact_decimal(&value)
 }
 
 fn single_integer_arg(_name: &str, args: Vec<EvaluatedValue>) -> Option<i128> {
@@ -3670,6 +3682,16 @@ fn decimal_value(value: &EvaluatedValue) -> Option<BigDecimal> {
         return None;
     };
     parse_exact_decimal(value)
+}
+
+fn single_number_text(args: Vec<EvaluatedValue>) -> Option<String> {
+    if args.len() != 1 {
+        return None;
+    }
+    args.into_iter()
+        .next()
+        .map(resolve_default_value)
+        .and_then(number_text)
 }
 
 fn two_number_arg_texts(args: Vec<EvaluatedValue>) -> Option<(String, String)> {
@@ -4001,6 +4023,11 @@ fn positive_mod(value: BigInt, modulus: &BigInt) -> BigInt {
 
 fn low_bits(value: &BigInt, mask: u64) -> u64 {
     value.to_u64_digits().1.first().copied().unwrap_or_default() & mask
+}
+
+fn cue_decimal_context() -> Option<DecimalContext> {
+    NonZeroU64::new(CUE_DECIMAL_PRECISION)
+        .map(|precision| DecimalContext::new(precision, RoundingMode::HalfEven))
 }
 
 fn invalid_math_builtin_arg(name: &str) -> EvaluatedValue {

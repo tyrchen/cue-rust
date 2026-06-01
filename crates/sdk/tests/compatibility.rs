@@ -359,7 +359,8 @@ fn push_stdlib_math_case(
          math.Jacobi(1, 170141183460469231731687303715884105729)\njacobiBad: math.Jacobi(1000, \
          2000)\npow: math.Pow(8, 4)\npowDecimal: math.Pow(2.5, 2)\npowNeg: math.Pow(-2, \
          3)\npowNegEven: math.Pow(-2, 4)\npowNegExp: math.Pow(2, -3)\npowNegDecimalExp: \
-         math.Pow(1.25, -2)\npowNegZero: math.Pow(-0, 3)\n",
+         math.Pow(1.25, -2)\npowNegZero: math.Pow(-0, 3)\ncbrt: math.Cbrt(2)\ncbrtNeg: \
+         math.Cbrt(-8)\ncbrtNegZero: math.Cbrt(-0)\n",
     )?;
     cases.push(supported_case(
         "eval/stdlib-math-exact-surface",
@@ -425,6 +426,14 @@ fn push_stdlib_math_case(
             && exact_math.lookup_path(&["powNegDecimalExp"])?.evaluate()?
                 == cue_rust::EvaluatedValue::Number("0.64".to_owned())
             && exact_math.lookup_path(&["powNegZero"])?.evaluate()?
+                == cue_rust::EvaluatedValue::Number("-0".to_owned())
+            && exact_math.lookup_path(&["cbrt"])?.evaluate()?
+                == cue_rust::EvaluatedValue::Number(
+                    "1.259921049894873164767210607278228".to_owned(),
+                )
+            && exact_math.lookup_path(&["cbrtNeg"])?.evaluate()?
+                == cue_rust::EvaluatedValue::Number("-2".to_owned())
+            && exact_math.lookup_path(&["cbrtNegZero"])?.evaluate()?
                 == cue_rust::EvaluatedValue::Number("-0".to_owned()),
     ));
     Ok(())
