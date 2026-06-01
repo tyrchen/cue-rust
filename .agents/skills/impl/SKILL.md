@@ -21,10 +21,6 @@ Land one phase from `./specs/91-impl-plan.md` to a publishable bar — no TODOs,
 - Not for greenfield design work. If `./specs/` is empty or the relevant phase is not specified, hand off to the **spec** skill first.
 - Not for prototyping. The quality bar here is "publishable"; throwaway code lives somewhere else.
 
-## Diagram expectation
-
-When an implementation phase changes architecture, data flow, processing flow, lifecycle/state transitions, or build/dependency order, update the corresponding spec or research diagrams in the same phase. Use fenced ASCII-style diagrams (` ```text `) with nested boxes or grouped lanes for non-trivial systems, matching the spec/research skill standard. Prefer terminal-safe box-drawing characters (`┌─┐│└┘`, `▼`, `▲`) when they make ownership and runtime boundaries clearer. For request/protocol flows, use vertical lifelines with numbered steps so the ordering is reviewable. Do not leave diagrams as stale prose-adjacent decorations; they must show the real components, channels, storage, external systems, state transitions, and failure/shutdown paths that changed.
-
 ## Workflow
 
 ### 1. Bind the scope
