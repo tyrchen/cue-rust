@@ -1575,6 +1575,165 @@ mod tests {
     }
 
     #[test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "single exact math regression keeps constants, functions, and validator-style \
+                  constraints together"
+    )]
+    fn test_should_evaluate_exact_math_standard_library_surface()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let context = Context::new();
+        let value = context.compile_source(
+            "math.cue",
+            r#"import "math"
+e: math.E
+pi: math.Pi
+phi: math.Phi
+sqrt2: math.Sqrt2
+ln10: math.Ln10
+maxExp: math.MaxExp
+maxBase: math.MaxBase
+floorPi: math.Floor(math.Pi)
+floorNeg: math.Floor(-2.2)
+ceilNeg: math.Ceil(-2.2)
+truncNeg: math.Trunc(-2.9)
+round: math.Round(2.5)
+roundNeg: math.Round(-2.5)
+even: math.RoundToEven(2.5)
+evenNeg: math.RoundToEven(-2.5)
+abs: math.Abs(-2.2)
+multipleBool: math.MultipleOf(5, 2.5)
+multipleConstraint: 9 & math.MultipleOf(3)
+multiConstraint: 12 & math.MultipleOf(2) & math.MultipleOf(3)
+boundedMultiple: math.MultipleOf(2) & >3 & <=6
+boundedMultipleGood: boundedMultiple & 4
+boundedMultipleLow: boundedMultiple & 2
+boundedMultipleHigh: boundedMultiple & 8
+multipleBad: 10 & math.MultipleOf(3)
+multiBad: 10 & math.MultipleOf(2) & math.MultipleOf(3)
+badZero: math.MultipleOf(5, 0)
+bareConstraint: math.MultipleOf(3)
+sign: math.Signbit(-4)
+signZero: math.Signbit(-0)
+pow10: math.Pow10(4)
+pow10Neg: math.Pow10(-2)
+"#,
+        )?;
+
+        assert_evaluated_path(
+            &value,
+            "e",
+            &EvaluatedValue::Number(
+                "2.71828182845904523536028747135266249775724709369995957496696763".to_owned(),
+            ),
+        )?;
+        assert_evaluated_path(
+            &value,
+            "pi",
+            &EvaluatedValue::Number(
+                "3.14159265358979323846264338327950288419716939937510582097494459".to_owned(),
+            ),
+        )?;
+        assert_evaluated_path(
+            &value,
+            "phi",
+            &EvaluatedValue::Number(
+                "1.61803398874989484820458683436563811772030917980576286213544861".to_owned(),
+            ),
+        )?;
+        assert_evaluated_path(
+            &value,
+            "sqrt2",
+            &EvaluatedValue::Number(
+                "1.41421356237309504880168872420969807856967187537694807317667974".to_owned(),
+            ),
+        )?;
+        assert_evaluated_path(
+            &value,
+            "ln10",
+            &EvaluatedValue::Number(
+                "2.3025850929940456840179914546843642076011014886287729760333278".to_owned(),
+            ),
+        )?;
+        assert_evaluated_path(
+            &value,
+            "maxExp",
+            &EvaluatedValue::Number("2147483647".to_owned()),
+        )?;
+        assert_evaluated_path(&value, "maxBase", &EvaluatedValue::Number("62".to_owned()))?;
+        assert_evaluated_path(&value, "floorPi", &EvaluatedValue::Number("3".to_owned()))?;
+        assert_evaluated_path(&value, "floorNeg", &EvaluatedValue::Number("-3".to_owned()))?;
+        assert_evaluated_path(&value, "ceilNeg", &EvaluatedValue::Number("-2".to_owned()))?;
+        assert_evaluated_path(&value, "truncNeg", &EvaluatedValue::Number("-2".to_owned()))?;
+        assert_evaluated_path(&value, "round", &EvaluatedValue::Number("3".to_owned()))?;
+        assert_evaluated_path(&value, "roundNeg", &EvaluatedValue::Number("-3".to_owned()))?;
+        assert_evaluated_path(&value, "even", &EvaluatedValue::Number("2".to_owned()))?;
+        assert_evaluated_path(&value, "evenNeg", &EvaluatedValue::Number("-2".to_owned()))?;
+        assert_evaluated_path(&value, "abs", &EvaluatedValue::Number("2.2".to_owned()))?;
+        assert_evaluated_path(&value, "multipleBool", &EvaluatedValue::Bool(true))?;
+        assert_evaluated_path(
+            &value,
+            "multipleConstraint",
+            &EvaluatedValue::Number("9".to_owned()),
+        )?;
+        assert_evaluated_path(
+            &value,
+            "multiConstraint",
+            &EvaluatedValue::Number("12".to_owned()),
+        )?;
+        assert_evaluated_path(
+            &value,
+            "boundedMultipleGood",
+            &EvaluatedValue::Number("4".to_owned()),
+        )?;
+        assert!(matches!(
+            value.lookup_path(&["boundedMultipleLow"])?.evaluate()?,
+            EvaluatedValue::Bottom(_),
+        ));
+        assert!(matches!(
+            value.lookup_path(&["boundedMultipleHigh"])?.evaluate()?,
+            EvaluatedValue::Bottom(_),
+        ));
+        assert!(matches!(
+            value.lookup_path(&["multipleBad"])?.evaluate()?,
+            EvaluatedValue::Bottom(_),
+        ));
+        assert!(matches!(
+            value.lookup_path(&["multiBad"])?.evaluate()?,
+            EvaluatedValue::Bottom(_),
+        ));
+        assert!(matches!(
+            value.lookup_path(&["badZero"])?.evaluate()?,
+            EvaluatedValue::Bottom(_),
+        ));
+        assert_eq!(
+            ValueKind::Number,
+            value.lookup_path(&["bareConstraint"])?.kind()?,
+        );
+        assert_evaluated_path(&value, "sign", &EvaluatedValue::Bool(true))?;
+        assert_evaluated_path(&value, "signZero", &EvaluatedValue::Bool(true))?;
+        assert_evaluated_path(&value, "pow10", &EvaluatedValue::Number("10000".to_owned()))?;
+        assert_evaluated_path(
+            &value,
+            "pow10Neg",
+            &EvaluatedValue::Number("0.01".to_owned()),
+        )?;
+
+        let mut cue_options = EncodeOptions::default();
+        cue_options.encoding = Encoding::Cue;
+        cue_options.concrete = false;
+        assert_eq!(
+            ">3 & <=6 & math.MultipleOf(2)",
+            encode_value(&value.lookup_path(&["boundedMultiple"])?, cue_options)?,
+        );
+        for encoding in [Encoding::Json, Encoding::Yaml, Encoding::Toml] {
+            cue_options.encoding = encoding;
+            assert!(encode_value(&value.lookup_path(&["boundedMultiple"])?, cue_options).is_err(),);
+        }
+        Ok(())
+    }
+
+    #[test]
     fn test_should_evaluate_broad_list_standard_library_surface()
     -> Result<(), Box<dyn std::error::Error>> {
         let context = Context::new();

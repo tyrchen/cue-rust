@@ -338,6 +338,55 @@ fn push_stdlib_cases(
             && broad_list.lookup_path(&["unique"])?.evaluate()?
                 == cue_rust::EvaluatedValue::Bool(false),
     ));
+
+    push_stdlib_math_case(context, cases)?;
+    Ok(())
+}
+
+fn push_stdlib_math_case(
+    context: &Context,
+    cases: &mut Vec<CompatibilityCase>,
+) -> Result<(), Box<dyn Error>> {
+    let exact_math = context.compile_source(
+        "stdlib-math.cue",
+        "import \"math\"\npi: math.Pi\nmaxExp: math.MaxExp\nfloor: math.Floor(math.Pi)\nround: \
+         math.Round(-2.5)\neven: math.RoundToEven(2.5)\nabs: math.Abs(-2.2)\nmultiple: 12 & \
+         math.MultipleOf(2) & math.MultipleOf(3)\nbounded: 4 & math.MultipleOf(2) & >3\nbad: 10 & \
+         math.MultipleOf(3)\nsign: math.Signbit(-4)\nsignZero: math.Signbit(-0)\npow10: \
+         math.Pow10(-2)\n",
+    )?;
+    cases.push(supported_case(
+        "eval/stdlib-math-exact-surface",
+        "semantic",
+        exact_math.lookup_path(&["pi"])?.evaluate()?
+            == cue_rust::EvaluatedValue::Number(
+                "3.14159265358979323846264338327950288419716939937510582097494459".to_owned(),
+            )
+            && exact_math.lookup_path(&["maxExp"])?.evaluate()?
+                == cue_rust::EvaluatedValue::Number("2147483647".to_owned())
+            && exact_math.lookup_path(&["floor"])?.evaluate()?
+                == cue_rust::EvaluatedValue::Number("3".to_owned())
+            && exact_math.lookup_path(&["round"])?.evaluate()?
+                == cue_rust::EvaluatedValue::Number("-3".to_owned())
+            && exact_math.lookup_path(&["even"])?.evaluate()?
+                == cue_rust::EvaluatedValue::Number("2".to_owned())
+            && exact_math.lookup_path(&["abs"])?.evaluate()?
+                == cue_rust::EvaluatedValue::Number("2.2".to_owned())
+            && exact_math.lookup_path(&["multiple"])?.evaluate()?
+                == cue_rust::EvaluatedValue::Number("12".to_owned())
+            && exact_math.lookup_path(&["bounded"])?.evaluate()?
+                == cue_rust::EvaluatedValue::Number("4".to_owned())
+            && exact_math
+                .lookup_path(&["bad"])?
+                .validate(ValidateOptions::default())
+                .is_err()
+            && exact_math.lookup_path(&["sign"])?.evaluate()?
+                == cue_rust::EvaluatedValue::Bool(true)
+            && exact_math.lookup_path(&["signZero"])?.evaluate()?
+                == cue_rust::EvaluatedValue::Bool(true)
+            && exact_math.lookup_path(&["pow10"])?.evaluate()?
+                == cue_rust::EvaluatedValue::Number("0.01".to_owned()),
+    ));
     Ok(())
 }
 

@@ -6,7 +6,7 @@
 use std::{str, str::FromStr};
 
 use cue_rust_eval::{
-    EvalError, EvaluatedValue, ExportOptions, StringConstraint, StringConstraintSet,
+    EvalError, EvaluatedValue, ExportOptions, NumericBound, StringConstraint, StringConstraintSet,
     ValidateOptions, Value,
 };
 use cue_rust_source::SourceLimits;
@@ -362,7 +362,9 @@ fn evaluated_to_json(value: EvaluatedValue) -> Result<JsonValue, EncodeError> {
         EvaluatedValue::OpenList { .. } => unsupported(Encoding::Json, "incomplete open list"),
         EvaluatedValue::Kind(_) => unsupported(Encoding::Json, "incomplete kind constraint"),
         EvaluatedValue::Builtin(_) => unsupported(Encoding::Json, "incomplete builtin value"),
-        EvaluatedValue::NumericConstraint(_) => {
+        EvaluatedValue::NumericConstraint(_)
+        | EvaluatedValue::NumberMultipleOf(_)
+        | EvaluatedValue::NumberConstraintSet { .. } => {
             unsupported(Encoding::Json, "incomplete numeric constraint")
         }
         EvaluatedValue::StringConstraints(_) | EvaluatedValue::StringConstraintSet(_) => {
@@ -411,7 +413,9 @@ fn evaluated_to_toml(value: EvaluatedValue) -> Result<TomlValue, EncodeError> {
         EvaluatedValue::OpenList { .. } => unsupported(Encoding::Toml, "incomplete open list"),
         EvaluatedValue::Kind(_) => unsupported(Encoding::Toml, "incomplete kind constraint"),
         EvaluatedValue::Builtin(_) => unsupported(Encoding::Toml, "incomplete builtin value"),
-        EvaluatedValue::NumericConstraint(_) => {
+        EvaluatedValue::NumericConstraint(_)
+        | EvaluatedValue::NumberMultipleOf(_)
+        | EvaluatedValue::NumberConstraintSet { .. } => {
             unsupported(Encoding::Toml, "incomplete numeric constraint")
         }
         EvaluatedValue::StringConstraints(_) | EvaluatedValue::StringConstraintSet(_) => {
@@ -460,7 +464,9 @@ fn evaluated_to_yaml(value: EvaluatedValue) -> Result<YamlValue, EncodeError> {
         EvaluatedValue::OpenList { .. } => unsupported(Encoding::Yaml, "incomplete open list"),
         EvaluatedValue::Kind(_) => unsupported(Encoding::Yaml, "incomplete kind constraint"),
         EvaluatedValue::Builtin(_) => unsupported(Encoding::Yaml, "incomplete builtin value"),
-        EvaluatedValue::NumericConstraint(_) => {
+        EvaluatedValue::NumericConstraint(_)
+        | EvaluatedValue::NumberMultipleOf(_)
+        | EvaluatedValue::NumberConstraintSet { .. } => {
             unsupported(Encoding::Yaml, "incomplete numeric constraint")
         }
         EvaluatedValue::StringConstraints(_) | EvaluatedValue::StringConstraintSet(_) => {
@@ -537,14 +543,13 @@ fn format_cue_value(value: &EvaluatedValue) -> String {
         EvaluatedValue::OpenList { items, tail } => format_cue_open_list(items, tail),
         EvaluatedValue::Kind(kind) => kind.to_string(),
         EvaluatedValue::Builtin(name) => name.clone(),
-        EvaluatedValue::NumericConstraint(bounds) => bounds
-            .iter()
-            .map(|bound| {
-                let op = bound.op.as_str();
-                format!("{op}{}", bound.value)
-            })
-            .collect::<Vec<_>>()
-            .join(" & "),
+        EvaluatedValue::NumericConstraint(bounds) => format_cue_numeric_bounds(bounds),
+        EvaluatedValue::NumberMultipleOf(multiples) => {
+            format_cue_multiple_of_constraints(multiples)
+        }
+        EvaluatedValue::NumberConstraintSet { bounds, multiples } => {
+            format_cue_number_constraint_set(bounds, multiples)
+        }
         EvaluatedValue::StringConstraints(constraints) => constraints
             .iter()
             .map(format_cue_string_constraint)
@@ -586,6 +591,36 @@ fn format_cue_value(value: &EvaluatedValue) -> String {
 
 fn format_cue_string_constraint(constraint: &StringConstraint) -> String {
     format!("{}({})", constraint.op.builtin_name(), constraint.limit)
+}
+
+fn format_cue_numeric_bounds(bounds: &[NumericBound]) -> String {
+    bounds
+        .iter()
+        .map(|bound| {
+            let op = bound.op.as_str();
+            format!("{op}{}", bound.value)
+        })
+        .collect::<Vec<_>>()
+        .join(" & ")
+}
+
+fn format_cue_multiple_of_constraints(multiples: &[String]) -> String {
+    multiples
+        .iter()
+        .map(|divisor| format!("math.MultipleOf({divisor})"))
+        .collect::<Vec<_>>()
+        .join(" & ")
+}
+
+fn format_cue_number_constraint_set(bounds: &[NumericBound], multiples: &[String]) -> String {
+    let mut rendered = Vec::new();
+    if !bounds.is_empty() {
+        rendered.push(format_cue_numeric_bounds(bounds));
+    }
+    if !multiples.is_empty() {
+        rendered.push(format_cue_multiple_of_constraints(multiples));
+    }
+    rendered.join(" & ")
 }
 
 fn format_cue_string_constraint_set(constraints: &StringConstraintSet) -> String {

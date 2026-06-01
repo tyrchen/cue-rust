@@ -1056,7 +1056,7 @@ fn is_builtin_name(name: &str) -> bool {
 }
 
 fn is_supported_builtin_import(path: &str) -> bool {
-    matches!(path, "list" | "strings")
+    matches!(path, "list" | "math" | "strings")
 }
 
 #[cfg(test)]

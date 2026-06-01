@@ -11,7 +11,7 @@ use std::{
     str::FromStr,
 };
 
-use bigdecimal::{BigDecimal, Zero};
+use bigdecimal::{BigDecimal, RoundingMode, Zero};
 use cue_rust_adt::{
     AdtError, BaseValue, Bottom, Comprehension, ComprehensionClause, EnvironmentId, ExprId,
     Feature, FieldExpr, FieldLabel, FieldMetadata, Runtime, SemanticExpr, StringSegment,
@@ -33,6 +33,17 @@ const MAX_SCHEMA_SORT_ITEMS: usize = 100_000;
 const MAX_FIXPOINT_ITERATIONS: usize = 64;
 const INVALID_DYNAMIC_LABEL_FIELD: &str = "<invalid-dynamic-label>";
 const INVALID_PATTERN_LABEL_FIELD: &str = "<invalid-pattern-label>";
+const MATH_E: &str = "2.71828182845904523536028747135266249775724709369995957496696763";
+const MATH_PI: &str = "3.14159265358979323846264338327950288419716939937510582097494459";
+const MATH_PHI: &str = "1.61803398874989484820458683436563811772030917980576286213544861";
+const MATH_SQRT2: &str = "1.41421356237309504880168872420969807856967187537694807317667974";
+const MATH_SQRTE: &str = "1.64872127070012814684865078781416357165377610071014801157507931";
+const MATH_SQRTPI: &str = "1.77245385090551602729816748334114518279754945612238712821380779";
+const MATH_SQRTPHI: &str = "1.27201964951406896425242246173749149171560804184009624861664038";
+const MATH_LN2: &str = "0.693147180559945309417232121458176568075500134360255254120680009";
+const MATH_LOG2E: &str = "1.442695040888963407359924681001892137426645954152985934135449408";
+const MATH_LN10: &str = "2.3025850929940456840179914546843642076011014886287729760333278";
+const MATH_LOG10E: &str = "0.43429448190325182765112891891660508229439700580366656611445378";
 
 /// Evaluation options for a single value operation.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -171,6 +182,15 @@ pub enum EvaluatedValue {
     Builtin(String),
     /// Numeric comparison constraint.
     NumericConstraint(Vec<NumericBound>),
+    /// Numeric divisibility constraints from `math.MultipleOf`.
+    NumberMultipleOf(Vec<String>),
+    /// Combined numeric comparison and divisibility constraints.
+    NumberConstraintSet {
+        /// Comparison bounds.
+        bounds: Vec<NumericBound>,
+        /// Divisibility constraints.
+        multiples: Vec<String>,
+    },
     /// Regular-expression string constraint.
     RegexConstraint {
         /// Regex pattern text.
@@ -203,7 +223,10 @@ impl EvaluatedValue {
             Self::Top | Self::Builtin(_) => ValueKind::Top,
             Self::Null => ValueKind::Null,
             Self::Bool(_) => ValueKind::Bool,
-            Self::Number(_) | Self::NumericConstraint(_) => ValueKind::Number,
+            Self::Number(_)
+            | Self::NumericConstraint(_)
+            | Self::NumberMultipleOf(_)
+            | Self::NumberConstraintSet { .. } => ValueKind::Number,
             Self::String(_)
             | Self::RegexConstraint { .. }
             | Self::StringConstraints(_)
@@ -3282,9 +3305,14 @@ fn value_from_base(base: &BaseValue) -> EvaluatedValue {
         BaseValue::Bytes(value) => EvaluatedValue::Bytes(value.clone()),
         BaseValue::Struct => EvaluatedValue::Struct(IndexMap::new()),
         BaseValue::List => EvaluatedValue::List(Vec::new()),
-        BaseValue::Builtin(name) => builtin_kind(name).map_or_else(
-            || EvaluatedValue::Builtin(name.clone()),
-            EvaluatedValue::Kind,
+        BaseValue::Builtin(name) => builtin_constant(name).map_or_else(
+            || {
+                builtin_kind(name).map_or_else(
+                    || EvaluatedValue::Builtin(name.clone()),
+                    EvaluatedValue::Kind,
+                )
+            },
+            |value| EvaluatedValue::Number(value.to_owned()),
         ),
         _ => EvaluatedValue::Bottom(Bottom::new(
             "cue.eval.unsupported_base",
@@ -3421,6 +3449,17 @@ fn evaluate_builtin_call(name: &str, args: Vec<EvaluatedValue>) -> EvaluatedValu
         "list.Sum" => evaluate_list_numeric_aggregate("list.Sum", args, NumericAggregate::Sum),
         "list.Take" => evaluate_list_take(args),
         "list.UniqueItems" => evaluate_list_unique_items(args),
+        "math.Abs" => evaluate_math_abs(args),
+        "math.Ceil" => evaluate_math_rounding("math.Ceil", args, RoundingMode::Ceiling),
+        "math.Floor" => evaluate_math_rounding("math.Floor", args, RoundingMode::Floor),
+        "math.MultipleOf" => evaluate_math_multiple_of(args),
+        "math.Pow10" => evaluate_math_pow10(args),
+        "math.Round" => evaluate_math_rounding("math.Round", args, RoundingMode::HalfUp),
+        "math.RoundToEven" => {
+            evaluate_math_rounding("math.RoundToEven", args, RoundingMode::HalfEven)
+        }
+        "math.Signbit" => evaluate_math_signbit(args),
+        "math.Trunc" => evaluate_math_rounding("math.Trunc", args, RoundingMode::Down),
         "or" => evaluate_or(args),
         "strings.ByteAt" => evaluate_strings_byte_at(args),
         "strings.ByteSlice" => evaluate_strings_byte_slice(args),
@@ -3463,6 +3502,146 @@ fn evaluate_builtin_call(name: &str, args: Vec<EvaluatedValue>) -> EvaluatedValu
             false,
         )),
     }
+}
+
+fn evaluate_math_abs(args: Vec<EvaluatedValue>) -> EvaluatedValue {
+    let Some(value) = single_decimal_arg("math.Abs", args) else {
+        return invalid_math_builtin_arg("math.Abs");
+    };
+    let value = if value < BigDecimal::zero() {
+        -value
+    } else {
+        value
+    };
+    evaluated_decimal_number("math.Abs", &value)
+}
+
+fn evaluate_math_rounding(
+    name: &str,
+    args: Vec<EvaluatedValue>,
+    mode: RoundingMode,
+) -> EvaluatedValue {
+    let Some(value) = single_decimal_arg(name, args) else {
+        return invalid_math_builtin_arg(name);
+    };
+    evaluated_decimal_number(name, &value.with_scale_round(0, mode))
+}
+
+fn evaluate_math_signbit(args: Vec<EvaluatedValue>) -> EvaluatedValue {
+    if args.len() != 1 {
+        return invalid_math_builtin_arg("math.Signbit");
+    }
+    let Some(value) = args.into_iter().next().map(resolve_default_value) else {
+        return invalid_math_builtin_arg("math.Signbit");
+    };
+    let EvaluatedValue::Number(value) = value else {
+        return invalid_math_builtin_arg("math.Signbit");
+    };
+    if parse_exact_decimal(&value).is_none() {
+        return invalid_math_builtin_arg("math.Signbit");
+    }
+    EvaluatedValue::Bool(numeric_literal_has_negative_sign(&value))
+}
+
+fn evaluate_math_pow10(args: Vec<EvaluatedValue>) -> EvaluatedValue {
+    let Some(exponent) = single_integer_arg("math.Pow10", args) else {
+        return invalid_math_builtin_arg("math.Pow10");
+    };
+    let value = format!("1e{exponent}");
+    let Some(value) = parse_exact_decimal(&value) else {
+        return builtin_resource_exhausted("math.Pow10");
+    };
+    evaluated_decimal_number("math.Pow10", &value)
+}
+
+fn evaluate_math_multiple_of(args: Vec<EvaluatedValue>) -> EvaluatedValue {
+    let args = args
+        .into_iter()
+        .map(resolve_default_value)
+        .collect::<Vec<_>>();
+    match args.len() {
+        1 => {
+            let Some(divisor) = args.first().and_then(decimal_value) else {
+                return invalid_math_builtin_arg("math.MultipleOf");
+            };
+            if divisor.is_zero() {
+                return math_division_by_zero("math.MultipleOf");
+            }
+            format_decimal_number(&divisor).map_or_else(
+                || builtin_resource_exhausted("math.MultipleOf"),
+                |divisor| EvaluatedValue::NumberMultipleOf(vec![divisor]),
+            )
+        }
+        2 => {
+            let Some(left) = args.first().and_then(decimal_value) else {
+                return invalid_math_builtin_arg("math.MultipleOf");
+            };
+            let Some(right) = args.get(1).and_then(decimal_value) else {
+                return invalid_math_builtin_arg("math.MultipleOf");
+            };
+            if right.is_zero() {
+                return math_division_by_zero("math.MultipleOf");
+            }
+            EvaluatedValue::Bool(decimal_multiple_of(&left, &right))
+        }
+        _ => invalid_math_builtin_arg("math.MultipleOf"),
+    }
+}
+
+fn single_decimal_arg(_name: &str, args: Vec<EvaluatedValue>) -> Option<BigDecimal> {
+    if args.len() != 1 {
+        return None;
+    }
+    args.into_iter()
+        .next()
+        .map(resolve_default_value)
+        .as_ref()
+        .and_then(decimal_value)
+}
+
+fn single_integer_arg(_name: &str, args: Vec<EvaluatedValue>) -> Option<i128> {
+    if args.len() != 1 {
+        return None;
+    }
+    let value = args.into_iter().next().map(resolve_default_value)?;
+    integer_arg(value)
+}
+
+fn decimal_value(value: &EvaluatedValue) -> Option<BigDecimal> {
+    let EvaluatedValue::Number(value) = value else {
+        return None;
+    };
+    parse_exact_decimal(value)
+}
+
+fn decimal_multiple_of(left: &BigDecimal, right: &BigDecimal) -> bool {
+    (left % right).is_zero()
+}
+
+fn numeric_literal_has_negative_sign(value: &str) -> bool {
+    let compact = value.replace('_', "");
+    compact
+        .strip_prefix('+')
+        .unwrap_or(&compact)
+        .starts_with('-')
+}
+
+fn invalid_math_builtin_arg(name: &str) -> EvaluatedValue {
+    EvaluatedValue::Bottom(Bottom::new(
+        "cue.eval.invalid_builtin_arg",
+        format!("{name} received invalid arguments"),
+        None,
+        false,
+    ))
+}
+
+fn math_division_by_zero(name: &str) -> EvaluatedValue {
+    EvaluatedValue::Bottom(Bottom::new(
+        "cue.eval.division_by_zero",
+        format!("{name} division by zero"),
+        None,
+        false,
+    ))
 }
 
 fn evaluate_strings_contains(args: Vec<EvaluatedValue>) -> EvaluatedValue {
@@ -5338,6 +5517,19 @@ fn values_equal(left: &EvaluatedValue, right: &EvaluatedValue) -> Result<bool, B
         (EvaluatedValue::NumericConstraint(left), EvaluatedValue::NumericConstraint(right)) => {
             Ok(left == right)
         }
+        (EvaluatedValue::NumberMultipleOf(left), EvaluatedValue::NumberMultipleOf(right)) => {
+            Ok(left == right)
+        }
+        (
+            EvaluatedValue::NumberConstraintSet {
+                bounds: left_bounds,
+                multiples: left_multiples,
+            },
+            EvaluatedValue::NumberConstraintSet {
+                bounds: right_bounds,
+                multiples: right_multiples,
+            },
+        ) => Ok(left_bounds == right_bounds && left_multiples == right_multiples),
         (EvaluatedValue::StringConstraints(left), EvaluatedValue::StringConstraints(right)) => {
             Ok(left == right)
         }
@@ -6328,6 +6520,82 @@ fn unify_values(left: EvaluatedValue, right: EvaluatedValue, span: Option<Span>)
         | (EvaluatedValue::Number(value), EvaluatedValue::NumericConstraint(bounds)) => {
             unify_numeric_constraint(value, &bounds)
         }
+        (
+            EvaluatedValue::NumericConstraint(bounds),
+            EvaluatedValue::NumberMultipleOf(multiples),
+        )
+        | (
+            EvaluatedValue::NumberMultipleOf(multiples),
+            EvaluatedValue::NumericConstraint(bounds),
+        ) => EvaluatedValue::NumberConstraintSet { bounds, multiples },
+        (
+            EvaluatedValue::NumericConstraint(bounds),
+            EvaluatedValue::NumberConstraintSet {
+                bounds: mut set_bounds,
+                multiples,
+            },
+        )
+        | (
+            EvaluatedValue::NumberConstraintSet {
+                bounds: mut set_bounds,
+                multiples,
+            },
+            EvaluatedValue::NumericConstraint(bounds),
+        ) => {
+            set_bounds.extend(bounds);
+            EvaluatedValue::NumberConstraintSet {
+                bounds: set_bounds,
+                multiples,
+            }
+        }
+        (EvaluatedValue::NumberMultipleOf(left), EvaluatedValue::NumberMultipleOf(right)) => {
+            unify_number_multiple_of_constraints(&left, &right)
+        }
+        (EvaluatedValue::NumberMultipleOf(divisors), EvaluatedValue::Number(value))
+        | (EvaluatedValue::Number(value), EvaluatedValue::NumberMultipleOf(divisors)) => {
+            unify_number_multiple_of(value, &divisors)
+        }
+        (
+            EvaluatedValue::NumberMultipleOf(multiples),
+            EvaluatedValue::NumberConstraintSet {
+                bounds,
+                multiples: set_multiples,
+            },
+        )
+        | (
+            EvaluatedValue::NumberConstraintSet {
+                bounds,
+                multiples: set_multiples,
+            },
+            EvaluatedValue::NumberMultipleOf(multiples),
+        ) => EvaluatedValue::NumberConstraintSet {
+            bounds,
+            multiples: merge_number_multiples(&multiples, &set_multiples),
+        },
+        (
+            EvaluatedValue::NumberConstraintSet { bounds, multiples },
+            EvaluatedValue::Number(value),
+        )
+        | (
+            EvaluatedValue::Number(value),
+            EvaluatedValue::NumberConstraintSet { bounds, multiples },
+        ) => unify_number_constraint_set(value, &bounds, &multiples),
+        (
+            EvaluatedValue::NumberConstraintSet {
+                bounds: mut left_bounds,
+                multiples: left_multiples,
+            },
+            EvaluatedValue::NumberConstraintSet {
+                bounds: right_bounds,
+                multiples: right_multiples,
+            },
+        ) => {
+            left_bounds.extend(right_bounds);
+            EvaluatedValue::NumberConstraintSet {
+                bounds: left_bounds,
+                multiples: merge_number_multiples(&left_multiples, &right_multiples),
+            }
+        }
         (EvaluatedValue::StringConstraints(mut left), EvaluatedValue::StringConstraints(right)) => {
             left.extend(right);
             EvaluatedValue::StringConstraints(left)
@@ -6674,6 +6942,70 @@ fn unify_numeric_constraint(value: String, bounds: &[NumericBound]) -> Evaluated
         )),
         Err(bottom) => EvaluatedValue::Bottom(bottom),
     }
+}
+
+fn unify_number_multiple_of(value: String, divisors: &[String]) -> EvaluatedValue {
+    let Some(value_decimal) = parse_exact_decimal(&value) else {
+        return EvaluatedValue::Bottom(Bottom::new(
+            "cue.eval.invalid_number",
+            "invalid math.MultipleOf operand",
+            None,
+            false,
+        ));
+    };
+    for divisor in divisors {
+        let Some(divisor_decimal) = parse_exact_decimal(divisor) else {
+            return EvaluatedValue::Bottom(Bottom::new(
+                "cue.eval.invalid_number",
+                "invalid math.MultipleOf operand",
+                None,
+                false,
+            ));
+        };
+        if divisor_decimal.is_zero() {
+            return math_division_by_zero("math.MultipleOf");
+        }
+        if !decimal_multiple_of(&value_decimal, &divisor_decimal) {
+            return EvaluatedValue::Bottom(Bottom::new(
+                "cue.eval.numeric_multiple_mismatch",
+                format!("invalid value {value} for math.MultipleOf({divisor})"),
+                None,
+                false,
+            ));
+        }
+    }
+    EvaluatedValue::Number(value)
+}
+
+fn unify_number_multiple_of_constraints(left: &[String], right: &[String]) -> EvaluatedValue {
+    EvaluatedValue::NumberMultipleOf(merge_number_multiples(left, right))
+}
+
+fn unify_number_constraint_set(
+    value: String,
+    bounds: &[NumericBound],
+    multiples: &[String],
+) -> EvaluatedValue {
+    match unify_numeric_constraint(value, bounds) {
+        EvaluatedValue::Number(value) => unify_number_multiple_of(value, multiples),
+        bottom @ EvaluatedValue::Bottom(_) => bottom,
+        other => EvaluatedValue::Bottom(Bottom::new(
+            "cue.eval.invalid_number_constraint",
+            format!("numeric constraint produced {}", other.kind()),
+            None,
+            false,
+        )),
+    }
+}
+
+fn merge_number_multiples(left: &[String], right: &[String]) -> Vec<String> {
+    let mut divisors = Vec::with_capacity(left.len() + right.len());
+    for divisor in left.iter().chain(right) {
+        if !divisors.contains(divisor) {
+            divisors.push(divisor.clone());
+        }
+    }
+    divisors
 }
 
 fn unify_string_constraints(value: String, constraints: &[StringConstraint]) -> EvaluatedValue {
@@ -7033,7 +7365,9 @@ fn kind_accepts_value(kind: ValueKind, value: &EvaluatedValue) -> bool {
         (ValueKind::Float, EvaluatedValue::Number(value)) => parse_float(value).is_some(),
         (
             ValueKind::Number | ValueKind::Int | ValueKind::Float,
-            EvaluatedValue::NumericConstraint(_),
+            EvaluatedValue::NumericConstraint(_)
+            | EvaluatedValue::NumberMultipleOf(_)
+            | EvaluatedValue::NumberConstraintSet { .. },
         )
         | (ValueKind::Top, _)
         | (ValueKind::Null, EvaluatedValue::Null)
@@ -7106,6 +7440,8 @@ fn validate_value(
         | EvaluatedValue::Kind(_)
         | EvaluatedValue::Builtin(_)
         | EvaluatedValue::NumericConstraint(_)
+        | EvaluatedValue::NumberMultipleOf(_)
+        | EvaluatedValue::NumberConstraintSet { .. }
         | EvaluatedValue::StringConstraints(_)
         | EvaluatedValue::StringConstraintSet(_)
         | EvaluatedValue::RegexConstraint { .. }
@@ -7227,6 +7563,34 @@ fn builtin_kind(name: &str) -> Option<ValueKind> {
         "null" => Some(ValueKind::Null),
         "number" => Some(ValueKind::Number),
         "string" => Some(ValueKind::String),
+        _ => None,
+    }
+}
+
+fn builtin_constant(name: &str) -> Option<&'static str> {
+    match name {
+        "math.MaxExp" => Some("2147483647"),
+        "math.MinExp" => Some("-2147483648"),
+        "math.MaxPrec" => Some("4294967295"),
+        "math.ToNearestEven" | "math.Exact" => Some("0"),
+        "math.ToNearestAway" | "math.Above" => Some("1"),
+        "math.ToZero" => Some("2"),
+        "math.AwayFromZero" => Some("3"),
+        "math.ToNegativeInf" => Some("4"),
+        "math.ToPositiveInf" => Some("5"),
+        "math.Below" => Some("-1"),
+        "math.MaxBase" => Some("62"),
+        "math.E" => Some(MATH_E),
+        "math.Pi" => Some(MATH_PI),
+        "math.Phi" => Some(MATH_PHI),
+        "math.Sqrt2" => Some(MATH_SQRT2),
+        "math.SqrtE" => Some(MATH_SQRTE),
+        "math.SqrtPi" => Some(MATH_SQRTPI),
+        "math.SqrtPhi" => Some(MATH_SQRTPHI),
+        "math.Ln2" => Some(MATH_LN2),
+        "math.Log2E" => Some(MATH_LOG2E),
+        "math.Ln10" => Some(MATH_LN10),
+        "math.Log10E" => Some(MATH_LOG10E),
         _ => None,
     }
 }

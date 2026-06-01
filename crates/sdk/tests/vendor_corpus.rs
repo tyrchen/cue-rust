@@ -777,6 +777,106 @@ async fn assert_upstream_stdlib_surface_builtins(context: &Context, root: &Path)
         EvaluatedValue::Number("8".to_owned()),
         list_value.lookup_path(&["avg"])?.evaluate()?,
     );
+
+    let math_consts =
+        TxtarArchive::read(&root.join("vendors/cue/pkg/math/testdata/consts.txtar")).await?;
+    let math_round =
+        TxtarArchive::read(&root.join("vendors/cue/pkg/math/testdata/round.txtar")).await?;
+    let math_mult =
+        TxtarArchive::read(&root.join("vendors/cue/pkg/math/testdata/mult.txtar")).await?;
+    assert!(math_consts.file("in.cue")?.contains("math.Pi"));
+    assert!(math_round.file("in.cue")?.contains("math.RoundToEven"));
+    assert!(math_round.file("in.cue")?.contains("math.Floor(math.Pi)"));
+    assert!(
+        math_mult
+            .file("in.cue")?
+            .contains("math.MultipleOf(99*99, 99)")
+    );
+
+    let math_value = context.compile_source(
+        "pkg/math/reduced.cue",
+        "import \"math\"\npi: math.Pi\nmaxPrec: math.MaxPrec\nfloorPi: \
+         math.Floor(math.Pi)\nfloor: math.Floor(-2.2)\nceil: math.Ceil(-2.2)\ntrunc: \
+         math.Trunc(-2.9)\nround: math.Round(-2.5)\neven: math.RoundToEven(2.5)\nabs: \
+         math.Abs(-2.2)\nmultipleBool: math.MultipleOf(5, 2.5)\nmultipleConstraint: 9 & \
+         math.MultipleOf(3)\nmultipleBoth: 12 & math.MultipleOf(2) & \
+         math.MultipleOf(3)\nmultipleBad: 10 & math.MultipleOf(3)\nzero: math.MultipleOf(5, \
+         0)\nsign: math.Signbit(-4)\npow10: math.Pow10(4)\npow10Neg: math.Pow10(-2)\n",
+    )?;
+    assert_eq!(
+        EvaluatedValue::Number(
+            "3.14159265358979323846264338327950288419716939937510582097494459".to_owned(),
+        ),
+        math_value.lookup_path(&["pi"])?.evaluate()?,
+    );
+    assert_eq!(
+        EvaluatedValue::Number("4294967295".to_owned()),
+        math_value.lookup_path(&["maxPrec"])?.evaluate()?,
+    );
+    assert_eq!(
+        EvaluatedValue::Number("3".to_owned()),
+        math_value.lookup_path(&["floorPi"])?.evaluate()?,
+    );
+    assert_eq!(
+        EvaluatedValue::Number("-3".to_owned()),
+        math_value.lookup_path(&["floor"])?.evaluate()?,
+    );
+    assert_eq!(
+        EvaluatedValue::Number("-2".to_owned()),
+        math_value.lookup_path(&["ceil"])?.evaluate()?,
+    );
+    assert_eq!(
+        EvaluatedValue::Number("-2".to_owned()),
+        math_value.lookup_path(&["trunc"])?.evaluate()?,
+    );
+    assert_eq!(
+        EvaluatedValue::Number("-3".to_owned()),
+        math_value.lookup_path(&["round"])?.evaluate()?,
+    );
+    assert_eq!(
+        EvaluatedValue::Number("2".to_owned()),
+        math_value.lookup_path(&["even"])?.evaluate()?,
+    );
+    assert_eq!(
+        EvaluatedValue::Number("2.2".to_owned()),
+        math_value.lookup_path(&["abs"])?.evaluate()?,
+    );
+    assert_eq!(
+        EvaluatedValue::Bool(true),
+        math_value.lookup_path(&["multipleBool"])?.evaluate()?,
+    );
+    assert_eq!(
+        EvaluatedValue::Number("9".to_owned()),
+        math_value
+            .lookup_path(&["multipleConstraint"])?
+            .evaluate()?,
+    );
+    assert_eq!(
+        EvaluatedValue::Number("12".to_owned()),
+        math_value.lookup_path(&["multipleBoth"])?.evaluate()?,
+    );
+    assert!(
+        math_value
+            .lookup_path(&["multipleBad"])?
+            .validate(ValidateOptions::default())
+            .is_err(),
+    );
+    assert!(matches!(
+        math_value.lookup_path(&["zero"])?.evaluate()?,
+        EvaluatedValue::Bottom(_),
+    ));
+    assert_eq!(
+        EvaluatedValue::Bool(true),
+        math_value.lookup_path(&["sign"])?.evaluate()?,
+    );
+    assert_eq!(
+        EvaluatedValue::Number("10000".to_owned()),
+        math_value.lookup_path(&["pow10"])?.evaluate()?,
+    );
+    assert_eq!(
+        EvaluatedValue::Number("0.01".to_owned()),
+        math_value.lookup_path(&["pow10Neg"])?.evaluate()?,
+    );
     Ok(())
 }
 
