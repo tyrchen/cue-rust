@@ -1,5 +1,12 @@
 # Documentation Index
 
+## Guides
+
+- [User Guide](guides/user-guide.md)
+- [Developer Guide](guides/developer-guide.md)
+- [用户指南](guides/user-guide.zh-CN.md)
+- [开发指南](guides/developer-guide.zh-CN.md)
+
 ## Research
 
 - [Study: CUE Architecture and Rust Port Shape](research/study-cue-architecture.md)
