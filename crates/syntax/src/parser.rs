@@ -3,8 +3,9 @@
 use cue_rust_source::{Diagnostic, DiagnosticReport, Severity, Span};
 
 use crate::{
-    AstFile, Decl, Expr, FieldDecl, FieldMarker, ImportDecl, Label, LetDecl, PackageClause,
-    ParseConfig, ScanResult, Token, TokenKind, scan_bytes,
+    AstFile, ComprehensionClause, ComprehensionDecl, Decl, Expr, FieldDecl, FieldMarker,
+    ImportDecl, Label, LetDecl, PackageClause, ParseConfig, ScanResult, StringPart, Token,
+    TokenKind, scan_bytes,
 };
 
 /// Result of parsing source bytes.
@@ -201,6 +202,9 @@ impl<'tokens> Parser<'tokens> {
         if self.at(TokenKind::Let) {
             return self.parse_let();
         }
+        if self.at_keyword("if") || self.at_keyword("for") {
+            return self.parse_comprehension_decl();
+        }
         if self.at_label_start() {
             return self.parse_field();
         }
@@ -311,6 +315,30 @@ impl<'tokens> Parser<'tokens> {
                 || Label::Bad(self.current_span()),
                 |token| Label::String(token.text().to_owned(), token.span()),
             );
+        }
+        if self.at(TokenKind::LeftParen) {
+            let start = self.bump().map_or_else(|| self.current_span(), Token::span);
+            let expression = self.parse_expr(0);
+            let end = self
+                .expect_kind(
+                    TokenKind::RightParen,
+                    "cue.parse.expected_dynamic_label_close",
+                    "expected ')' after dynamic field label",
+                )
+                .unwrap_or_else(|| expression.span());
+            return Label::Dynamic(Box::new(expression), merge_span(start, end));
+        }
+        if self.at(TokenKind::LeftBracket) {
+            let start = self.bump().map_or_else(|| self.current_span(), Token::span);
+            let expression = self.parse_expr(0);
+            let end = self
+                .expect_kind(
+                    TokenKind::RightBracket,
+                    "cue.parse.expected_pattern_label_close",
+                    "expected ']' after pattern field label",
+                )
+                .unwrap_or_else(|| expression.span());
+            return Label::Pattern(Box::new(expression), merge_span(start, end));
         }
         self.error_here("cue.parse.expected_label", "expected field label");
         Label::Bad(self.current_span())
@@ -504,21 +532,28 @@ impl<'tokens> Parser<'tokens> {
 
     fn parse_primary(&mut self) -> Expr {
         match self.peek_kind() {
+            Some(TokenKind::Identifier) if self.at_keyword("if") || self.at_keyword("for") => {
+                self.parse_comprehension_expr()
+            }
             Some(TokenKind::Identifier) => self.parse_identifier_or_literal(),
             Some(TokenKind::Number) => self.bump().map_or_else(
                 || Expr::Bad(self.current_span()),
                 |token| Expr::Number(token.text().to_owned(), token.span()),
             ),
-            Some(TokenKind::String) => self.bump().map_or_else(
-                || Expr::Bad(self.current_span()),
-                |token| {
-                    if token.text().starts_with('\'') {
-                        Expr::Bytes(token.text().to_owned(), token.span())
-                    } else {
-                        Expr::String(token.text().to_owned(), token.span())
-                    }
-                },
-            ),
+            Some(TokenKind::String) => {
+                let Some(token) = self.bump() else {
+                    return Expr::Bad(self.current_span());
+                };
+                let text = token.text().to_owned();
+                let span = token.span();
+                if text.starts_with('\'') {
+                    Expr::Bytes(text, span)
+                } else if let Some(parts) = self.interpolation_parts(&text, span) {
+                    Expr::InterpolatedString { parts, span }
+                } else {
+                    Expr::String(text, span)
+                }
+            }
             Some(TokenKind::LeftBrace) => self.parse_struct(),
             Some(TokenKind::LeftBracket) => self.parse_list(),
             Some(TokenKind::LeftParen) => self.parse_parenthesized(),
@@ -645,6 +680,126 @@ impl<'tokens> Parser<'tokens> {
         }
     }
 
+    fn parse_comprehension_decl(&mut self) -> Decl {
+        let start = self.current_span();
+        let clauses = self.parse_comprehension_clauses();
+        let body_start = self
+            .expect_kind(
+                TokenKind::LeftBrace,
+                "cue.parse.expected_comprehension_body",
+                "expected '{' before comprehension body",
+            )
+            .unwrap_or(start);
+        let mut body = Vec::new();
+        while !self.at(TokenKind::RightBrace) && !self.at(TokenKind::Eof) {
+            self.skip_separators();
+            if !self.at(TokenKind::RightBrace) {
+                body.push(self.parse_decl());
+            }
+            self.skip_separators();
+        }
+        let end = self
+            .expect_kind(
+                TokenKind::RightBrace,
+                "cue.parse.expected_comprehension_body_close",
+                "expected '}' after comprehension body",
+            )
+            .unwrap_or(body_start);
+        Decl::Comprehension(ComprehensionDecl {
+            clauses,
+            body,
+            span: merge_span(start, end),
+        })
+    }
+
+    fn parse_comprehension_expr(&mut self) -> Expr {
+        let start = self.current_span();
+        let clauses = self.parse_comprehension_clauses();
+        let body_start = self
+            .expect_kind(
+                TokenKind::LeftBrace,
+                "cue.parse.expected_comprehension_body",
+                "expected '{' before comprehension body",
+            )
+            .unwrap_or(start);
+        let body = if self.at(TokenKind::RightBrace) {
+            Expr::Struct(Vec::new(), body_start)
+        } else {
+            self.parse_expr(0)
+        };
+        let end = self
+            .expect_kind(
+                TokenKind::RightBrace,
+                "cue.parse.expected_comprehension_body_close",
+                "expected '}' after comprehension body",
+            )
+            .unwrap_or_else(|| body.span());
+        Expr::Comprehension {
+            clauses,
+            body: Box::new(body),
+            span: merge_span(start, end),
+        }
+    }
+
+    fn parse_comprehension_clauses(&mut self) -> Vec<ComprehensionClause> {
+        let mut clauses = Vec::new();
+        loop {
+            if self.at_keyword("for") {
+                clauses.push(self.parse_for_clause());
+            } else if self.at_keyword("if") {
+                clauses.push(self.parse_if_clause());
+            } else {
+                break;
+            }
+        }
+        clauses
+    }
+
+    fn parse_for_clause(&mut self) -> ComprehensionClause {
+        let start = self.bump().map_or_else(|| self.current_span(), Token::span);
+        let first = self.parse_binding_name("cue.parse.expected_for_binding");
+        let (key, value) = if self.at(TokenKind::Comma) {
+            self.bump();
+            (
+                Some(first),
+                self.parse_binding_name("cue.parse.expected_for_value"),
+            )
+        } else {
+            (None, first)
+        };
+        if self.at_keyword("in") {
+            self.bump();
+        } else {
+            self.error_here(
+                "cue.parse.expected_for_in",
+                "expected `in` in for comprehension",
+            );
+        }
+        let source = self.parse_expr(0);
+        let span = merge_span(start, source.span());
+        ComprehensionClause::For {
+            key,
+            value,
+            source,
+            span,
+        }
+    }
+
+    fn parse_if_clause(&mut self) -> ComprehensionClause {
+        let start = self.bump().map_or_else(|| self.current_span(), Token::span);
+        let condition = self.parse_expr(0);
+        let span = merge_span(start, condition.span());
+        ComprehensionClause::If { condition, span }
+    }
+
+    fn parse_binding_name(&mut self, code: &'static str) -> String {
+        if self.at(TokenKind::Identifier) {
+            return self.bump().map_or("<bad>", Token::text).to_owned();
+        }
+        self.error_here(code, "expected comprehension binding name");
+        "<bad>".to_owned()
+    }
+
     fn infix_binding_power(&self) -> Option<(String, u8, u8)> {
         match self.peek_kind()? {
             TokenKind::Star => Some(("*".to_owned(), 9, 10)),
@@ -742,7 +897,12 @@ impl<'tokens> Parser<'tokens> {
     fn at_label_start(&self) -> bool {
         matches!(
             self.peek_kind(),
-            Some(TokenKind::Identifier | TokenKind::String)
+            Some(
+                TokenKind::Identifier
+                    | TokenKind::String
+                    | TokenKind::LeftParen
+                    | TokenKind::LeftBracket
+            )
         )
     }
 
@@ -763,7 +923,7 @@ impl<'tokens> Parser<'tokens> {
         if !self.at_label_start() {
             return None;
         }
-        let first_after_label = self.cursor.checked_add(1)?;
+        let first_after_label = self.after_label_offset(self.cursor)?;
         let next = self.tokens.get(first_after_label)?;
         if next.kind() == TokenKind::Operator && next.text() == "=" {
             return self.alias_marker_colon_offset(first_after_label.checked_add(1)?);
@@ -785,10 +945,16 @@ impl<'tokens> Parser<'tokens> {
 
     fn alias_marker_colon_offset(&self, label_index: usize) -> Option<usize> {
         let label = self.tokens.get(label_index)?;
-        if !matches!(label.kind(), TokenKind::Identifier | TokenKind::String) {
+        if !matches!(
+            label.kind(),
+            TokenKind::Identifier
+                | TokenKind::String
+                | TokenKind::LeftParen
+                | TokenKind::LeftBracket
+        ) {
             return None;
         }
-        let first_after_label = label_index.checked_add(1)?;
+        let first_after_label = self.after_label_offset(label_index)?;
         let next = self.tokens.get(first_after_label)?;
         if next.kind() == TokenKind::Colon {
             return Some(first_after_label);
@@ -805,8 +971,39 @@ impl<'tokens> Parser<'tokens> {
         None
     }
 
+    fn after_label_offset(&self, label_index: usize) -> Option<usize> {
+        match self.tokens.get(label_index)?.kind() {
+            TokenKind::LeftParen => {
+                self.after_balanced(label_index, TokenKind::LeftParen, TokenKind::RightParen)
+            }
+            TokenKind::LeftBracket => {
+                self.after_balanced(label_index, TokenKind::LeftBracket, TokenKind::RightBracket)
+            }
+            _ => label_index.checked_add(1),
+        }
+    }
+
+    fn after_balanced(&self, start: usize, open: TokenKind, close: TokenKind) -> Option<usize> {
+        let mut depth = 0_u32;
+        for (offset, token) in self.tokens.iter().enumerate().skip(start) {
+            if token.kind() == open {
+                depth = depth.saturating_add(1);
+            } else if token.kind() == close {
+                depth = depth.saturating_sub(1);
+                if depth == 0 {
+                    return offset.checked_add(1);
+                }
+            }
+        }
+        None
+    }
+
     fn at(&self, kind: TokenKind) -> bool {
         self.peek_kind() == Some(kind)
+    }
+
+    fn at_keyword(&self, keyword: &str) -> bool {
+        self.at(TokenKind::Identifier) && self.peek_text() == Some(keyword)
     }
 
     fn peek_kind(&self) -> Option<TokenKind> {
@@ -851,6 +1048,100 @@ impl<'tokens> Parser<'tokens> {
     fn bad_decl_at_current(&self) -> Decl {
         Decl::Bad(self.current_span())
     }
+
+    fn interpolation_parts(&mut self, literal: &str, span: Span) -> Option<Vec<StringPart>> {
+        let body = literal.strip_prefix('"')?.strip_suffix('"')?;
+        if !body.contains("\\(") {
+            return None;
+        }
+        let mut parts = Vec::new();
+        let mut literal_start = 0_usize;
+        let mut cursor = 0_usize;
+        while let Some(relative_start) = body.get(cursor..)?.find("\\(") {
+            let start = cursor.checked_add(relative_start)?;
+            if start > literal_start {
+                parts.push(StringPart::Text(body.get(literal_start..start)?.to_owned()));
+            }
+            let expression_start = start.checked_add(2)?;
+            let Some(expression_end) = interpolation_end(body, expression_start) else {
+                self.diagnostics.push(Diagnostic::new(
+                    Severity::Error,
+                    "cue.parse.unterminated_interpolation",
+                    "unterminated string interpolation",
+                    Some(span),
+                ));
+                return Some(vec![StringPart::Text(body.to_owned())]);
+            };
+            let expression_text = body.get(expression_start..expression_end)?.trim();
+            parts.push(StringPart::Expr(Box::new(
+                self.parse_interpolation_expression(expression_text, span),
+            )));
+            cursor = expression_end.checked_add(1)?;
+            literal_start = cursor;
+        }
+        if literal_start < body.len() {
+            parts.push(StringPart::Text(body.get(literal_start..)?.to_owned()));
+        }
+        Some(parts)
+    }
+
+    fn parse_interpolation_expression(&mut self, expression: &str, span: Span) -> Expr {
+        if expression.is_empty() {
+            self.diagnostics.push(Diagnostic::new(
+                Severity::Error,
+                "cue.parse.empty_interpolation",
+                "empty string interpolation",
+                Some(span),
+            ));
+            return Expr::Bad(span);
+        }
+        let source = format!("__cue_rs_interp: ({expression})\n");
+        let parsed = parse_bytes(
+            "__cue_rs_interp.cue",
+            source.as_bytes(),
+            ParseConfig::default(),
+        );
+        self.diagnostics
+            .extend(parsed.diagnostics().diagnostics().iter().cloned());
+        parsed
+            .ast()
+            .and_then(|ast| ast.declarations.first())
+            .and_then(|decl| match decl {
+                Decl::Field(field) => Some(field.value.clone()),
+                _ => None,
+            })
+            .unwrap_or(Expr::Bad(span))
+    }
+}
+
+fn interpolation_end(body: &str, expression_start: usize) -> Option<usize> {
+    let mut depth = 1_u32;
+    let mut quote = None;
+    let mut escaped = false;
+    for (offset, byte) in body.bytes().enumerate().skip(expression_start) {
+        if let Some(active_quote) = quote {
+            if escaped {
+                escaped = false;
+            } else if byte == b'\\' {
+                escaped = true;
+            } else if byte == active_quote {
+                quote = None;
+            }
+            continue;
+        }
+        match byte {
+            b'"' | b'\'' => quote = Some(byte),
+            b'(' => depth = depth.saturating_add(1),
+            b')' => {
+                depth = depth.saturating_sub(1);
+                if depth == 0 {
+                    return Some(offset);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
 }
 
 fn merge_span(start: Span, end: Span) -> Span {

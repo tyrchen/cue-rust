@@ -4,7 +4,7 @@
 #![warn(rust_2024_compatibility, missing_docs, missing_debug_implementations)]
 
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::{BTreeMap, BTreeSet, VecDeque},
     path::PathBuf,
     str,
 };
@@ -19,6 +19,7 @@ use typed_builder::TypedBuilder;
 
 const CUE_EXTENSION: &str = "cue";
 const MODULE_FILE: &str = "cue.mod/module.cue";
+const CUE_MOD_PKG_DIR: &str = "cue.mod/pkg";
 
 /// Package selector used by loader configuration.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -135,6 +136,7 @@ pub struct BuildInstance {
     root_dir: Option<Utf8PathBuf>,
     build_files: Vec<BuildFile>,
     files: Vec<AstFile>,
+    imports: BTreeMap<String, Vec<AstFile>>,
     data_files: Vec<DataFile>,
     direct_imports: Vec<String>,
     diagnostics: DiagnosticReport,
@@ -181,6 +183,17 @@ impl BuildInstance {
     #[must_use]
     pub fn files(&self) -> &[AstFile] {
         &self.files
+    }
+
+    /// Returns locally resolved imported package files.
+    #[must_use]
+    pub fn imports(&self) -> &BTreeMap<String, Vec<AstFile>> {
+        &self.imports
+    }
+
+    /// Replaces locally resolved imports.
+    pub fn set_imports(&mut self, imports: BTreeMap<String, Vec<AstFile>>) {
+        self.imports = imports;
     }
 
     /// Returns data files discovered by package arguments.
@@ -306,7 +319,9 @@ impl Loader {
         }
         self.push_tags(&mut cue_files)?;
 
-        let mut instance = self.build_instance(cue_files, data_files, allowed_root);
+        let mut instance = self
+            .build_instance(cue_files, data_files, allowed_root)
+            .await?;
         self.apply_package_selector(&mut instance)?;
         Ok(vec![instance])
     }
@@ -472,12 +487,12 @@ impl Loader {
         Ok(())
     }
 
-    fn build_instance(
+    async fn build_instance(
         &self,
         cue_files: Vec<LoadedSource>,
         data_files: Vec<DataFile>,
         root_dir: Utf8PathBuf,
-    ) -> BuildInstance {
+    ) -> Result<BuildInstance, LoadError> {
         let mut ast_files = Vec::with_capacity(cue_files.len());
         let mut build_files = Vec::with_capacity(cue_files.len());
         let mut diagnostics = DiagnosticReport::new();
@@ -500,16 +515,20 @@ impl Loader {
 
         let package_name = package_name_for(&ast_files);
         let direct_imports = collect_direct_imports(&ast_files);
-        BuildInstance {
+        let imports = self
+            .resolve_local_imports(&root_dir, &direct_imports, &mut diagnostics)
+            .await?;
+        Ok(BuildInstance {
             package_name,
             import_path: None,
             root_dir: Some(root_dir),
             build_files,
             files: ast_files,
+            imports,
             data_files,
             direct_imports,
             diagnostics,
-        }
+        })
     }
 
     async fn resolve_existing_path(
@@ -575,6 +594,72 @@ impl Loader {
         }
         Ok(())
     }
+
+    async fn resolve_local_imports(
+        &self,
+        root_dir: &Utf8PathBuf,
+        imports: &[String],
+        diagnostics: &mut DiagnosticReport,
+    ) -> Result<BTreeMap<String, Vec<AstFile>>, LoadError> {
+        let mut resolved = BTreeMap::new();
+        let mut visited = BTreeSet::new();
+        let mut pending = imports.iter().cloned().collect::<VecDeque<_>>();
+        while let Some(import) = pending.pop_front() {
+            let path = unquote_import_path(&import);
+            if is_builtin_import_path(&path) || !is_local_import_path(&path) {
+                continue;
+            }
+            if !visited.insert(path.clone()) {
+                continue;
+            }
+            let import_dir = root_dir.join(CUE_MOD_PKG_DIR).join(&path);
+            if !import_dir.exists() {
+                diagnostics.push(Diagnostic::new(
+                    Severity::Error,
+                    "cue.load.missing_local_import",
+                    format!("local import `{path}` was not found under {CUE_MOD_PKG_DIR}"),
+                    None,
+                ));
+                continue;
+            }
+            let mut sources = Vec::new();
+            self.collect_directory(&import_dir, root_dir, &mut sources, false)
+                .await?;
+            let mut ast_files = Vec::with_capacity(sources.len());
+            for source in sources {
+                let parsed = parse_bytes(
+                    source.name.as_str(),
+                    &source.content,
+                    self.config.parse_config,
+                );
+                diagnostics.extend(parsed.diagnostics().diagnostics().iter().cloned());
+                if let Some(ast) = parsed.ast() {
+                    ast_files.push(ast.clone());
+                }
+            }
+            if ast_files.is_empty() {
+                diagnostics.push(Diagnostic::new(
+                    Severity::Error,
+                    "cue.load.empty_local_import",
+                    format!("local import `{path}` has no CUE files"),
+                    None,
+                ));
+            } else {
+                for nested_import in collect_direct_imports(&ast_files) {
+                    let nested_path = unquote_import_path(&nested_import);
+                    if is_builtin_import_path(&nested_path)
+                        || !is_local_import_path(&nested_path)
+                        || visited.contains(&nested_path)
+                    {
+                        continue;
+                    }
+                    pending.push_back(nested_import);
+                }
+                resolved.insert(path, ast_files);
+            }
+        }
+        Ok(resolved)
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -598,6 +683,18 @@ fn package_name_for(files: &[AstFile]) -> Option<String> {
     files
         .iter()
         .find_map(|file| file.package.as_ref().map(|package| package.name.clone()))
+}
+
+fn unquote_import_path(path: &str) -> String {
+    path.trim_matches('"').to_owned()
+}
+
+fn is_builtin_import_path(path: &str) -> bool {
+    matches!(path, "list" | "strings")
+}
+
+fn is_local_import_path(path: &str) -> bool {
+    path.contains('.') || path.contains('/')
 }
 
 fn data_arg(arg: &Utf8PathBuf) -> Option<(String, Utf8PathBuf)> {
@@ -972,6 +1069,33 @@ mod tests {
         let instance = instances.first().ok_or("missing instance")?;
         assert_eq!(Some("p"), instance.package_name());
         assert_eq!(1, instance.files().len());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_should_resolve_module_local_imports() -> Result<(), Box<dyn Error>> {
+        let dir = fixture_dir().await?;
+        let import_dir = dir.join("cue.mod/pkg/example.com/lib");
+        let dep_dir = dir.join("cue.mod/pkg/example.com/dep");
+        fs::create_dir_all(&import_dir).await?;
+        fs::create_dir_all(&dep_dir).await?;
+        fs::write(
+            dir.join("main.cue"),
+            "package p\nimport \"example.com/lib\"\nout: lib.value\n",
+        )
+        .await?;
+        fs::write(
+            import_dir.join("lib.cue"),
+            "package lib\nimport \"example.com/dep\"\nvalue: dep.value + 1\n",
+        )
+        .await?;
+        fs::write(dep_dir.join("dep.cue"), "package dep\nvalue: 2\n").await?;
+        let loader = Loader::new(LoadConfig::builder().current_dir(Some(dir.clone())).build());
+        let instances = loader.load_args(&[Utf8PathBuf::from(".")]).await?;
+        let instance = instances.first().ok_or("missing instance")?;
+        assert!(instance.imports().contains_key("example.com/lib"));
+        assert!(instance.imports().contains_key("example.com/dep"));
+        assert!(!instance.diagnostics().has_errors());
         Ok(())
     }
 

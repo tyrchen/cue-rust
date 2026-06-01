@@ -78,6 +78,8 @@ pub enum Decl {
     Field(FieldDecl),
     /// Let declaration.
     Let(LetDecl),
+    /// Field or value comprehension declaration.
+    Comprehension(ComprehensionDecl),
     /// Ellipsis declaration.
     Ellipsis(Span),
     /// Recovery declaration.
@@ -102,6 +104,10 @@ impl Decl {
             Self::Let(let_decl) => {
                 lines.push(format!("{indent}let {}", let_decl.name));
                 let_decl.value.push_debug(lines, depth + 1);
+            }
+            Self::Comprehension(comprehension) => {
+                lines.push(format!("{indent}comprehension"));
+                comprehension.push_debug(lines, depth + 1);
             }
             Self::Ellipsis(_) => lines.push(format!("{indent}ellipsis")),
             Self::Bad(_) => lines.push(format!("{indent}bad_decl")),
@@ -156,6 +162,10 @@ pub enum Label {
     Identifier(String, Span),
     /// String literal label.
     String(String, Span),
+    /// Dynamic label, spelled `(expr):`.
+    Dynamic(Box<Expr>, Span),
+    /// Pattern label, spelled `[expr]:`.
+    Pattern(Box<Expr>, Span),
     /// Recovery label.
     Bad(Span),
 }
@@ -166,6 +176,8 @@ impl Label {
     pub fn display_name(&self) -> &str {
         match self {
             Self::Identifier(name, _) | Self::String(name, _) => name,
+            Self::Dynamic(_, _) => "<dynamic>",
+            Self::Pattern(_, _) => "<pattern>",
             Self::Bad(_) => "<bad>",
         }
     }
@@ -174,7 +186,79 @@ impl Label {
     #[must_use]
     pub fn span(&self) -> Span {
         match self {
-            Self::Identifier(_, span) | Self::String(_, span) | Self::Bad(span) => *span,
+            Self::Identifier(_, span)
+            | Self::String(_, span)
+            | Self::Dynamic(_, span)
+            | Self::Pattern(_, span)
+            | Self::Bad(span) => *span,
+        }
+    }
+}
+
+/// Field or value comprehension declaration.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ComprehensionDecl {
+    /// Ordered comprehension clauses.
+    pub clauses: Vec<ComprehensionClause>,
+    /// Declarations produced by the comprehension.
+    pub body: Vec<Decl>,
+    /// Source span.
+    pub span: Span,
+}
+
+impl ComprehensionDecl {
+    fn push_debug(&self, lines: &mut Vec<String>, depth: usize) {
+        for clause in &self.clauses {
+            clause.push_debug(lines, depth);
+        }
+        for declaration in &self.body {
+            declaration.push_debug(lines, depth);
+        }
+    }
+}
+
+/// One comprehension clause.
+#[derive(Clone, Debug, Eq, PartialEq)]
+#[non_exhaustive]
+pub enum ComprehensionClause {
+    /// `for key, value in source` or `for value in source`.
+    For {
+        /// Optional key binding name.
+        key: Option<String>,
+        /// Value binding name.
+        value: String,
+        /// Iterated source expression.
+        source: Expr,
+        /// Source span.
+        span: Span,
+    },
+    /// `if condition`.
+    If {
+        /// Condition expression.
+        condition: Expr,
+        /// Source span.
+        span: Span,
+    },
+}
+
+impl ComprehensionClause {
+    fn push_debug(&self, lines: &mut Vec<String>, depth: usize) {
+        let indent = "  ".repeat(depth);
+        match self {
+            Self::For {
+                key, value, source, ..
+            } => {
+                if let Some(key) = key {
+                    lines.push(format!("{indent}for {key}, {value}"));
+                } else {
+                    lines.push(format!("{indent}for {value}"));
+                }
+                source.push_debug(lines, depth + 1);
+            }
+            Self::If { condition, .. } => {
+                lines.push(format!("{indent}if"));
+                condition.push_debug(lines, depth + 1);
+            }
         }
     }
 }
@@ -189,6 +273,13 @@ pub enum Expr {
     Number(String, Span),
     /// String literal expression.
     String(String, Span),
+    /// Interpolated string expression.
+    InterpolatedString {
+        /// Interpolation parts.
+        parts: Vec<StringPart>,
+        /// Source span.
+        span: Span,
+    },
     /// Bytes literal expression.
     Bytes(String, Span),
     /// Boolean literal expression.
@@ -266,10 +357,29 @@ pub enum Expr {
     },
     /// Default marker expression.
     Default(Box<Expr>, Span),
+    /// List or value comprehension expression.
+    Comprehension {
+        /// Ordered comprehension clauses.
+        clauses: Vec<ComprehensionClause>,
+        /// Produced expression body.
+        body: Box<Expr>,
+        /// Source span.
+        span: Span,
+    },
     /// Ellipsis expression.
     Ellipsis(Span),
     /// Recovery expression.
     Bad(Span),
+}
+
+/// One interpolated string segment.
+#[derive(Clone, Debug, Eq, PartialEq)]
+#[non_exhaustive]
+pub enum StringPart {
+    /// Literal text segment after ordinary string escape decoding.
+    Text(String),
+    /// Embedded expression segment.
+    Expr(Box<Expr>),
 }
 
 impl Expr {
@@ -280,11 +390,13 @@ impl Expr {
             Self::Identifier(_, span)
             | Self::Number(_, span)
             | Self::String(_, span)
+            | Self::InterpolatedString { span, .. }
             | Self::Bytes(_, span)
             | Self::Bool(_, span)
             | Self::Null(span)
             | Self::Struct(_, span)
             | Self::Default(_, span)
+            | Self::Comprehension { span, .. }
             | Self::Ellipsis(span)
             | Self::Bad(span)
             | Self::List { span, .. }
@@ -303,6 +415,15 @@ impl Expr {
             Self::Identifier(name, _) => lines.push(format!("{indent}ident {name}")),
             Self::Number(value, _) => lines.push(format!("{indent}number {value}")),
             Self::String(value, _) => lines.push(format!("{indent}string {value}")),
+            Self::InterpolatedString { parts, .. } => {
+                lines.push(format!("{indent}interpolated_string"));
+                for part in parts {
+                    match part {
+                        StringPart::Text(value) => lines.push(format!("{indent}  text {value:?}")),
+                        StringPart::Expr(expr) => expr.push_debug(lines, depth + 1),
+                    }
+                }
+            }
             Self::Bytes(value, _) => lines.push(format!("{indent}bytes {value}")),
             Self::Bool(value, _) => lines.push(format!("{indent}bool {value}")),
             Self::Null(_) => lines.push(format!("{indent}null")),
@@ -364,6 +485,13 @@ impl Expr {
             Self::Default(expr, _) => {
                 lines.push(format!("{indent}default"));
                 expr.push_debug(lines, depth + 1);
+            }
+            Self::Comprehension { clauses, body, .. } => {
+                lines.push(format!("{indent}comprehension"));
+                for clause in clauses {
+                    clause.push_debug(lines, depth + 1);
+                }
+                body.push_debug(lines, depth + 1);
             }
             Self::Ellipsis(_) => lines.push(format!("{indent}ellipsis")),
             Self::Bad(_) => lines.push(format!("{indent}bad_expr")),

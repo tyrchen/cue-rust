@@ -221,8 +221,8 @@ pub enum BaseValue {
 pub enum SemanticExpr {
     /// Base value expression.
     Base(BaseValue),
-    /// Struct expression represented by field expressions.
-    Struct(Vec<FieldExpr>),
+    /// Struct expression represented by fields and comprehensions.
+    Struct(Vec<StructMember>),
     /// List expression represented by fixed prefix items and an optional open tail.
     List {
         /// Fixed prefix item expressions.
@@ -246,6 +246,11 @@ pub enum SemanticExpr {
     LetReference {
         /// Referenced let expression.
         expression: ExprId,
+    },
+    /// Runtime-local comprehension binding reference.
+    DynamicReference {
+        /// Binding name.
+        name: String,
     },
     /// Selector expression.
     Selector {
@@ -295,21 +300,86 @@ pub enum SemanticExpr {
     },
     /// Default marker expression.
     Default(ExprId),
+    /// Interpolated string expression.
+    InterpolatedString(Vec<StringSegment>),
+    /// List or value comprehension expression.
+    Comprehension(Comprehension),
     /// Bottom expression.
     Bottom(Bottom),
+}
+
+/// Member inside a semantic struct literal.
+#[derive(Clone, Debug, Eq, PartialEq)]
+#[non_exhaustive]
+pub enum StructMember {
+    /// Regular field member.
+    Field(FieldExpr),
+    /// Comprehension member.
+    Comprehension(Comprehension),
 }
 
 /// Field expression inside a semantic struct literal.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct FieldExpr {
-    /// Field feature.
-    pub feature: Feature,
+    /// Field label.
+    pub label: FieldLabel,
     /// Field metadata controlling presence and export visibility.
     pub metadata: FieldMetadata,
     /// Field value expression.
     pub expression: ExprId,
     /// Optional source span.
     pub span: Option<Span>,
+}
+
+/// Semantic field label.
+#[derive(Clone, Debug, Eq, PartialEq)]
+#[non_exhaustive]
+pub enum FieldLabel {
+    /// Static interned feature.
+    Static(Feature),
+    /// Dynamic label expression.
+    Dynamic(ExprId),
+    /// Pattern label expression.
+    Pattern(ExprId),
+}
+
+/// Segment in an interpolated string expression.
+#[derive(Clone, Debug, Eq, PartialEq)]
+#[non_exhaustive]
+pub enum StringSegment {
+    /// Literal string segment.
+    Text(String),
+    /// Embedded expression segment.
+    Expr(ExprId),
+}
+
+/// Semantic comprehension.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Comprehension {
+    /// Ordered clauses.
+    pub clauses: Vec<ComprehensionClause>,
+    /// Expression or struct body.
+    pub body: ExprId,
+}
+
+/// Semantic comprehension clause.
+#[derive(Clone, Debug, Eq, PartialEq)]
+#[non_exhaustive]
+pub enum ComprehensionClause {
+    /// Iteration clause.
+    For {
+        /// Optional key binding.
+        key: Option<String>,
+        /// Value binding.
+        value: String,
+        /// Iterated source expression.
+        source: ExprId,
+    },
+    /// Conditional clause.
+    If {
+        /// Condition expression.
+        condition: ExprId,
+    },
 }
 
 /// Field metadata shared by struct-literal fields and vertex arcs.

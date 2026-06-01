@@ -16,8 +16,9 @@ pub use cue_rust_eval::{
 pub use cue_rust_loader::{BuildInstance, LoadConfig, LoadError, Loader, PackageSelector};
 pub use cue_rust_source::{DiagnosticReport, SourceError, SourceFile, SourceLimits};
 pub use cue_rust_syntax::{
-    AstFile, Decl, Expr, FieldDecl, FieldMarker, ImportDecl, Label, LetDecl, PackageClause,
-    ParseConfig, ParseMode, ParseResult, ParsedSource, ScanResult, Token, TokenKind,
+    AstFile, ComprehensionClause, ComprehensionDecl, Decl, Expr, FieldDecl, FieldMarker,
+    ImportDecl, Label, LetDecl, PackageClause, ParseConfig, ParseMode, ParseResult, ParsedSource,
+    ScanResult, StringPart, Token, TokenKind,
 };
 use thiserror::Error;
 
@@ -173,7 +174,9 @@ impl Context {
         if let Some(ast) = parsed.ast() {
             files.push(ast.clone());
         }
-        let extended = BuildInstance::new(instance.package_name().map(ToOwned::to_owned), files);
+        let mut extended =
+            BuildInstance::new(instance.package_name().map(ToOwned::to_owned), files);
+        extended.set_imports(instance.imports().clone());
         self.build_instance(&extended)?
             .lookup_path(&["__cue_rs_expr"])
             .map_err(CueError::from)
@@ -453,6 +456,122 @@ mod tests {
         assert_eq!(
             EvaluatedValue::Number("1".to_owned()),
             value.lookup_path(&["x", "a"])?.evaluate()?,
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_should_evaluate_interpolation_dynamic_labels_and_comprehensions()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let context = Context::new();
+        let value = context.compile_source(
+            "phase9.cue",
+            "key: \"name\"\ninterp: \"1+1=\\(1+1), ok=\\(true)\"\ndynamic: {(key): \"cue\", \
+             \"\\(1)\": 1}\nsrc: {b: 1, c: 2}\ncomp: {for k, v in src {\"\\(k)\": v + 1}}\nlist: \
+             [3, for x in [2, 3] if x > 2 {x}]\nempty: [for x in [] {x}]\n",
+        )?;
+        assert_eq!(
+            EvaluatedValue::String("1+1=2, ok=true".to_owned()),
+            value.lookup_path(&["interp"])?.evaluate()?,
+        );
+        assert_eq!(
+            EvaluatedValue::String("cue".to_owned()),
+            value.lookup_path(&["dynamic", "name"])?.evaluate()?,
+        );
+        assert_eq!(
+            EvaluatedValue::Number("1".to_owned()),
+            value.lookup_path(&["dynamic", "1"])?.evaluate()?,
+        );
+        assert_eq!(
+            EvaluatedValue::Number("2".to_owned()),
+            value.lookup_path(&["comp", "b"])?.evaluate()?,
+        );
+        assert_eq!(
+            EvaluatedValue::List(vec![
+                EvaluatedValue::Number("3".to_owned()),
+                EvaluatedValue::Number("3".to_owned()),
+            ]),
+            value.lookup_path(&["list"])?.evaluate()?,
+        );
+        assert_eq!(
+            EvaluatedValue::List(Vec::new()),
+            value.lookup_path(&["empty"])?.evaluate()?,
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_should_evaluate_list_sort_constants_and_detect_cycles()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let context = Context::new();
+        let value = context.compile_source(
+            "phase9-list.cue",
+            "import \"list\"\nasc: list.Sort([2, 3, 1], list.Ascending)\ndesc: \
+             list.SortStable([\"a\", \"c\", \"b\"], list.Descending)\ncustom: list.Sort([{a: 2}, \
+             {a: 1}], {x: _, y: _, less: x.a < y.a})\ndup: list.Sort([{a: 1, i: 1}, {a: 1, i: \
+             2}], {x: _, y: _, less: x.a < y.a})\nok: list.IsSorted(asc, \
+             list.Ascending)\ncustomOk: list.IsSorted(custom, {x: _, y: _, less: x.a < \
+             y.a})\nbad: list.IsSorted([2, 1], list.Ascending)\nbadSchema: list.Sort([\"b\", \
+             \"a\"], {x: int, y: int, less: false})\ncycle: cycle\n",
+        )?;
+        assert_eq!(
+            number_list(&["1", "2", "3"]),
+            value.lookup_path(&["asc"])?.evaluate()?,
+        );
+        assert_eq!(
+            string_list(&["c", "b", "a"]),
+            value.lookup_path(&["desc"])?.evaluate()?,
+        );
+        let EvaluatedValue::List(custom) = value.lookup_path(&["custom"])?.evaluate()? else {
+            return Err("expected custom sort list".into());
+        };
+        let Some(EvaluatedValue::Struct(first)) = custom.first() else {
+            return Err("expected first custom sort item".into());
+        };
+        assert_eq!(
+            Some(&EvaluatedValue::Number("1".to_owned())),
+            first.get("a"),
+        );
+        let EvaluatedValue::List(dup) = value.lookup_path(&["dup"])?.evaluate()? else {
+            return Err("expected duplicate-key sort list".into());
+        };
+        let Some(EvaluatedValue::Struct(first_dup)) = dup.first() else {
+            return Err("expected first duplicate-key sort item".into());
+        };
+        let Some(EvaluatedValue::Struct(second_dup)) = dup.get(1) else {
+            return Err("expected second duplicate-key sort item".into());
+        };
+        assert_eq!(
+            Some(&EvaluatedValue::Number("1".to_owned())),
+            first_dup.get("i"),
+        );
+        assert_eq!(
+            Some(&EvaluatedValue::Number("2".to_owned())),
+            second_dup.get("i"),
+        );
+        assert_eq!(
+            EvaluatedValue::Bool(true),
+            value.lookup_path(&["ok"])?.evaluate()?,
+        );
+        assert_eq!(
+            EvaluatedValue::Bool(true),
+            value.lookup_path(&["customOk"])?.evaluate()?,
+        );
+        assert_eq!(
+            EvaluatedValue::Bool(false),
+            value.lookup_path(&["bad"])?.evaluate()?,
+        );
+        assert!(
+            value
+                .lookup_path(&["badSchema"])?
+                .validate(ValidateOptions::default())
+                .is_err(),
+        );
+        assert!(
+            value
+                .lookup_path(&["cycle"])?
+                .validate(ValidateOptions::default())
+                .is_err(),
         );
         Ok(())
     }
@@ -890,6 +1009,11 @@ mod tests {
     }
 
     #[test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "single broad stdlib regression test keeps related string builtin parity \
+                  assertions together"
+    )]
     fn test_should_evaluate_broad_strings_standard_library_surface()
     -> Result<(), Box<dyn std::error::Error>> {
         let context = Context::new();
@@ -911,7 +1035,10 @@ mod tests {
              1)\nbyteSlice: strings.ByteSlice(\"Hello\", 2, 5)\nsplitAfterTrailing: \
              strings.SplitAfter(\"a,\", \",\")\nsplitAfterNTrailing: strings.SplitAfterN(\"a,\", \
              \",\", 2)\ntoTitle: strings.ToTitle(\"alpha beta\")\ntoCamel: \
-             strings.ToCamel(\"Alpha Beta\")\n",
+             strings.ToCamel(\"Alpha Beta\")\nvalidatorMin: strings.MinRunes(3) & \
+             \"hello\"\nvalidatorMax: strings.MaxRunes(3) & \"foo\"\nvalidatorBad: \
+             strings.MaxRunes(3) & \"quux\"\nvalidatorCombined: strings.MinRunes(2) & \
+             strings.MaxRunes(5) & \"cue\"\nvalidatorBare: strings.MinRunes(3)\n",
         )?;
 
         assert_evaluated_path(&value, "compare", &EvaluatedValue::Number("-1".to_owned()))?;
@@ -967,6 +1094,29 @@ mod tests {
             "toCamel",
             &EvaluatedValue::String("alpha beta".to_owned()),
         )?;
+        assert_evaluated_path(
+            &value,
+            "validatorMin",
+            &EvaluatedValue::String("hello".to_owned()),
+        )?;
+        assert_evaluated_path(
+            &value,
+            "validatorMax",
+            &EvaluatedValue::String("foo".to_owned()),
+        )?;
+        assert!(matches!(
+            value.lookup_path(&["validatorBad"])?.evaluate()?,
+            EvaluatedValue::Bottom(_),
+        ));
+        assert_evaluated_path(
+            &value,
+            "validatorCombined",
+            &EvaluatedValue::String("cue".to_owned()),
+        )?;
+        assert_eq!(
+            ValueKind::String,
+            value.lookup_path(&["validatorBare"])?.kind()?
+        );
         Ok(())
     }
 

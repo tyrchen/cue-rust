@@ -184,6 +184,7 @@ async fn test_should_run_supported_upstream_core_eval_fixtures() -> TestResult {
     assert_upstream_escaping(&context, &root).await?;
     assert_upstream_definitions_and_export_profiles(&context, &root).await?;
     assert_upstream_alias_labels(&context, &root).await?;
+    assert_upstream_phase9_parity_tranche(&context, &root).await?;
     Ok(())
 }
 
@@ -506,6 +507,11 @@ async fn assert_upstream_aggregate_builtins(context: &Context, root: &Path) -> T
     Ok(())
 }
 
+#[allow(
+    clippy::too_many_lines,
+    reason = "vendor stdlib fixture assertions intentionally stay adjacent to the borrowed \
+              upstream archive checks"
+)]
 async fn assert_upstream_stdlib_surface_builtins(context: &Context, root: &Path) -> TestResult {
     let strings_gen =
         TxtarArchive::read(&root.join("vendors/cue/pkg/strings/testdata/gen.txtar")).await?;
@@ -513,13 +519,18 @@ async fn assert_upstream_stdlib_surface_builtins(context: &Context, root: &Path)
     assert!(strings_source.contains("strings.ByteAt"));
     assert!(strings_source.contains("strings.ByteSlice"));
     assert!(strings_source.contains("strings.SliceRunes"));
+    assert!(strings_source.contains("strings.MaxRunes(3) & \"foo\""));
 
     let strings_value = context.compile_source(
         "pkg/strings/gen/reduced.cue",
         "import \"strings\"\nbyteAt: strings.ByteAt(\"a\", 0)\nsliceRunes: strings.SliceRunes(\"✓ \
          Hello\", 0, 3)\nbyteSlice: strings.ByteSlice(\"Hello\", 2, 5)\nrunes: \
          strings.Runes(\"Café\")\ntrimPrefix: strings.TrimPrefix(\"cue-rust\", \
-         \"cue-\")\nreplace: strings.Replace(\"banana\", \"na\", \"NA\", 1)\n",
+         \"cue-\")\nreplace: strings.Replace(\"banana\", \"na\", \"NA\", 1)\nvalidator: \
+         strings.MaxRunes(3) & \"foo\"\nvalidatorRegex: strings.MinRunes(2) & =~\"^fo\" & \
+         \"foo\"\nvalidatorMultiRegex: =~\"^f\" & =~\"o$\" & strings.MinRunes(3) & \
+         \"foo\"\nvalidatorBad: strings.MinRunes(10) & \"hello\"\nvalidatorRegexBad: \
+         strings.MaxRunes(3) & =~\"^ba\" & \"foo\"\n",
     )?;
     assert_eq!(
         EvaluatedValue::Number("97".to_owned()),
@@ -550,18 +561,51 @@ async fn assert_upstream_stdlib_surface_builtins(context: &Context, root: &Path)
         EvaluatedValue::String("baNAna".to_owned()),
         strings_value.lookup_path(&["replace"])?.evaluate()?,
     );
+    assert_eq!(
+        EvaluatedValue::String("foo".to_owned()),
+        strings_value.lookup_path(&["validator"])?.evaluate()?,
+    );
+    assert_eq!(
+        EvaluatedValue::String("foo".to_owned()),
+        strings_value.lookup_path(&["validatorRegex"])?.evaluate()?,
+    );
+    assert_eq!(
+        EvaluatedValue::String("foo".to_owned()),
+        strings_value
+            .lookup_path(&["validatorMultiRegex"])?
+            .evaluate()?,
+    );
+    assert!(
+        strings_value
+            .lookup_path(&["validatorBad"])?
+            .validate(ValidateOptions::default())
+            .is_err(),
+    );
+    assert!(
+        strings_value
+            .lookup_path(&["validatorRegexBad"])?
+            .validate(ValidateOptions::default())
+            .is_err(),
+    );
 
     let list_gen =
         TxtarArchive::read(&root.join("vendors/cue/pkg/list/testdata/gen.txtar")).await?;
     let list_source = list_gen.file("in.cue")?;
     assert!(list_source.contains("list.FlattenN"));
     assert!(list_source.contains("list.SortStrings"));
+    assert!(list_source.contains("list.Sort([2, 3, 1, 4]"));
 
     let list_value = context.compile_source(
         "pkg/list/gen/reduced.cue",
         "import \"list\"\nflatten: list.FlattenN([1, [[2, 3], []], [4]], 2)\nrange: list.Range(0, \
-         5, 2)\nsorted: list.SortStrings([\"b\", \"a\"])\nsum: list.Sum([1, 2, 3, 4])\navg: \
-         list.Avg([4, 8, 12])\n",
+         5, 2)\nsorted: list.SortStrings([\"b\", \"a\"])\nsortNumbers: list.Sort([2, 3, 1, 4], \
+         list.Ascending)\ndir: list.Ascending\nsortAlias: list.Sort([2, 1], dir)\ncmp: {x: _, y: \
+         _, less: x.a < y.a}\nsortCustom: list.Sort([{a: 2}, {a: 1}], {x: _, y: _, less: x.a < \
+         y.a})\nsortNamed: list.Sort([{a: 2}, {a: 1}], cmp)\nsortStableDup: list.Sort([{a: 1, i: \
+         1}, {a: 1, i: 2}], cmp)\nsortDesc: list.SortStable([\"a\", \"c\", \"b\"], \
+         list.Descending)\nisSorted: list.IsSorted([1, 2, 3], list.Ascending)\nisSortedAlias: \
+         list.IsSorted([1, 2, 3], dir)\ninvalidSort: list.Sort([2, 1], {x: _, y: _, less: \
+         \"bad\"})\nsum: list.Sum([1, 2, 3, 4])\navg: list.Avg([4, 8, 12])\n",
     )?;
     assert_eq!(
         EvaluatedValue::List(vec![
@@ -588,12 +632,219 @@ async fn assert_upstream_stdlib_surface_builtins(context: &Context, root: &Path)
         list_value.lookup_path(&["sorted"])?.evaluate()?,
     );
     assert_eq!(
+        EvaluatedValue::List(vec![
+            EvaluatedValue::Number("1".to_owned()),
+            EvaluatedValue::Number("2".to_owned()),
+            EvaluatedValue::Number("3".to_owned()),
+            EvaluatedValue::Number("4".to_owned()),
+        ]),
+        list_value.lookup_path(&["sortNumbers"])?.evaluate()?,
+    );
+    assert_eq!(
+        EvaluatedValue::List(vec![
+            EvaluatedValue::Number("1".to_owned()),
+            EvaluatedValue::Number("2".to_owned()),
+        ]),
+        list_value.lookup_path(&["sortAlias"])?.evaluate()?,
+    );
+    let EvaluatedValue::List(sort_custom) = list_value.lookup_path(&["sortCustom"])?.evaluate()?
+    else {
+        return Err("expected custom sort list".into());
+    };
+    let Some(EvaluatedValue::Struct(first)) = sort_custom.first() else {
+        return Err("expected first custom sort item".into());
+    };
+    assert_eq!(
+        Some(&EvaluatedValue::Number("1".to_owned())),
+        first.get("a"),
+    );
+    let EvaluatedValue::List(sort_named) = list_value.lookup_path(&["sortNamed"])?.evaluate()?
+    else {
+        return Err("expected named custom sort list".into());
+    };
+    let Some(EvaluatedValue::Struct(first_named)) = sort_named.first() else {
+        return Err("expected first named custom sort item".into());
+    };
+    assert_eq!(
+        Some(&EvaluatedValue::Number("1".to_owned())),
+        first_named.get("a"),
+    );
+    let EvaluatedValue::List(sort_stable_dup) =
+        list_value.lookup_path(&["sortStableDup"])?.evaluate()?
+    else {
+        return Err("expected stable duplicate-key sort list".into());
+    };
+    let Some(EvaluatedValue::Struct(first_dup)) = sort_stable_dup.first() else {
+        return Err("expected first stable duplicate-key sort item".into());
+    };
+    let Some(EvaluatedValue::Struct(second_dup)) = sort_stable_dup.get(1) else {
+        return Err("expected second stable duplicate-key sort item".into());
+    };
+    assert_eq!(
+        Some(&EvaluatedValue::Number("1".to_owned())),
+        first_dup.get("i"),
+    );
+    assert_eq!(
+        Some(&EvaluatedValue::Number("2".to_owned())),
+        second_dup.get("i"),
+    );
+    assert_eq!(
+        EvaluatedValue::List(vec![
+            EvaluatedValue::String("c".to_owned()),
+            EvaluatedValue::String("b".to_owned()),
+            EvaluatedValue::String("a".to_owned()),
+        ]),
+        list_value.lookup_path(&["sortDesc"])?.evaluate()?,
+    );
+    assert_eq!(
+        EvaluatedValue::Bool(true),
+        list_value.lookup_path(&["isSorted"])?.evaluate()?,
+    );
+    assert_eq!(
+        EvaluatedValue::Bool(true),
+        list_value.lookup_path(&["isSortedAlias"])?.evaluate()?,
+    );
+    assert!(
+        list_value
+            .lookup_path(&["invalidSort"])?
+            .validate(ValidateOptions::default())
+            .is_err(),
+    );
+    assert_eq!(
         EvaluatedValue::Number("10".to_owned()),
         list_value.lookup_path(&["sum"])?.evaluate()?,
     );
     assert_eq!(
         EvaluatedValue::Number("8".to_owned()),
         list_value.lookup_path(&["avg"])?.evaluate()?,
+    );
+    Ok(())
+}
+
+async fn assert_upstream_phase9_parity_tranche(context: &Context, root: &Path) -> TestResult {
+    assert_upstream_interpolation_parity(context, root).await?;
+    assert_upstream_comprehension_parity(context, root).await?;
+    assert_upstream_dynamic_field_parity(context, root).await?;
+    assert_pattern_field_parity(context)?;
+    Ok(())
+}
+
+async fn assert_upstream_interpolation_parity(context: &Context, root: &Path) -> TestResult {
+    let interpolation =
+        TxtarArchive::read(&root.join("vendors/cue/cue/testdata/interpolation/scalars.txtar"))
+            .await?;
+    assert!(
+        interpolation
+            .file("in.cue")?
+            .contains("\"1+1=2:  \\(true)\"")
+    );
+    let interpolated = context.compile_source(
+        "interpolation/scalars/reduced.cue",
+        "n: \"\\(1) \\(2.00)\"\nb: \"1+1=2:  \\(true)\"\n",
+    )?;
+    assert_eq!(
+        EvaluatedValue::String("1 2.00".to_owned()),
+        interpolated.lookup_path(&["n"])?.evaluate()?,
+    );
+    assert_eq!(
+        EvaluatedValue::String("1+1=2:  true".to_owned()),
+        interpolated.lookup_path(&["b"])?.evaluate()?,
+    );
+    Ok(())
+}
+
+async fn assert_upstream_comprehension_parity(context: &Context, root: &Path) -> TestResult {
+    let comprehensions =
+        TxtarArchive::read(&root.join("vendors/cue/cue/testdata/comprehensions/for.txtar")).await?;
+    assert!(comprehensions.file("in.cue")?.contains("for k, v in a"));
+    let comprehension_value = context.compile_source(
+        "comprehensions/for/reduced.cue",
+        "a: {b: 1, c: 2}\nb: {for k, v in a {\"\\(k)\": v + 1}}\nempty: {for k, v in {} \
+         {\"\\(k)\": v}}\nlistStructs: [for x in [1, 2] {{a: x}}]\nbad: [for x in 1 {x}]\n",
+    )?;
+    assert_eq!(
+        EvaluatedValue::Number("2".to_owned()),
+        comprehension_value.lookup_path(&["b", "b"])?.evaluate()?,
+    );
+    assert_eq!(
+        ValueKind::Struct,
+        comprehension_value.lookup_path(&["empty"])?.kind()?,
+    );
+    let EvaluatedValue::List(list_structs) = comprehension_value
+        .lookup_path(&["listStructs"])?
+        .evaluate()?
+    else {
+        return Err("expected list-valued struct comprehension".into());
+    };
+    assert_eq!(2, list_structs.len());
+    assert!(
+        comprehension_value
+            .lookup_path(&["bad"])?
+            .validate(ValidateOptions::default())
+            .is_err(),
+    );
+    Ok(())
+}
+
+async fn assert_upstream_dynamic_field_parity(context: &Context, root: &Path) -> TestResult {
+    let dynamic =
+        TxtarArchive::read(&root.join("vendors/cue/cue/testdata/eval/dynamic_field.txtar")).await?;
+    assert!(dynamic.file("in.cue")?.contains("(x):"));
+    let dynamic_value = context.compile_source(
+        "eval/dynamic_field/reduced.cue",
+        "k: \"field\"\nout: {(k): 1, \"\\(2)\": 2}\nbad: {(1): 1}\n",
+    )?;
+    assert_eq!(
+        EvaluatedValue::Number("1".to_owned()),
+        dynamic_value.lookup_path(&["out", "field"])?.evaluate()?,
+    );
+    assert_eq!(
+        EvaluatedValue::Number("2".to_owned()),
+        dynamic_value.lookup_path(&["out", "2"])?.evaluate()?,
+    );
+    assert!(
+        dynamic_value
+            .lookup_path(&["bad"])?
+            .validate(ValidateOptions::default())
+            .is_err(),
+    );
+    Ok(())
+}
+
+fn assert_pattern_field_parity(context: &Context) -> TestResult {
+    let pattern_value = context.compile_source(
+        "eval/pattern_field/reduced.cue",
+        "topBad: {[string]: int, a: \"x\"}\nok: {[string]: int, a: 1}\nbad: {[string]: int, a: \
+         \"x\"}\ncrossBad: {[string]: int} & {a: \"x\"}\nregex: {[=~\"^a\"]: string, apple: \
+         \"ok\", banana: 1}\n",
+    )?;
+    assert_eq!(
+        EvaluatedValue::Number("1".to_owned()),
+        pattern_value.lookup_path(&["ok", "a"])?.evaluate()?,
+    );
+    assert!(
+        pattern_value
+            .lookup_path(&["topBad"])?
+            .validate(ValidateOptions::default())
+            .is_err(),
+    );
+    assert!(
+        pattern_value
+            .lookup_path(&["bad"])?
+            .validate(ValidateOptions::default())
+            .is_err(),
+    );
+    assert!(
+        pattern_value
+            .lookup_path(&["crossBad"])?
+            .validate(ValidateOptions::default())
+            .is_err(),
+    );
+    assert!(
+        pattern_value
+            .lookup_path(&["regex"])?
+            .validate(ValidateOptions::default())
+            .is_ok(),
     );
     Ok(())
 }

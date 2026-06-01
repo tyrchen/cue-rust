@@ -12,7 +12,8 @@ mod ast;
 mod parser;
 
 pub use ast::{
-    AstFile, Decl, Expr, FieldDecl, FieldMarker, ImportDecl, Label, LetDecl, PackageClause,
+    AstFile, ComprehensionClause, ComprehensionDecl, Decl, Expr, FieldDecl, FieldMarker,
+    ImportDecl, Label, LetDecl, PackageClause, StringPart,
 };
 pub use parser::{ParseResult, parse_bytes};
 

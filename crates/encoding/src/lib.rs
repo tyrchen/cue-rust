@@ -5,7 +5,10 @@
 
 use std::{str, str::FromStr};
 
-use cue_rust_eval::{EvalError, EvaluatedValue, ExportOptions, ValidateOptions, Value};
+use cue_rust_eval::{
+    EvalError, EvaluatedValue, ExportOptions, StringConstraint, StringConstraintSet,
+    ValidateOptions, Value,
+};
 use cue_rust_source::SourceLimits;
 use noyalib::{Mapping as YamlMapping, Number as YamlNumber, Value as YamlValue};
 use serde_json::{Map as JsonMap, Number as JsonNumber, Value as JsonValue};
@@ -341,7 +344,9 @@ fn evaluated_to_json(value: EvaluatedValue) -> Result<JsonValue, EncodeError> {
             .map_err(|_| unsupported_error(Encoding::Json, "invalid JSON number")),
         EvaluatedValue::String(value) => Ok(JsonValue::String(value)),
         EvaluatedValue::Bytes(_) => unsupported(Encoding::Json, "bytes require binary encoding"),
-        EvaluatedValue::Struct(values) | EvaluatedValue::ClosedStruct(values) => {
+        EvaluatedValue::Struct(values)
+        | EvaluatedValue::PatternedStruct { fields: values, .. }
+        | EvaluatedValue::ClosedStruct(values) => {
             let mut object = JsonMap::new();
             for (key, value) in values {
                 object.insert(key, evaluated_to_json(value)?);
@@ -355,8 +360,12 @@ fn evaluated_to_json(value: EvaluatedValue) -> Result<JsonValue, EncodeError> {
             .map(JsonValue::Array),
         EvaluatedValue::OpenList { .. } => unsupported(Encoding::Json, "incomplete open list"),
         EvaluatedValue::Kind(_) => unsupported(Encoding::Json, "incomplete kind constraint"),
+        EvaluatedValue::Builtin(_) => unsupported(Encoding::Json, "incomplete builtin value"),
         EvaluatedValue::NumericConstraint(_) => {
             unsupported(Encoding::Json, "incomplete numeric constraint")
+        }
+        EvaluatedValue::StringConstraints(_) | EvaluatedValue::StringConstraintSet(_) => {
+            unsupported(Encoding::Json, "incomplete string constraint")
         }
         EvaluatedValue::RegexConstraint { .. } => {
             unsupported(Encoding::Json, "incomplete regex constraint")
@@ -367,6 +376,9 @@ fn evaluated_to_json(value: EvaluatedValue) -> Result<JsonValue, EncodeError> {
             "optional field constraint is not concrete data",
         ),
         EvaluatedValue::Disjunction(_) => unsupported(Encoding::Json, "incomplete disjunction"),
+        EvaluatedValue::ComprehensionItems(_) => {
+            unsupported(Encoding::Json, "unmaterialized comprehension items")
+        }
         EvaluatedValue::Bottom(bottom) => unsupported(Encoding::Json, bottom.message),
         _ => unsupported(Encoding::Json, "unsupported value"),
     }
@@ -380,7 +392,9 @@ fn evaluated_to_toml(value: EvaluatedValue) -> Result<TomlValue, EncodeError> {
         EvaluatedValue::Number(value) => number_to_toml(&value),
         EvaluatedValue::String(value) => Ok(TomlValue::String(value)),
         EvaluatedValue::Bytes(_) => unsupported(Encoding::Toml, "bytes require binary encoding"),
-        EvaluatedValue::Struct(values) | EvaluatedValue::ClosedStruct(values) => {
+        EvaluatedValue::Struct(values)
+        | EvaluatedValue::PatternedStruct { fields: values, .. }
+        | EvaluatedValue::ClosedStruct(values) => {
             let mut table = TomlTable::new();
             for (key, value) in values {
                 table.insert(key, evaluated_to_toml(value)?);
@@ -394,8 +408,12 @@ fn evaluated_to_toml(value: EvaluatedValue) -> Result<TomlValue, EncodeError> {
             .map(TomlValue::Array),
         EvaluatedValue::OpenList { .. } => unsupported(Encoding::Toml, "incomplete open list"),
         EvaluatedValue::Kind(_) => unsupported(Encoding::Toml, "incomplete kind constraint"),
+        EvaluatedValue::Builtin(_) => unsupported(Encoding::Toml, "incomplete builtin value"),
         EvaluatedValue::NumericConstraint(_) => {
             unsupported(Encoding::Toml, "incomplete numeric constraint")
+        }
+        EvaluatedValue::StringConstraints(_) | EvaluatedValue::StringConstraintSet(_) => {
+            unsupported(Encoding::Toml, "incomplete string constraint")
         }
         EvaluatedValue::RegexConstraint { .. } => {
             unsupported(Encoding::Toml, "incomplete regex constraint")
@@ -406,6 +424,9 @@ fn evaluated_to_toml(value: EvaluatedValue) -> Result<TomlValue, EncodeError> {
             "optional field constraint is not concrete data",
         ),
         EvaluatedValue::Disjunction(_) => unsupported(Encoding::Toml, "incomplete disjunction"),
+        EvaluatedValue::ComprehensionItems(_) => {
+            unsupported(Encoding::Toml, "unmaterialized comprehension items")
+        }
         EvaluatedValue::Bottom(bottom) => unsupported(Encoding::Toml, bottom.message),
         _ => unsupported(Encoding::Toml, "unsupported value"),
     }
@@ -419,7 +440,9 @@ fn evaluated_to_yaml(value: EvaluatedValue) -> Result<YamlValue, EncodeError> {
         EvaluatedValue::Number(value) => number_to_yaml(&value),
         EvaluatedValue::String(value) => Ok(YamlValue::String(value)),
         EvaluatedValue::Bytes(_) => unsupported(Encoding::Yaml, "bytes require binary encoding"),
-        EvaluatedValue::Struct(values) | EvaluatedValue::ClosedStruct(values) => {
+        EvaluatedValue::Struct(values)
+        | EvaluatedValue::PatternedStruct { fields: values, .. }
+        | EvaluatedValue::ClosedStruct(values) => {
             let entries = values
                 .into_iter()
                 .map(|(key, value)| evaluated_to_yaml(value).map(|value| (key, value)))
@@ -433,8 +456,12 @@ fn evaluated_to_yaml(value: EvaluatedValue) -> Result<YamlValue, EncodeError> {
             .map(YamlValue::Sequence),
         EvaluatedValue::OpenList { .. } => unsupported(Encoding::Yaml, "incomplete open list"),
         EvaluatedValue::Kind(_) => unsupported(Encoding::Yaml, "incomplete kind constraint"),
+        EvaluatedValue::Builtin(_) => unsupported(Encoding::Yaml, "incomplete builtin value"),
         EvaluatedValue::NumericConstraint(_) => {
             unsupported(Encoding::Yaml, "incomplete numeric constraint")
+        }
+        EvaluatedValue::StringConstraints(_) | EvaluatedValue::StringConstraintSet(_) => {
+            unsupported(Encoding::Yaml, "incomplete string constraint")
         }
         EvaluatedValue::RegexConstraint { .. } => {
             unsupported(Encoding::Yaml, "incomplete regex constraint")
@@ -445,6 +472,9 @@ fn evaluated_to_yaml(value: EvaluatedValue) -> Result<YamlValue, EncodeError> {
             "optional field constraint is not concrete data",
         ),
         EvaluatedValue::Disjunction(_) => unsupported(Encoding::Yaml, "incomplete disjunction"),
+        EvaluatedValue::ComprehensionItems(_) => {
+            unsupported(Encoding::Yaml, "unmaterialized comprehension items")
+        }
         EvaluatedValue::Bottom(bottom) => unsupported(Encoding::Yaml, bottom.message),
         _ => unsupported(Encoding::Yaml, "unsupported value"),
     }
@@ -489,9 +519,9 @@ fn format_cue_value(value: &EvaluatedValue) -> String {
         EvaluatedValue::Number(value) => value.clone(),
         EvaluatedValue::String(value) => format!("{value:?}"),
         EvaluatedValue::Bytes(value) => format_cue_bytes(value),
-        EvaluatedValue::Struct(fields) | EvaluatedValue::ClosedStruct(fields) => {
-            format_cue_struct(fields)
-        }
+        EvaluatedValue::Struct(fields)
+        | EvaluatedValue::PatternedStruct { fields, .. }
+        | EvaluatedValue::ClosedStruct(fields) => format_cue_struct(fields),
         EvaluatedValue::List(values) => {
             let rendered = values
                 .iter()
@@ -502,6 +532,7 @@ fn format_cue_value(value: &EvaluatedValue) -> String {
         }
         EvaluatedValue::OpenList { items, tail } => format_cue_open_list(items, tail),
         EvaluatedValue::Kind(kind) => kind.to_string(),
+        EvaluatedValue::Builtin(name) => name.clone(),
         EvaluatedValue::NumericConstraint(bounds) => bounds
             .iter()
             .map(|bound| {
@@ -510,6 +541,14 @@ fn format_cue_value(value: &EvaluatedValue) -> String {
             })
             .collect::<Vec<_>>()
             .join(" & "),
+        EvaluatedValue::StringConstraints(constraints) => constraints
+            .iter()
+            .map(format_cue_string_constraint)
+            .collect::<Vec<_>>()
+            .join(" & "),
+        EvaluatedValue::StringConstraintSet(constraints) => {
+            format_cue_string_constraint_set(constraints)
+        }
         EvaluatedValue::RegexConstraint { pattern, negated } => {
             let op = if *negated { "!~" } else { "=~" };
             format!("{op}{pattern:?}")
@@ -528,9 +567,34 @@ fn format_cue_value(value: &EvaluatedValue) -> String {
             })
             .collect::<Vec<_>>()
             .join(" | "),
+        EvaluatedValue::ComprehensionItems(items) => {
+            let rendered = items
+                .iter()
+                .map(format_cue_value)
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!("[{rendered}]")
+        }
         EvaluatedValue::Bottom(bottom) => format!("_|_({:?})", bottom.message),
         _ => "_|_(\"unsupported value\")".to_owned(),
     }
+}
+
+fn format_cue_string_constraint(constraint: &StringConstraint) -> String {
+    format!("{}({})", constraint.op.builtin_name(), constraint.limit)
+}
+
+fn format_cue_string_constraint_set(constraints: &StringConstraintSet) -> String {
+    let mut rendered = constraints
+        .runes
+        .iter()
+        .map(format_cue_string_constraint)
+        .collect::<Vec<_>>();
+    rendered.extend(constraints.regexes.iter().map(|regex| {
+        let op = if regex.negated { "!~" } else { "=~" };
+        format!("{op}{:?}", regex.pattern)
+    }));
+    rendered.join(" & ")
 }
 
 fn format_cue_open_list(items: &[EvaluatedValue], tail: &EvaluatedValue) -> String {

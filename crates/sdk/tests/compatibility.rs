@@ -1,12 +1,21 @@
 //! Compatibility dashboard generation.
 
-use std::{collections::BTreeMap, error::Error, path::PathBuf};
+use std::{
+    collections::BTreeMap,
+    error::Error,
+    path::PathBuf,
+    sync::atomic::{AtomicU64, Ordering},
+    time::{SystemTime, UNIX_EPOCH},
+};
 
 use cue_rust::{
-    Context, DecodeOptions, EncodeOptions, Encoding, ValidateOptions, decode_bytes, encode_value,
+    Context, DecodeOptions, EncodeOptions, Encoding, LoadConfig, ValidateOptions, decode_bytes,
+    encode_value,
 };
 use serde::Serialize;
 use tokio::fs;
+
+static NEXT_FIXTURE_ID: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Debug, Serialize)]
 struct CompatibilityReport {
@@ -41,7 +50,7 @@ async fn test_should_generate_compatibility_report() -> Result<(), Box<dyn Error
     push_semantic_cases(&context, &mut cases)?;
     push_encoding_cases(&context, &mut cases)?;
     push_security_cases(&mut cases);
-    push_known_gap_cases(&context, &mut cases);
+    push_known_gap_cases(&context, &mut cases).await?;
     assert_supported_cases_pass(&cases)?;
 
     let report = CompatibilityReport {
@@ -321,7 +330,10 @@ fn push_security_cases(cases: &mut Vec<CompatibilityCase>) {
     ));
 }
 
-fn push_known_gap_cases(context: &Context, cases: &mut Vec<CompatibilityCase>) {
+async fn push_known_gap_cases(
+    context: &Context,
+    cases: &mut Vec<CompatibilityCase>,
+) -> Result<(), Box<dyn Error>> {
     cases.push(supported_case(
         "compile/unsupported-import-diagnostic",
         "loader-gap",
@@ -330,37 +342,20 @@ fn push_known_gap_cases(context: &Context, cases: &mut Vec<CompatibilityCase>) {
             .is_err(),
     ));
 
-    cases.push(expected_gap_case(
+    let loader_passed = local_import_registry_case(context)
+        .await
+        .is_ok_and(|passed| passed);
+    cases.push(supported_case(
         "loader/import-registry",
         "loader-gap",
-        "registry imports are outside the Phase 9 local-loader compatibility subset",
+        loader_passed,
     ));
-    cases.push(expected_gap_case(
-        "stdlib/list-comparator-schema-surface",
-        "stdlib-gap",
-        "list.Sort, list.SortStable, list.IsSorted comparator schemas, package CUE constants, and \
-         partial-application validators need richer package values and evaluator hooks",
-    ));
-    cases.push(expected_gap_case(
-        "syntax/string-interpolation",
-        "parser-gap",
-        "scanner currently tokenizes strings as literals and does not split interpolation segments",
-    ));
-    cases.push(expected_gap_case(
-        "syntax/comprehensions",
-        "parser-gap",
-        "for/if comprehensions require dedicated AST and ADT forms before evaluation",
-    ));
-    cases.push(expected_gap_case(
-        "syntax/dynamic-labels",
-        "parser-gap",
-        "dynamic and pattern labels are not yet represented as first-class labels",
-    ));
+    push_phase9_parity_cases(context, cases);
     cases.push(expected_gap_case(
         "eval/cycle-scheduler",
         "semantic-gap",
-        "structural cycle detection still relies on depth limits instead of upstream-style \
-         scheduling",
+        "evaluation now uses an operation-local cycle cache; full upstream cycle scheduling still \
+         needs lazy disjunction/default fixpoint support",
     ));
     cases.push(expected_gap_case(
         "eval/closedness-patterns",
@@ -368,6 +363,206 @@ fn push_known_gap_cases(context: &Context, cases: &mut Vec<CompatibilityCase>) {
         "closedness is limited to close() and does not include definitions with pattern \
          constraints",
     ));
+    Ok(())
+}
+
+async fn local_import_registry_case(context: &Context) -> Result<bool, Box<dyn Error>> {
+    let root = fixture_dir().await?;
+    let import_dir = root.join("cue.mod/pkg/example.com/lib");
+    let dep_dir = root.join("cue.mod/pkg/example.com/dep");
+    fs::create_dir_all(&import_dir).await?;
+    fs::create_dir_all(&dep_dir).await?;
+    fs::write(
+        root.join("main.cue"),
+        "package p\nimport \"example.com/lib\"\nout: lib.value\n",
+    )
+    .await?;
+    fs::write(
+        import_dir.join("lib.cue"),
+        "package lib\nimport \"example.com/dep\"\nvalue: dep.value + 1\n",
+    )
+    .await?;
+    fs::write(dep_dir.join("dep.cue"), "package dep\nvalue: 2\n").await?;
+    let instances = context
+        .load(
+            LoadConfig::builder()
+                .current_dir(Some(root.clone()))
+                .module_root(Some(root))
+                .build(),
+            &[PathBuf::from(".").try_into()?],
+        )
+        .await?;
+    let Some(instance) = instances.first() else {
+        return Ok(false);
+    };
+    let value = context.build_instance(instance)?;
+    Ok(
+        value.lookup_path(&["out"])?.evaluate()?
+            == cue_rust::EvaluatedValue::Number("3".to_owned()),
+    )
+}
+
+fn push_phase9_parity_cases(context: &Context, cases: &mut Vec<CompatibilityCase>) {
+    let Ok(value) = context.compile_source(
+        "phase9-parity.cue",
+        "import \"list\"\nkey: \"name\"\ninterpolated: \"v=\\(1+1)\"\ndynamic: {(key): \
+         \"cue\"}\nsource: {b: 1, c: 2}\nfields: {for k, v in source {\"\\(k)\": v + 1}}\nitems: \
+         [for x in [1, 2, 3] if x > 1 {x}]\nsorted: list.Sort([2, 1], list.Ascending)\ndir: \
+         list.Ascending\nsortedAlias: list.Sort([2, 1], dir)\ncmp: {x: _, y: _, less: x.a < \
+         y.a}\ncustom: list.Sort([{a: 2}, {a: 1}], {x: _, y: _, less: x.a < y.a})\ncustomNamed: \
+         list.Sort([{a: 2}, {a: 1}], cmp)\nbadComparatorSchema: list.Sort([\"b\", \"a\"], {x: \
+         int, y: int, less: false})\npattern: {[string]: int, a: 1}\npatternBad: {[string]: int} \
+         & {a: \"bad\"}\ninvalidDynamic: {(1): 1}\ncycle: cycle\n",
+    ) else {
+        cases.push(supported_case("phase9/parity-tranche", "semantic", false));
+        return;
+    };
+
+    push_phase9_parser_cases(&value, cases);
+    push_phase9_list_cases(&value, cases);
+    push_phase9_semantic_cases(&value, cases);
+}
+
+fn push_phase9_parser_cases(value: &cue_rust::Value, cases: &mut Vec<CompatibilityCase>) {
+    let interpolation_passed = value
+        .lookup_path(&["interpolated"])
+        .and_then(|value| value.evaluate())
+        .is_ok_and(|value| value == cue_rust::EvaluatedValue::String("v=2".to_owned()));
+    cases.push(supported_case(
+        "syntax/string-interpolation",
+        "parser-gap",
+        interpolation_passed,
+    ));
+
+    let dynamic_passed = value
+        .lookup_path(&["dynamic", "name"])
+        .and_then(|value| value.evaluate())
+        .is_ok_and(|value| value == cue_rust::EvaluatedValue::String("cue".to_owned()));
+    cases.push(supported_case(
+        "syntax/dynamic-labels",
+        "parser-gap",
+        dynamic_passed,
+    ));
+
+    let comprehension_passed = value
+        .lookup_path(&["fields", "b"])
+        .and_then(|value| value.evaluate())
+        .is_ok_and(|value| value == cue_rust::EvaluatedValue::Number("2".to_owned()))
+        && value
+            .lookup_path(&["items"])
+            .and_then(|value| value.evaluate())
+            .is_ok_and(|value| {
+                value
+                    == cue_rust::EvaluatedValue::List(vec![
+                        cue_rust::EvaluatedValue::Number("2".to_owned()),
+                        cue_rust::EvaluatedValue::Number("3".to_owned()),
+                    ])
+            });
+    cases.push(supported_case(
+        "syntax/comprehensions",
+        "parser-gap",
+        comprehension_passed,
+    ));
+}
+
+fn push_phase9_list_cases(value: &cue_rust::Value, cases: &mut Vec<CompatibilityCase>) {
+    let sort_passed = sorted_number_list_matches(value, "sorted", &["1", "2"]);
+    cases.push(supported_case(
+        "stdlib/list-sort-constants",
+        "stdlib-gap",
+        sort_passed,
+    ));
+
+    let sort_alias_passed = sorted_number_list_matches(value, "sortedAlias", &["1", "2"]);
+    cases.push(supported_case(
+        "stdlib/list-sort-constant-alias",
+        "stdlib-gap",
+        sort_alias_passed,
+    ));
+
+    let comparator_passed = custom_sort_field_order(value, "custom")
+        .is_ok_and(|actual| actual == vec!["1".to_owned(), "2".to_owned()])
+        && custom_sort_field_order(value, "customNamed")
+            .is_ok_and(|actual| actual == vec!["1".to_owned(), "2".to_owned()])
+        && value
+            .lookup_path(&["badComparatorSchema"])
+            .and_then(|value| value.validate(ValidateOptions::default()))
+            .is_err();
+    cases.push(supported_case(
+        "stdlib/list-comparator-schema-surface",
+        "stdlib-gap",
+        comparator_passed,
+    ));
+}
+
+fn push_phase9_semantic_cases(value: &cue_rust::Value, cases: &mut Vec<CompatibilityCase>) {
+    let pattern_passed = value
+        .lookup_path(&["pattern", "a"])
+        .and_then(|value| value.evaluate())
+        .is_ok_and(|value| value == cue_rust::EvaluatedValue::Number("1".to_owned()))
+        && value
+            .lookup_path(&["patternBad"])
+            .and_then(|value| value.validate(ValidateOptions::default()))
+            .is_err();
+    cases.push(supported_case(
+        "eval/pattern-label-constraints",
+        "semantic-gap",
+        pattern_passed,
+    ));
+
+    let invalid_dynamic_passed = value
+        .lookup_path(&["invalidDynamic"])
+        .and_then(|value| value.validate(ValidateOptions::default()))
+        .is_err();
+    cases.push(supported_case(
+        "eval/dynamic-label-type-check",
+        "semantic-gap",
+        invalid_dynamic_passed,
+    ));
+
+    let cycle_passed = value
+        .lookup_path(&["cycle"])
+        .and_then(|value| value.validate(ValidateOptions::default()))
+        .is_err();
+    cases.push(supported_case(
+        "eval/cycle-safe-cache",
+        "semantic-gap",
+        cycle_passed,
+    ));
+}
+
+fn sorted_number_list_matches(value: &cue_rust::Value, field: &str, expected: &[&str]) -> bool {
+    let expected = cue_rust::EvaluatedValue::List(
+        expected
+            .iter()
+            .map(|value| cue_rust::EvaluatedValue::Number((*value).to_owned()))
+            .collect(),
+    );
+    value
+        .lookup_path(&[field])
+        .and_then(|value| value.evaluate())
+        .is_ok_and(|value| value == expected)
+}
+
+fn custom_sort_field_order(
+    value: &cue_rust::Value,
+    field: &str,
+) -> Result<Vec<String>, Box<dyn Error>> {
+    let cue_rust::EvaluatedValue::List(items) = value.lookup_path(&[field])?.evaluate()? else {
+        return Err(format!("{field}: expected list").into());
+    };
+    items
+        .into_iter()
+        .map(|item| {
+            let cue_rust::EvaluatedValue::Struct(fields) = item else {
+                return Err(format!("{field}: expected struct item").into());
+            };
+            let Some(cue_rust::EvaluatedValue::Number(value)) = fields.get("a") else {
+                return Err(format!("{field}: missing numeric field a").into());
+            };
+            Ok(value.clone())
+        })
+        .collect()
 }
 
 fn supported_case(name: &'static str, category: &'static str, passed: bool) -> CompatibilityCase {
@@ -398,6 +593,15 @@ fn expected_gap_case(
 
 fn actual_status(passed: bool) -> &'static str {
     if passed { "pass" } else { "fail" }
+}
+
+async fn fixture_dir() -> Result<camino::Utf8PathBuf, Box<dyn Error>> {
+    let nanos = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
+    let suffix = NEXT_FIXTURE_ID.fetch_add(1, Ordering::Relaxed);
+    let path = std::env::temp_dir().join(format!("cue-rust-compat-{nanos}-{suffix}"));
+    fs::create_dir_all(&path).await?;
+    camino::Utf8PathBuf::from_path_buf(path)
+        .map_err(|path| format!("non-UTF-8 path: {}", path.display()).into())
 }
 
 fn assert_supported_cases_pass(cases: &[CompatibilityCase]) -> Result<(), Box<dyn Error>> {

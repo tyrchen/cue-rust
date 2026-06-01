@@ -31,4 +31,6 @@ Reference research: [CUE architecture study](../docs/research/study-cue-architec
 6. [Phase 9 open list implementation plan](93-phase9-open-list-impl-plan.md)
 7. [Phase 9 alias label implementation plan](94-phase9-alias-label-impl-plan.md)
 8. [Phase 9 stdlib surface implementation plan](95-phase9-stdlib-surface-impl-plan.md)
-9. [Key decisions](99-cue-rust-key-decisions.md)
+9. [Phase 9 string validator implementation plan](96-phase9-string-validator-impl-plan.md)
+10. [Phase 9 parity completion tranche implementation plan](97-phase9-parity-completion-tranche-impl-plan.md)
+11. [Key decisions](99-cue-rust-key-decisions.md)
