@@ -357,12 +357,6 @@ async fn push_known_gap_cases(
         "evaluation now uses an operation-local cycle cache; full upstream cycle scheduling still \
          needs lazy disjunction/default fixpoint support",
     ));
-    cases.push(expected_gap_case(
-        "eval/closedness-patterns",
-        "semantic-gap",
-        "closedness is limited to close() and does not include definitions with pattern \
-         constraints",
-    ));
     Ok(())
 }
 
@@ -412,7 +406,11 @@ fn push_phase9_parity_cases(context: &Context, cases: &mut Vec<CompatibilityCase
          y.a}\ncustom: list.Sort([{a: 2}, {a: 1}], {x: _, y: _, less: x.a < y.a})\ncustomNamed: \
          list.Sort([{a: 2}, {a: 1}], cmp)\nbadComparatorSchema: list.Sort([\"b\", \"a\"], {x: \
          int, y: int, less: false})\npattern: {[string]: int, a: 1}\npatternBad: {[string]: int} \
-         & {a: \"bad\"}\ninvalidDynamic: {(1): 1}\ncycle: cycle\n",
+         & {a: \"bad\"}\n#ClosedDef: {env: a: \"A\", env: b: \"B\"}\nclosedDefinitionBad: \
+         #ClosedDef & {env: c: \"C\"}\nclosedPatternOk: close({[=~\"^a\"]: string}) & {apple: \
+         \"ok\"}\nclosedPatternBad: close({[=~\"^a\"]: string}) & {banana: \
+         \"bad\"}\ncloseShallow: close({a: b: int}) & {a: c: int}\ninvalidDynamic: {(1): \
+         1}\ncycle: cycle\n",
     ) else {
         cases.push(supported_case("phase9/parity-tranche", "semantic", false));
         return;
@@ -508,6 +506,30 @@ fn push_phase9_semantic_cases(value: &cue_rust::Value, cases: &mut Vec<Compatibi
         "eval/pattern-label-constraints",
         "semantic-gap",
         pattern_passed,
+    ));
+
+    let closedness_passed = value
+        .lookup_path(&["closedDefinitionBad"])
+        .and_then(|value| value.validate(ValidateOptions::default()))
+        .is_err()
+        && value
+            .lookup_path(&["closedPatternOk", "apple"])
+            .and_then(|value| value.evaluate())
+            .is_ok_and(|value| value == cue_rust::EvaluatedValue::String("ok".to_owned()))
+        && value
+            .lookup_path(&["closedPatternBad"])
+            .and_then(|value| value.validate(ValidateOptions::default()))
+            .is_err()
+        && value.lookup_path(&["closeShallow"]).is_ok_and(|value| {
+            value
+                .lookup_path(&["a", "c"])
+                .and_then(|value| value.evaluate())
+                .is_ok_and(|value| value.kind() == cue_rust::ValueKind::Int)
+        });
+    cases.push(supported_case(
+        "eval/closedness-patterns",
+        "semantic-gap",
+        closedness_passed,
     ));
 
     let invalid_dynamic_passed = value

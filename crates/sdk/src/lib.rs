@@ -434,6 +434,42 @@ mod tests {
     }
 
     #[test]
+    fn test_should_apply_closedness_to_definitions_and_patterns()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let context = Context::new();
+        let value = context.compile_source(
+            "closedness.cue",
+            "#D: {env: a: \"A\", env: b: \"B\"}\nclosedDefinitionBad: #D & {env: c: \
+             \"C\"}\nclosedPatternOk: close({[=~\"^a\"]: string}) & {apple: \
+             \"ok\"}\nclosedPatternBad: close({[=~\"^a\"]: string}) & {banana: \
+             \"bad\"}\ncloseShallow: close({a: b: int}) & {a: c: int}\n",
+        )?;
+        assert!(
+            value
+                .lookup_path(&["closedDefinitionBad"])?
+                .validate(ValidateOptions::default())
+                .is_err()
+        );
+        assert_eq!(
+            EvaluatedValue::String("ok".to_owned()),
+            value
+                .lookup_path(&["closedPatternOk", "apple"])?
+                .evaluate()?
+        );
+        assert!(
+            value
+                .lookup_path(&["closedPatternBad"])?
+                .validate(ValidateOptions::default())
+                .is_err()
+        );
+        assert_eq!(
+            ValueKind::Int,
+            value.lookup_path(&["closeShallow", "a", "c"])?.kind()?,
+        );
+        Ok(())
+    }
+
+    #[test]
     fn test_should_allow_fields_to_shadow_predeclared_builtins()
     -> Result<(), Box<dyn std::error::Error>> {
         let context = Context::new();

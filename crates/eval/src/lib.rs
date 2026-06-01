@@ -146,6 +146,13 @@ pub enum EvaluatedValue {
     },
     /// Closed struct fields in deterministic order.
     ClosedStruct(IndexMap<String, EvaluatedValue>),
+    /// Closed struct fields plus pattern constraints that allow matching future fields.
+    ClosedPatternedStruct {
+        /// Concrete fields.
+        fields: IndexMap<String, EvaluatedValue>,
+        /// Pattern constraints that define allowed future fields.
+        patterns: Vec<StructPatternConstraint>,
+    },
     /// Optional field constraint included by an export profile.
     OptionalField(Box<EvaluatedValue>),
     /// List items.
@@ -198,9 +205,10 @@ impl EvaluatedValue {
             | Self::StringConstraints(_)
             | Self::StringConstraintSet(_) => ValueKind::String,
             Self::Bytes(_) => ValueKind::Bytes,
-            Self::Struct(_) | Self::PatternedStruct { .. } | Self::ClosedStruct(_) => {
-                ValueKind::Struct
-            }
+            Self::Struct(_)
+            | Self::PatternedStruct { .. }
+            | Self::ClosedStruct(_)
+            | Self::ClosedPatternedStruct { .. } => ValueKind::Struct,
             Self::List(_) | Self::OpenList { .. } | Self::ComprehensionItems(_) => ValueKind::List,
             Self::Kind(kind) => *kind,
             Self::OptionalField(value) | Self::Default(value) => value.kind(),
@@ -459,7 +467,8 @@ impl Value {
             current = current.resolve_defaults();
             let (EvaluatedValue::Struct(fields)
             | EvaluatedValue::PatternedStruct { fields, .. }
-            | EvaluatedValue::ClosedStruct(fields)) = current
+            | EvaluatedValue::ClosedStruct(fields)
+            | EvaluatedValue::ClosedPatternedStruct { fields, .. }) = current
             else {
                 return Err(EvalError::Diagnostics(single_diagnostic(
                     "cue.eval.invalid_lookup",
@@ -516,6 +525,7 @@ enum ComprehensionControl {
 struct StructAccumulator {
     fields: IndexMap<String, EvaluatedValue>,
     patterns: Vec<StructPatternConstraint>,
+    closed: bool,
 }
 
 impl<'runtime> Evaluator<'runtime> {
@@ -593,7 +603,9 @@ impl<'runtime> Evaluator<'runtime> {
             let mut accumulator = match value {
                 EvaluatedValue::Top
                 | EvaluatedValue::Struct(_)
-                | EvaluatedValue::PatternedStruct { .. } => into_struct_accumulator(value),
+                | EvaluatedValue::PatternedStruct { .. }
+                | EvaluatedValue::ClosedStruct(_)
+                | EvaluatedValue::ClosedPatternedStruct { .. } => into_struct_accumulator(value),
                 other => {
                     self.evaluating_vertices.remove(&vertex_id);
                     return Ok(conflict_bottom(
@@ -619,9 +631,25 @@ impl<'runtime> Evaluator<'runtime> {
             value = accumulator.into_value();
         }
 
+        if self.is_definition_vertex(vertex_id)? {
+            value = close_recursive(value);
+        }
+
         self.evaluating_vertices.remove(&vertex_id);
         self.vertex_cache.insert(vertex_id, value.clone());
         Ok(value)
+    }
+
+    fn is_definition_vertex(&self, vertex_id: VertexId) -> Result<bool, EvalError> {
+        let vertex = self.runtime.vertex(vertex_id)?;
+        let (Some(parent), Some(feature)) = (vertex.parent, vertex.feature) else {
+            return Ok(false);
+        };
+        let parent = self.runtime.vertex(parent)?;
+        Ok(parent
+            .arcs
+            .get(&feature)
+            .is_some_and(|arc| arc.metadata.is_definition()))
     }
 
     fn evaluate_expr_at(
@@ -1340,6 +1368,7 @@ impl<'runtime> Evaluator<'runtime> {
                     EvaluatedValue::Struct(_)
                         | EvaluatedValue::PatternedStruct { .. }
                         | EvaluatedValue::ClosedStruct(_)
+                        | EvaluatedValue::ClosedPatternedStruct { .. }
                 )
             })
         {
@@ -1456,7 +1485,10 @@ impl<'runtime> Evaluator<'runtime> {
         | EvaluatedValue::PatternedStruct {
             fields: new_fields, ..
         }
-        | EvaluatedValue::ClosedStruct(new_fields)) = value
+        | EvaluatedValue::ClosedStruct(new_fields)
+        | EvaluatedValue::ClosedPatternedStruct {
+            fields: new_fields, ..
+        }) = value
         else {
             return;
         };
@@ -1474,7 +1506,8 @@ impl<'runtime> Evaluator<'runtime> {
         match base.resolve_defaults() {
             EvaluatedValue::Struct(fields)
             | EvaluatedValue::PatternedStruct { fields, .. }
-            | EvaluatedValue::ClosedStruct(fields) => {
+            | EvaluatedValue::ClosedStruct(fields)
+            | EvaluatedValue::ClosedPatternedStruct { fields, .. } => {
                 fields.get(&label).cloned().unwrap_or_else(|| {
                     EvaluatedValue::Bottom(Bottom::new(
                         "cue.eval.missing_field",
@@ -1575,6 +1608,23 @@ fn apply_struct_patterns(
     }
 }
 
+fn pattern_value_for_label(
+    patterns: &[StructPatternConstraint],
+    label: &str,
+) -> Result<Option<EvaluatedValue>, Bottom> {
+    let mut value = None;
+    for pattern in patterns {
+        if pattern_label_matches(&pattern.pattern, label)? {
+            let next = (*pattern.value).clone();
+            value = Some(match value {
+                Some(existing) => unify_field_values(existing, next, pattern.span),
+                None => next,
+            });
+        }
+    }
+    Ok(value)
+}
+
 fn dynamic_label_value(value: EvaluatedValue) -> EvaluatedFieldLabel {
     match resolve_default_value(value) {
         EvaluatedValue::String(value) => EvaluatedFieldLabel::Concrete(value),
@@ -1644,6 +1694,7 @@ fn comprehension_items(
         EvaluatedValue::Struct(fields)
         | EvaluatedValue::PatternedStruct { fields, .. }
         | EvaluatedValue::ClosedStruct(fields)
+        | EvaluatedValue::ClosedPatternedStruct { fields, .. }
             if fields.len() <= MAX_COMPREHENSION_GENERATED_ITEMS =>
         {
             Ok(fields
@@ -1654,7 +1705,8 @@ fn comprehension_items(
         EvaluatedValue::List(_)
         | EvaluatedValue::Struct(_)
         | EvaluatedValue::PatternedStruct { .. }
-        | EvaluatedValue::ClosedStruct(_) => Err(Bottom::new(
+        | EvaluatedValue::ClosedStruct(_)
+        | EvaluatedValue::ClosedPatternedStruct { .. } => Err(Bottom::new(
             "cue.eval.comprehension_limit",
             "comprehension generated item limit exceeded",
             None,
@@ -1701,23 +1753,40 @@ fn into_struct_accumulator(value: EvaluatedValue) -> StructAccumulator {
         EvaluatedValue::Struct(fields) => StructAccumulator {
             fields,
             patterns: Vec::new(),
+            closed: false,
         },
-        EvaluatedValue::PatternedStruct { fields, patterns } => {
-            StructAccumulator { fields, patterns }
-        }
+        EvaluatedValue::PatternedStruct { fields, patterns } => StructAccumulator {
+            fields,
+            patterns,
+            closed: false,
+        },
+        EvaluatedValue::ClosedStruct(fields) => StructAccumulator {
+            fields,
+            patterns: Vec::new(),
+            closed: true,
+        },
+        EvaluatedValue::ClosedPatternedStruct { fields, patterns } => StructAccumulator {
+            fields,
+            patterns,
+            closed: true,
+        },
         _ => StructAccumulator::default(),
     }
 }
 
 impl StructAccumulator {
     fn into_value(self) -> EvaluatedValue {
-        if self.patterns.is_empty() {
-            EvaluatedValue::Struct(self.fields)
-        } else {
-            EvaluatedValue::PatternedStruct {
+        match (self.closed, self.patterns.is_empty()) {
+            (false, true) => EvaluatedValue::Struct(self.fields),
+            (false, false) => EvaluatedValue::PatternedStruct {
                 fields: self.fields,
                 patterns: self.patterns,
-            }
+            },
+            (true, true) => EvaluatedValue::ClosedStruct(self.fields),
+            (true, false) => EvaluatedValue::ClosedPatternedStruct {
+                fields: self.fields,
+                patterns: self.patterns,
+            },
         }
     }
 }
@@ -2769,9 +2838,13 @@ fn evaluate_close(args: Vec<EvaluatedValue>) -> EvaluatedValue {
             ))
         },
         |value| match resolve_default_value(value) {
-            EvaluatedValue::Struct(fields)
-            | EvaluatedValue::PatternedStruct { fields, .. }
-            | EvaluatedValue::ClosedStruct(fields) => EvaluatedValue::ClosedStruct(fields),
+            EvaluatedValue::Struct(fields) | EvaluatedValue::ClosedStruct(fields) => {
+                EvaluatedValue::ClosedStruct(fields)
+            }
+            EvaluatedValue::PatternedStruct { fields, patterns }
+            | EvaluatedValue::ClosedPatternedStruct { fields, patterns } => {
+                EvaluatedValue::ClosedPatternedStruct { fields, patterns }
+            }
             value => value,
         },
     )
@@ -3464,7 +3537,10 @@ fn evaluate_len(args: Vec<EvaluatedValue>) -> EvaluatedValue {
         EvaluatedValue::String(value) => EvaluatedValue::Number(value.len().to_string()),
         EvaluatedValue::Bytes(value) => EvaluatedValue::Number(value.len().to_string()),
         EvaluatedValue::List(values) => EvaluatedValue::Number(values.len().to_string()),
-        EvaluatedValue::Struct(fields) | EvaluatedValue::PatternedStruct { fields, .. } => {
+        EvaluatedValue::Struct(fields)
+        | EvaluatedValue::PatternedStruct { fields, .. }
+        | EvaluatedValue::ClosedStruct(fields)
+        | EvaluatedValue::ClosedPatternedStruct { fields, .. } => {
             EvaluatedValue::Number(fields.len().to_string())
         }
         EvaluatedValue::Bottom(bottom) => EvaluatedValue::Bottom(bottom),
@@ -3582,10 +3658,12 @@ fn values_equal(left: &EvaluatedValue, right: &EvaluatedValue) -> Result<bool, B
         (
             EvaluatedValue::Struct(left)
             | EvaluatedValue::PatternedStruct { fields: left, .. }
-            | EvaluatedValue::ClosedStruct(left),
+            | EvaluatedValue::ClosedStruct(left)
+            | EvaluatedValue::ClosedPatternedStruct { fields: left, .. },
             EvaluatedValue::Struct(right)
             | EvaluatedValue::PatternedStruct { fields: right, .. }
-            | EvaluatedValue::ClosedStruct(right),
+            | EvaluatedValue::ClosedStruct(right)
+            | EvaluatedValue::ClosedPatternedStruct { fields: right, .. },
         ) => structs_equal(left, right),
         (EvaluatedValue::List(left), EvaluatedValue::List(right)) => lists_equal(left, right),
         (
@@ -3821,6 +3899,22 @@ fn resolve_default_value(value: EvaluatedValue) -> EvaluatedValue {
                 .map(|(label, value)| (label, resolve_default_value(value)))
                 .collect(),
         ),
+        EvaluatedValue::ClosedPatternedStruct { fields, patterns } => {
+            EvaluatedValue::ClosedPatternedStruct {
+                fields: fields
+                    .into_iter()
+                    .map(|(label, value)| (label, resolve_default_value(value)))
+                    .collect(),
+                patterns: patterns
+                    .into_iter()
+                    .map(|pattern| StructPatternConstraint {
+                        pattern: Box::new(resolve_default_value(*pattern.pattern)),
+                        value: Box::new(resolve_default_value(*pattern.value)),
+                        span: pattern.span,
+                    })
+                    .collect(),
+            }
+        }
         EvaluatedValue::OptionalField(value) => {
             EvaluatedValue::OptionalField(Box::new(resolve_default_value(*value)))
         }
@@ -4231,7 +4325,10 @@ fn evaluate_index(base: EvaluatedValue, index: EvaluatedValue) -> EvaluatedValue
         EvaluatedValue::OpenList { items, tail } => evaluate_open_list_index(&items, &tail, index),
         EvaluatedValue::Struct(fields)
         | EvaluatedValue::PatternedStruct { fields, .. }
-        | EvaluatedValue::ClosedStruct(fields) => evaluate_struct_index(&fields, index),
+        | EvaluatedValue::ClosedStruct(fields)
+        | EvaluatedValue::ClosedPatternedStruct { fields, .. } => {
+            evaluate_struct_index(&fields, index)
+        }
         _ => EvaluatedValue::Bottom(Bottom::new(
             "cue.eval.invalid_index_base",
             "cannot index non-list or non-struct value",
@@ -4538,6 +4635,44 @@ fn unify_values(left: EvaluatedValue, right: EvaluatedValue, span: Option<Span>)
         (EvaluatedValue::Bytes(left), EvaluatedValue::Bytes(right)) if left == right => {
             EvaluatedValue::Bytes(left)
         }
+        (
+            EvaluatedValue::ClosedPatternedStruct {
+                fields: left,
+                patterns: left_patterns,
+            },
+            EvaluatedValue::ClosedPatternedStruct {
+                fields: right,
+                patterns: right_patterns,
+            },
+        ) => unify_closed_patterned_structs(left, &left_patterns, &right, right_patterns, span),
+        (
+            EvaluatedValue::ClosedPatternedStruct { fields, patterns },
+            EvaluatedValue::Struct(other) | EvaluatedValue::ClosedStruct(other),
+        )
+        | (
+            EvaluatedValue::Struct(other) | EvaluatedValue::ClosedStruct(other),
+            EvaluatedValue::ClosedPatternedStruct { fields, patterns },
+        ) => unify_closed_patterned_struct(fields, patterns, other, Vec::new(), span),
+        (
+            EvaluatedValue::ClosedPatternedStruct {
+                fields,
+                patterns: closed_patterns,
+            },
+            EvaluatedValue::PatternedStruct {
+                fields: other,
+                patterns: open_patterns,
+            },
+        )
+        | (
+            EvaluatedValue::PatternedStruct {
+                fields: other,
+                patterns: open_patterns,
+            },
+            EvaluatedValue::ClosedPatternedStruct {
+                fields,
+                patterns: closed_patterns,
+            },
+        ) => unify_closed_patterned_struct(fields, closed_patterns, other, open_patterns, span),
         (EvaluatedValue::ClosedStruct(left), EvaluatedValue::ClosedStruct(right)) => {
             unify_closed_structs(left, right, span)
         }
@@ -4848,6 +4983,78 @@ fn fields_after_patterns(
     fields
 }
 
+fn close_recursive(value: EvaluatedValue) -> EvaluatedValue {
+    match resolve_default_value(value) {
+        EvaluatedValue::Struct(fields) => EvaluatedValue::ClosedStruct(
+            fields
+                .into_iter()
+                .map(|(label, value)| (label, close_recursive(value)))
+                .collect(),
+        ),
+        EvaluatedValue::PatternedStruct { fields, patterns } => {
+            EvaluatedValue::ClosedPatternedStruct {
+                fields: fields
+                    .into_iter()
+                    .map(|(label, value)| (label, close_recursive(value)))
+                    .collect(),
+                patterns: patterns
+                    .into_iter()
+                    .map(|pattern| StructPatternConstraint {
+                        pattern: Box::new(close_recursive(*pattern.pattern)),
+                        value: Box::new(close_recursive(*pattern.value)),
+                        span: pattern.span,
+                    })
+                    .collect(),
+            }
+        }
+        EvaluatedValue::ClosedStruct(fields) => EvaluatedValue::ClosedStruct(
+            fields
+                .into_iter()
+                .map(|(label, value)| (label, close_recursive(value)))
+                .collect(),
+        ),
+        EvaluatedValue::ClosedPatternedStruct { fields, patterns } => {
+            EvaluatedValue::ClosedPatternedStruct {
+                fields: fields
+                    .into_iter()
+                    .map(|(label, value)| (label, close_recursive(value)))
+                    .collect(),
+                patterns: patterns
+                    .into_iter()
+                    .map(|pattern| StructPatternConstraint {
+                        pattern: Box::new(close_recursive(*pattern.pattern)),
+                        value: Box::new(close_recursive(*pattern.value)),
+                        span: pattern.span,
+                    })
+                    .collect(),
+            }
+        }
+        EvaluatedValue::List(items) => {
+            EvaluatedValue::List(items.into_iter().map(close_recursive).collect())
+        }
+        EvaluatedValue::OpenList { items, tail } => EvaluatedValue::OpenList {
+            items: items.into_iter().map(close_recursive).collect(),
+            tail: Box::new(close_recursive(*tail)),
+        },
+        EvaluatedValue::Disjunction(disjuncts) => EvaluatedValue::Disjunction(
+            disjuncts
+                .into_iter()
+                .map(|disjunct| Disjunct {
+                    value: Box::new(close_recursive(*disjunct.value)),
+                    default: disjunct.default,
+                })
+                .collect(),
+        ),
+        EvaluatedValue::Default(value) => {
+            EvaluatedValue::Default(Box::new(close_recursive(*value)))
+        }
+        EvaluatedValue::OptionalField(value) => {
+            EvaluatedValue::OptionalField(Box::new(close_recursive(*value)))
+        }
+        other => other,
+    }
+}
+
 fn unify_field_values(
     left: EvaluatedValue,
     right: EvaluatedValue,
@@ -4880,6 +5087,90 @@ fn unify_closed_struct(
         closed.insert(label, unify_values(left_value, right_value, span));
     }
     EvaluatedValue::ClosedStruct(closed)
+}
+
+fn unify_closed_patterned_struct(
+    closed: IndexMap<String, EvaluatedValue>,
+    patterns: Vec<StructPatternConstraint>,
+    open: IndexMap<String, EvaluatedValue>,
+    open_patterns: Vec<StructPatternConstraint>,
+    span: Option<Span>,
+) -> EvaluatedValue {
+    let mut fields = closed;
+    for (label, right_value) in open {
+        if let Some(left_value) = fields.shift_remove(&label) {
+            fields.insert(label, unify_values(left_value, right_value, span));
+            continue;
+        }
+        let pattern_value = match pattern_value_for_label(&patterns, &label) {
+            Ok(Some(value)) => value,
+            Ok(None) => {
+                return EvaluatedValue::Bottom(Bottom::new(
+                    "cue.eval.closed_struct",
+                    format!("field `{label}` not allowed in closed struct"),
+                    span,
+                    false,
+                ));
+            }
+            Err(bottom) => return EvaluatedValue::Bottom(bottom),
+        };
+        fields.insert(label, unify_values(pattern_value, right_value, span));
+    }
+    let mut patterns = patterns;
+    patterns.extend(open_patterns);
+    EvaluatedValue::ClosedPatternedStruct { fields, patterns }
+}
+
+fn unify_closed_patterned_structs(
+    left: IndexMap<String, EvaluatedValue>,
+    left_patterns: &[StructPatternConstraint],
+    right: &IndexMap<String, EvaluatedValue>,
+    right_patterns: Vec<StructPatternConstraint>,
+    span: Option<Span>,
+) -> EvaluatedValue {
+    let left_unified = unify_closed_patterned_struct(
+        left,
+        left_patterns.to_owned(),
+        right.clone(),
+        Vec::new(),
+        span,
+    );
+    let EvaluatedValue::ClosedPatternedStruct {
+        fields,
+        patterns: mut combined_patterns,
+    } = left_unified
+    else {
+        return left_unified;
+    };
+    let labels = fields.keys().cloned().collect::<Vec<_>>();
+    let mut fields = fields;
+    for label in labels {
+        if right.contains_key(&label) {
+            continue;
+        }
+        match pattern_value_for_label(&right_patterns, &label) {
+            Ok(Some(pattern_value)) => {
+                let Some(existing) = fields.shift_remove(&label) else {
+                    continue;
+                };
+                fields.insert(label, unify_values(existing, pattern_value, span));
+            }
+            Ok(None) => {
+                return EvaluatedValue::Bottom(Bottom::new(
+                    "cue.eval.closed_struct",
+                    format!("field `{label}` not allowed in closed struct"),
+                    span,
+                    false,
+                ));
+            }
+            Err(bottom) => return EvaluatedValue::Bottom(bottom),
+        }
+    }
+    combined_patterns.extend(right_patterns);
+    EvaluatedValue::ClosedPatternedStruct {
+        fields,
+        patterns: combined_patterns,
+    }
 }
 
 fn unify_closed_structs(
@@ -4949,7 +5240,8 @@ fn kind_accepts_value(kind: ValueKind, value: &EvaluatedValue) -> bool {
             ValueKind::Struct,
             EvaluatedValue::Struct(_)
             | EvaluatedValue::PatternedStruct { .. }
-            | EvaluatedValue::ClosedStruct(_),
+            | EvaluatedValue::ClosedStruct(_)
+            | EvaluatedValue::ClosedPatternedStruct { .. },
         )
         | (ValueKind::List, EvaluatedValue::List(_) | EvaluatedValue::OpenList { .. })
         | (ValueKind::Bottom, EvaluatedValue::Bottom(_)) => true,
@@ -5040,7 +5332,8 @@ fn validate_value(
         }
         EvaluatedValue::Struct(fields)
         | EvaluatedValue::PatternedStruct { fields, .. }
-        | EvaluatedValue::ClosedStruct(fields) => {
+        | EvaluatedValue::ClosedStruct(fields)
+        | EvaluatedValue::ClosedPatternedStruct { fields, .. } => {
             for (label, field) in fields {
                 let field_path = format!("{path}.{label}");
                 validate_value(field, options, &field_path, report);

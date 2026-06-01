@@ -346,7 +346,8 @@ fn evaluated_to_json(value: EvaluatedValue) -> Result<JsonValue, EncodeError> {
         EvaluatedValue::Bytes(_) => unsupported(Encoding::Json, "bytes require binary encoding"),
         EvaluatedValue::Struct(values)
         | EvaluatedValue::PatternedStruct { fields: values, .. }
-        | EvaluatedValue::ClosedStruct(values) => {
+        | EvaluatedValue::ClosedStruct(values)
+        | EvaluatedValue::ClosedPatternedStruct { fields: values, .. } => {
             let mut object = JsonMap::new();
             for (key, value) in values {
                 object.insert(key, evaluated_to_json(value)?);
@@ -394,7 +395,8 @@ fn evaluated_to_toml(value: EvaluatedValue) -> Result<TomlValue, EncodeError> {
         EvaluatedValue::Bytes(_) => unsupported(Encoding::Toml, "bytes require binary encoding"),
         EvaluatedValue::Struct(values)
         | EvaluatedValue::PatternedStruct { fields: values, .. }
-        | EvaluatedValue::ClosedStruct(values) => {
+        | EvaluatedValue::ClosedStruct(values)
+        | EvaluatedValue::ClosedPatternedStruct { fields: values, .. } => {
             let mut table = TomlTable::new();
             for (key, value) in values {
                 table.insert(key, evaluated_to_toml(value)?);
@@ -442,7 +444,8 @@ fn evaluated_to_yaml(value: EvaluatedValue) -> Result<YamlValue, EncodeError> {
         EvaluatedValue::Bytes(_) => unsupported(Encoding::Yaml, "bytes require binary encoding"),
         EvaluatedValue::Struct(values)
         | EvaluatedValue::PatternedStruct { fields: values, .. }
-        | EvaluatedValue::ClosedStruct(values) => {
+        | EvaluatedValue::ClosedStruct(values)
+        | EvaluatedValue::ClosedPatternedStruct { fields: values, .. } => {
             let entries = values
                 .into_iter()
                 .map(|(key, value)| evaluated_to_yaml(value).map(|value| (key, value)))
@@ -521,7 +524,8 @@ fn format_cue_value(value: &EvaluatedValue) -> String {
         EvaluatedValue::Bytes(value) => format_cue_bytes(value),
         EvaluatedValue::Struct(fields)
         | EvaluatedValue::PatternedStruct { fields, .. }
-        | EvaluatedValue::ClosedStruct(fields) => format_cue_struct(fields),
+        | EvaluatedValue::ClosedStruct(fields)
+        | EvaluatedValue::ClosedPatternedStruct { fields, .. } => format_cue_struct(fields),
         EvaluatedValue::List(values) => {
             let rendered = values
                 .iter()
