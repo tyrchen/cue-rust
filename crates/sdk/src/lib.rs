@@ -1602,6 +1602,10 @@ roundNeg: math.Round(-2.5)
 even: math.RoundToEven(2.5)
 evenNeg: math.RoundToEven(-2.5)
 abs: math.Abs(-2.2)
+copySign: math.Copysign(5, -2.2)
+copySignZero: math.Copysign(0, -1)
+dimPositive: math.Dim(3, 2.5)
+dimZero: math.Dim(5, 7.2)
 multipleBool: math.MultipleOf(5, 2.5)
 multipleConstraint: 9 & math.MultipleOf(3)
 multiConstraint: 12 & math.MultipleOf(2) & math.MultipleOf(3)
@@ -1670,6 +1674,18 @@ pow10Neg: math.Pow10(-2)
         assert_evaluated_path(&value, "even", &EvaluatedValue::Number("2".to_owned()))?;
         assert_evaluated_path(&value, "evenNeg", &EvaluatedValue::Number("-2".to_owned()))?;
         assert_evaluated_path(&value, "abs", &EvaluatedValue::Number("2.2".to_owned()))?;
+        assert_evaluated_path(&value, "copySign", &EvaluatedValue::Number("-5".to_owned()))?;
+        assert_evaluated_path(
+            &value,
+            "copySignZero",
+            &EvaluatedValue::Number("-0".to_owned()),
+        )?;
+        assert_evaluated_path(
+            &value,
+            "dimPositive",
+            &EvaluatedValue::Number("0.5".to_owned()),
+        )?;
+        assert_evaluated_path(&value, "dimZero", &EvaluatedValue::Number("0".to_owned()))?;
         assert_evaluated_path(&value, "multipleBool", &EvaluatedValue::Bool(true))?;
         assert_evaluated_path(
             &value,

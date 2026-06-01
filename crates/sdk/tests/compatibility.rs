@@ -353,7 +353,7 @@ fn push_stdlib_math_case(
          math.Round(-2.5)\neven: math.RoundToEven(2.5)\nabs: math.Abs(-2.2)\nmultiple: 12 & \
          math.MultipleOf(2) & math.MultipleOf(3)\nbounded: 4 & math.MultipleOf(2) & >3\nbad: 10 & \
          math.MultipleOf(3)\nsign: math.Signbit(-4)\nsignZero: math.Signbit(-0)\npow10: \
-         math.Pow10(-2)\n",
+         math.Pow10(-2)\ncopySign: math.Copysign(5, -2.2)\ndim: math.Dim(3, 2.5)\n",
     )?;
     cases.push(supported_case(
         "eval/stdlib-math-exact-surface",
@@ -385,7 +385,11 @@ fn push_stdlib_math_case(
             && exact_math.lookup_path(&["signZero"])?.evaluate()?
                 == cue_rust::EvaluatedValue::Bool(true)
             && exact_math.lookup_path(&["pow10"])?.evaluate()?
-                == cue_rust::EvaluatedValue::Number("0.01".to_owned()),
+                == cue_rust::EvaluatedValue::Number("0.01".to_owned())
+            && exact_math.lookup_path(&["copySign"])?.evaluate()?
+                == cue_rust::EvaluatedValue::Number("-5".to_owned())
+            && exact_math.lookup_path(&["dim"])?.evaluate()?
+                == cue_rust::EvaluatedValue::Number("0.5".to_owned()),
     ));
     Ok(())
 }

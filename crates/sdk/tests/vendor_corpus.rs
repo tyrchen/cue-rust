@@ -787,6 +787,10 @@ async fn assert_upstream_stdlib_surface_builtins(context: &Context, root: &Path)
     assert!(math_consts.file("in.cue")?.contains("math.Pi"));
     assert!(math_round.file("in.cue")?.contains("math.RoundToEven"));
     assert!(math_round.file("in.cue")?.contains("math.Floor(math.Pi)"));
+    let math_gen =
+        TxtarArchive::read(&root.join("vendors/cue/pkg/math/testdata/gen.txtar")).await?;
+    assert!(math_gen.file("in.cue")?.contains("math.Copysign(5, -2.2)"));
+    assert!(math_gen.file("in.cue")?.contains("math.Dim(3, 2.5)"));
     assert!(
         math_mult
             .file("in.cue")?
@@ -798,9 +802,10 @@ async fn assert_upstream_stdlib_surface_builtins(context: &Context, root: &Path)
         "import \"math\"\npi: math.Pi\nmaxPrec: math.MaxPrec\nfloorPi: \
          math.Floor(math.Pi)\nfloor: math.Floor(-2.2)\nceil: math.Ceil(-2.2)\ntrunc: \
          math.Trunc(-2.9)\nround: math.Round(-2.5)\neven: math.RoundToEven(2.5)\nabs: \
-         math.Abs(-2.2)\nmultipleBool: math.MultipleOf(5, 2.5)\nmultipleConstraint: 9 & \
-         math.MultipleOf(3)\nmultipleBoth: 12 & math.MultipleOf(2) & \
-         math.MultipleOf(3)\nmultipleBad: 10 & math.MultipleOf(3)\nzero: math.MultipleOf(5, \
+         math.Abs(-2.2)\ncopySign: math.Copysign(5, -2.2)\ndimPositive: math.Dim(3, \
+         2.5)\ndimZero: math.Dim(5, 7.2)\nmultipleBool: math.MultipleOf(5, \
+         2.5)\nmultipleConstraint: 9 & math.MultipleOf(3)\nmultipleBoth: 12 & math.MultipleOf(2) \
+         & math.MultipleOf(3)\nmultipleBad: 10 & math.MultipleOf(3)\nzero: math.MultipleOf(5, \
          0)\nsign: math.Signbit(-4)\npow10: math.Pow10(4)\npow10Neg: math.Pow10(-2)\n",
     )?;
     assert_eq!(
@@ -840,6 +845,18 @@ async fn assert_upstream_stdlib_surface_builtins(context: &Context, root: &Path)
     assert_eq!(
         EvaluatedValue::Number("2.2".to_owned()),
         math_value.lookup_path(&["abs"])?.evaluate()?,
+    );
+    assert_eq!(
+        EvaluatedValue::Number("-5".to_owned()),
+        math_value.lookup_path(&["copySign"])?.evaluate()?,
+    );
+    assert_eq!(
+        EvaluatedValue::Number("0.5".to_owned()),
+        math_value.lookup_path(&["dimPositive"])?.evaluate()?,
+    );
+    assert_eq!(
+        EvaluatedValue::Number("0".to_owned()),
+        math_value.lookup_path(&["dimZero"])?.evaluate()?,
     );
     assert_eq!(
         EvaluatedValue::Bool(true),

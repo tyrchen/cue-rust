@@ -3451,6 +3451,8 @@ fn evaluate_builtin_call(name: &str, args: Vec<EvaluatedValue>) -> EvaluatedValu
         "list.UniqueItems" => evaluate_list_unique_items(args),
         "math.Abs" => evaluate_math_abs(args),
         "math.Ceil" => evaluate_math_rounding("math.Ceil", args, RoundingMode::Ceiling),
+        "math.Copysign" => evaluate_math_copysign(args),
+        "math.Dim" => evaluate_math_dim(args),
         "math.Floor" => evaluate_math_rounding("math.Floor", args, RoundingMode::Floor),
         "math.MultipleOf" => evaluate_math_multiple_of(args),
         "math.Pow10" => evaluate_math_pow10(args),
@@ -3543,6 +3545,32 @@ fn evaluate_math_signbit(args: Vec<EvaluatedValue>) -> EvaluatedValue {
     EvaluatedValue::Bool(numeric_literal_has_negative_sign(&value))
 }
 
+fn evaluate_math_copysign(args: Vec<EvaluatedValue>) -> EvaluatedValue {
+    let Some((magnitude, sign)) = two_number_arg_texts("math.Copysign", args) else {
+        return invalid_math_builtin_arg("math.Copysign");
+    };
+    let Some(magnitude) = absolute_decimal_text("math.Copysign", &magnitude) else {
+        return builtin_resource_exhausted("math.Copysign");
+    };
+    if numeric_literal_has_negative_sign(&sign) {
+        EvaluatedValue::Number(format!("-{magnitude}"))
+    } else {
+        EvaluatedValue::Number(magnitude)
+    }
+}
+
+fn evaluate_math_dim(args: Vec<EvaluatedValue>) -> EvaluatedValue {
+    let Some((left, right)) = two_decimal_args("math.Dim", args) else {
+        return invalid_math_builtin_arg("math.Dim");
+    };
+    let difference = left - right;
+    if difference < BigDecimal::zero() {
+        EvaluatedValue::Number("0".to_owned())
+    } else {
+        evaluated_decimal_number("math.Dim", &difference)
+    }
+}
+
 fn evaluate_math_pow10(args: Vec<EvaluatedValue>) -> EvaluatedValue {
     let Some(exponent) = single_integer_arg("math.Pow10", args) else {
         return invalid_math_builtin_arg("math.Pow10");
@@ -3604,7 +3632,7 @@ fn single_integer_arg(_name: &str, args: Vec<EvaluatedValue>) -> Option<i128> {
         return None;
     }
     let value = args.into_iter().next().map(resolve_default_value)?;
-    integer_arg(value)
+    integer_valued_arg(value)
 }
 
 fn decimal_value(value: &EvaluatedValue) -> Option<BigDecimal> {
@@ -3614,8 +3642,44 @@ fn decimal_value(value: &EvaluatedValue) -> Option<BigDecimal> {
     parse_exact_decimal(value)
 }
 
+fn two_number_arg_texts(_name: &str, args: Vec<EvaluatedValue>) -> Option<(String, String)> {
+    if args.len() != 2 {
+        return None;
+    }
+    let mut args = args.into_iter().map(resolve_default_value);
+    let left = number_text(args.next()?)?;
+    let right = number_text(args.next()?)?;
+    Some((left, right))
+}
+
+fn two_decimal_args(name: &str, args: Vec<EvaluatedValue>) -> Option<(BigDecimal, BigDecimal)> {
+    let (left, right) = two_number_arg_texts(name, args)?;
+    Some((parse_exact_decimal(&left)?, parse_exact_decimal(&right)?))
+}
+
+fn number_text(value: EvaluatedValue) -> Option<String> {
+    let EvaluatedValue::Number(value) = value else {
+        return None;
+    };
+    parse_exact_decimal(&value)?;
+    Some(value)
+}
+
 fn decimal_multiple_of(left: &BigDecimal, right: &BigDecimal) -> bool {
     (left % right).is_zero()
+}
+
+fn absolute_decimal_text(name: &str, value: &str) -> Option<String> {
+    let value = parse_exact_decimal(value)?;
+    let value = if value < BigDecimal::zero() {
+        -value
+    } else {
+        value
+    };
+    match evaluated_decimal_number(name, &value) {
+        EvaluatedValue::Number(value) => Some(value),
+        _ => None,
+    }
 }
 
 fn numeric_literal_has_negative_sign(value: &str) -> bool {
@@ -5242,6 +5306,30 @@ fn integer_arg(value: EvaluatedValue) -> Option<i128> {
         return None;
     };
     parse_integer(&value)
+}
+
+fn integer_valued_arg(value: EvaluatedValue) -> Option<i128> {
+    let EvaluatedValue::Number(value) = value else {
+        return None;
+    };
+    integer_valued_number(&value)
+}
+
+fn integer_valued_number(value: &str) -> Option<i128> {
+    let parsed = parse_decimal_number(value)?;
+    if parsed.scale > 0 {
+        return None;
+    }
+    let extra_zeroes = usize::try_from(parsed.scale.checked_neg()?).ok()?;
+    let mut digits = String::with_capacity(parsed.digits.len().checked_add(extra_zeroes)?);
+    digits.push_str(&parsed.digits);
+    digits.extend(std::iter::repeat_n('0', extra_zeroes));
+    let magnitude = digits.parse::<i128>().ok()?;
+    if parsed.sign < 0 {
+        magnitude.checked_neg()
+    } else {
+        Some(magnitude)
+    }
 }
 
 fn invalid_integer_builtin_arg(name: &str) -> EvaluatedValue {
