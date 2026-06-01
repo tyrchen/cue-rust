@@ -337,6 +337,26 @@ mod tests {
     }
 
     #[test]
+    fn test_should_reject_abstract_arithmetic_operands() -> Result<(), Box<dyn std::error::Error>> {
+        let context = Context::new();
+        let value = context.compile_source(
+            "abstract.cue",
+            "nested: (int + 1) + (int + 1)\ndisjunct: (int + 1) | (int + 1)\nboundMultiply: (>10 \
+             * 2) & 0\nboundCompare: >=100 <= 200\n",
+        )?;
+        for path in ["nested", "disjunct", "boundMultiply", "boundCompare"] {
+            assert!(
+                value
+                    .lookup_path(&[path])?
+                    .validate(ValidateOptions::default())
+                    .is_err(),
+                "expected {path} to reject abstract arithmetic",
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
     fn test_should_evaluate_recursive_equality() -> Result<(), Box<dyn std::error::Error>> {
         let context = Context::new();
         let value = context.compile_source(
@@ -674,7 +694,9 @@ mod tests {
             "test.cue",
             "narrow: (1 | 2 | 3) & (>=2 & <=2)\nchosen: *5 | string\nnested: {chosen: *5 | \
              string}\nlenDefault: len(*[1, 2, 3] | 0)\nandValue: and([1, 1])\norValue: or([2, 1, \
-             1, 2]) & 1\nclosed: close(*{} | 0)\n",
+             1, 2]) & 1\nclosed: close(*{} | 0)\ndefaultBound: {min: *1 | int, range: >min, \
+             range: 8}\ndefaultBoundSchema: {min: *1 | int, max: int & \
+             >min}\ndefaultBoundGrounded: defaultBoundSchema\ndefaultBoundGrounded: {max: 8}\n",
         )?;
         assert_eq!(
             EvaluatedValue::Number("2".to_owned()),
@@ -704,6 +726,16 @@ mod tests {
             return Err("expected closed struct".into());
         };
         assert!(fields.is_empty());
+        assert_eq!(
+            EvaluatedValue::Number("8".to_owned()),
+            value.lookup_path(&["defaultBound", "range"])?.evaluate()?,
+        );
+        assert_eq!(
+            EvaluatedValue::Number("8".to_owned()),
+            value
+                .lookup_path(&["defaultBoundGrounded", "max"])?
+                .evaluate()?,
+        );
 
         let mut options = EncodeOptions::default();
         options.encoding = Encoding::Json;
@@ -711,6 +743,41 @@ mod tests {
         assert_eq!("5", json);
         let nested_json = encode_value(&value.lookup_path(&["nested"])?, options)?;
         assert!(nested_json.contains("\"chosen\": 5"));
+        Ok(())
+    }
+
+    #[test]
+    fn test_should_resolve_disjunction_cycle_fixpoints() -> Result<(), Box<dyn std::error::Error>> {
+        let context = Context::new();
+        let value = context.compile_source(
+            "cycle.cue",
+            "xa1: (xa2 & 8) | (xa4 & 9)\nxa2: xa3 + 2\nxa3: 6 & xa1-2\nxa4: xa2 + 2\nda1: (da2 & \
+             8) | *(da4 & 9)\nda2: da3 + 2\nda3: 6 & da1-2\nda4: da2 + 2\nxb1: (xb2 & 8) | (xb4 & \
+             9)\nxb2: xb3 + 2\nxb3: (6 & (xb1 - 2)) | (xb4 & 9)\nxb4: xb2 + 2\ndb1: *(db2 & 8) | \
+             (db4 & 9)\ndb2: db3 + 2\ndb3: *(6 & (db1 - 2)) | (db4 & 9)\ndb4: db2 + 2\n",
+        )?;
+        for (path, expected) in [
+            ("xa1", "8"),
+            ("xa2", "8"),
+            ("xa3", "6"),
+            ("xa4", "10"),
+            ("da1", "8"),
+            ("da2", "8"),
+            ("da3", "6"),
+            ("da4", "10"),
+        ] {
+            assert_eq!(
+                EvaluatedValue::Number(expected.to_owned()),
+                value.lookup_path(&[path])?.evaluate()?,
+                "unexpected value for {path}",
+            );
+        }
+        for path in ["xb1", "xb2", "xb3", "xb4", "db1", "db2", "db3", "db4"] {
+            assert!(matches!(
+                value.lookup_path(&[path])?.evaluate()?,
+                EvaluatedValue::Bottom(bottom) if bottom.code == "cue.eval.cycle",
+            ));
+        }
         Ok(())
     }
 

@@ -177,6 +177,7 @@ async fn test_should_run_supported_upstream_core_eval_fixtures() -> TestResult {
     assert_upstream_struct_comparisons(&context, &root).await?;
     assert_upstream_arithmetic(&context, &root).await?;
     assert_upstream_integer_arithmetic(&context, &root).await?;
+    assert_upstream_incomplete_operand_errors(&context, &root).await?;
     assert_upstream_booleans(&context, &root).await?;
     assert_upstream_null(&context, &root).await?;
     assert_upstream_len(&context, &root).await?;
@@ -725,6 +726,7 @@ async fn assert_upstream_phase9_parity_tranche(context: &Context, root: &Path) -
     assert_upstream_interpolation_parity(context, root).await?;
     assert_upstream_comprehension_parity(context, root).await?;
     assert_upstream_dynamic_field_parity(context, root).await?;
+    assert_upstream_cycle_fixpoint_parity(context, root).await?;
     assert_pattern_field_parity(context)?;
     Ok(())
 }
@@ -846,6 +848,91 @@ fn assert_pattern_field_parity(context: &Context) -> TestResult {
             .validate(ValidateOptions::default())
             .is_ok(),
     );
+    Ok(())
+}
+
+async fn assert_upstream_cycle_fixpoint_parity(context: &Context, root: &Path) -> TestResult {
+    let disjunctions = TxtarArchive::read(&root.join(
+        "vendors/cue/cue/testdata/cycle/051_resolved_self-reference_cycles_with_disjunction.txtar",
+    ))
+    .await?;
+    assert!(
+        disjunctions
+            .file("in.cue")?
+            .contains("xa1: (xa2 & 8) | (xa4 & 9)")
+    );
+    let defaults = TxtarArchive::read(&root.join(
+        "vendors/cue/cue/testdata/cycle/\
+         052_resolved_self-reference_cycles_with_disjunction_with_defaults.txtar",
+    ))
+    .await?;
+    assert!(
+        defaults
+            .file("in.cue")?
+            .contains("xa1: (xa2 & 8) | *(xa4 & 9)")
+    );
+    let default_bounds =
+        TxtarArchive::read(&root.join("vendors/cue/cue/testdata/cycle/with_defaults.txtar"))
+            .await?;
+    assert!(default_bounds.file("in.cue")?.contains("range: >min"));
+
+    let value = context.compile_source(
+        "cycle/fixpoint/reduced.cue",
+        "xa1: (xa2 & 8) | (xa4 & 9)\nxa2: xa3 + 2\nxa3: 6 & xa1-2\nxa4: xa2 + 2\nda1: (da2 & 8) | \
+         *(da4 & 9)\nda2: da3 + 2\nda3: 6 & da1-2\nda4: da2 + 2\nrange1: {min: *1 | int, range: \
+         >min, range: 8}\nrange2: {min: *1 | int, max: int & >min}\nrg: range2\nrg: {max: \
+         8}\nxb1: (xb2 & 8) | (xb4 & 9)\nxb2: xb3 + 2\nxb3: (6 & (xb1 - 2)) | (xb4 & 9)\nxb4: xb2 \
+         + 2\ndb1: *(db2 & 8) | (db4 & 9)\ndb2: db3 + 2\ndb3: *(6 & (db1 - 2)) | (db4 & 9)\ndb4: \
+         db2 + 2\n",
+    )?;
+    for (path, expected) in [
+        (&["xa1"][..], "8"),
+        (&["xa2"][..], "8"),
+        (&["xa3"][..], "6"),
+        (&["xa4"][..], "10"),
+        (&["da1"][..], "8"),
+        (&["da2"][..], "8"),
+        (&["da3"][..], "6"),
+        (&["da4"][..], "10"),
+        (&["range1", "range"][..], "8"),
+        (&["rg", "max"][..], "8"),
+    ] {
+        assert_eq!(
+            EvaluatedValue::Number(expected.to_owned()),
+            value.lookup_path(path)?.evaluate()?,
+            "unexpected borrowed cycle value at {path:?}",
+        );
+    }
+    for path in ["xb1", "xb2", "xb3", "xb4", "db1", "db2", "db3", "db4"] {
+        assert!(matches!(
+            value.lookup_path(&[path])?.evaluate()?,
+            EvaluatedValue::Bottom(bottom) if bottom.code == "cue.eval.cycle",
+        ));
+    }
+    Ok(())
+}
+
+async fn assert_upstream_incomplete_operand_errors(context: &Context, root: &Path) -> TestResult {
+    let incomplete =
+        TxtarArchive::read(&root.join("vendors/cue/cue/testdata/eval/incompleteperm.txtar"))
+            .await?;
+    let source = incomplete.file("in.cue")?;
+    assert!(source.contains("issue680: (>10 * 2) & 0"));
+    assert!(source.contains("issue405: >=100 <= 200"));
+    let value = context.compile_source(
+        "eval/incompleteperm/reduced.cue",
+        "nested: (int + 1) + (int + 1)\ndisjunct: (int + 1) | (int + 1)\nissue680: (>10 * 2) & \
+         0\nissue405: >=100 <= 200\n",
+    )?;
+    for path in ["nested", "disjunct", "issue680", "issue405"] {
+        assert!(
+            value
+                .lookup_path(&[path])?
+                .validate(ValidateOptions::default())
+                .is_err(),
+            "expected borrowed incomplete operand case `{path}` to fail",
+        );
+    }
     Ok(())
 }
 

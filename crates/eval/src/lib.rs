@@ -6,7 +6,7 @@
 use std::{
     cmp::Ordering,
     collections::{HashMap, HashSet},
-    fmt,
+    fmt, mem,
     num::FpCategory,
     str::FromStr,
 };
@@ -30,6 +30,7 @@ const MAX_BUILTIN_GENERATED_BYTES: usize = 16 * 1024 * 1024;
 const MAX_BUILTIN_GENERATED_ITEMS: usize = 1_000_000;
 const MAX_COMPREHENSION_GENERATED_ITEMS: usize = MAX_BUILTIN_GENERATED_ITEMS;
 const MAX_SCHEMA_SORT_ITEMS: usize = 100_000;
+const MAX_FIXPOINT_ITERATIONS: usize = 64;
 const INVALID_DYNAMIC_LABEL_FIELD: &str = "<invalid-dynamic-label>";
 const INVALID_PATTERN_LABEL_FIELD: &str = "<invalid-pattern-label>";
 
@@ -505,6 +506,9 @@ struct Evaluator<'runtime> {
     evaluating_vertices: HashSet<VertexId>,
     vertex_evaluation_stack: Vec<VertexId>,
     vertex_list_self_index_features: Vec<Feature>,
+    fixpoint_active_vertices: HashSet<VertexId>,
+    fixpoint_forcing_vertices: HashSet<VertexId>,
+    fixpoint_previous_values: HashMap<VertexId, EvaluatedValue>,
     cycle_fallback_to_top: u32,
     defer_list_self_indexes: u32,
 }
@@ -573,6 +577,9 @@ impl<'runtime> Evaluator<'runtime> {
             evaluating_vertices: HashSet::new(),
             vertex_evaluation_stack: Vec::new(),
             vertex_list_self_index_features: Vec::new(),
+            fixpoint_active_vertices: HashSet::new(),
+            fixpoint_forcing_vertices: HashSet::new(),
+            fixpoint_previous_values: HashMap::new(),
             cycle_fallback_to_top: 0,
             defer_list_self_indexes: 0,
         }
@@ -584,6 +591,7 @@ impl<'runtime> Evaluator<'runtime> {
     }
 
     fn evaluate_vertex(&mut self, vertex_id: VertexId) -> Result<EvaluatedValue, EvalError> {
+        self.evaluate_reachable_fixpoints(vertex_id)?;
         self.evaluate_vertex_at(vertex_id, 0)
     }
 
@@ -599,6 +607,9 @@ impl<'runtime> Evaluator<'runtime> {
         vertex_id: VertexId,
         depth: u32,
     ) -> Result<EvaluatedValue, EvalError> {
+        if let Some(value) = self.fixpoint_reentry_value(vertex_id) {
+            return Ok(value);
+        }
         if let Some(value) = self.vertex_cache.get(&vertex_id) {
             return Ok(value.clone());
         }
@@ -622,12 +633,7 @@ impl<'runtime> Evaluator<'runtime> {
         }
         if depth > self.options.max_depth {
             self.evaluating_vertices.remove(&vertex_id);
-            return Ok(EvaluatedValue::Bottom(Bottom::new(
-                "cue.eval.depth_limit",
-                "evaluation depth limit exceeded",
-                None,
-                false,
-            )));
+            return Ok(depth_limit_bottom());
         }
 
         let vertex = self.runtime.vertex(vertex_id)?;
@@ -704,6 +710,23 @@ impl<'runtime> Evaluator<'runtime> {
         Ok(value)
     }
 
+    fn fixpoint_reentry_value(&self, vertex_id: VertexId) -> Option<EvaluatedValue> {
+        if !self.fixpoint_active_vertices.contains(&vertex_id) {
+            return None;
+        }
+        if self.defer_list_self_indexes > 0 && self.fixpoint_forcing_vertices.contains(&vertex_id) {
+            return Some(EvaluatedValue::Bottom(structural_cycle_bottom()));
+        }
+        (self.evaluating_vertices.contains(&vertex_id)
+            || !self.fixpoint_forcing_vertices.contains(&vertex_id))
+        .then(|| {
+            self.fixpoint_previous_values
+                .get(&vertex_id)
+                .cloned()
+                .unwrap_or(EvaluatedValue::Top)
+        })
+    }
+
     fn is_structural_vertex_cycle(&self, vertex_id: VertexId) -> Result<bool, EvalError> {
         let Some(current) = self.vertex_evaluation_stack.last().copied() else {
             return Ok(false);
@@ -731,6 +754,581 @@ impl<'runtime> Evaluator<'runtime> {
             .arcs
             .get(&feature)
             .is_some_and(|arc| arc.metadata.is_definition()))
+    }
+
+    fn evaluate_reachable_fixpoints(&mut self, root: VertexId) -> Result<(), EvalError> {
+        if !self.fixpoint_active_vertices.is_empty() {
+            return Ok(());
+        }
+        let vertices = self.collect_fixpoint_vertices(root)?;
+        let graph = self.reference_dependency_graph(&vertices)?;
+        let components = cyclic_graph_components(&graph);
+        if components.is_empty() {
+            return Ok(());
+        }
+        for component in components {
+            if self.choice_vertex_count(&component)? > 1 {
+                self.cache_cycle_bottoms(&component);
+            } else {
+                self.evaluate_fixpoint_vertices(component)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn collect_fixpoint_vertices(&self, root: VertexId) -> Result<Vec<VertexId>, EvalError> {
+        let mut seen = HashSet::from([root]);
+        let mut stack = vec![root];
+        while let Some(vertex_id) = stack.pop() {
+            self.push_arc_vertices(vertex_id, &mut seen, &mut stack)?;
+            self.push_reference_vertices(vertex_id, &mut seen, &mut stack)?;
+        }
+        Ok(sorted_vertices(seen))
+    }
+
+    fn push_arc_vertices(
+        &self,
+        vertex_id: VertexId,
+        seen: &mut HashSet<VertexId>,
+        stack: &mut Vec<VertexId>,
+    ) -> Result<(), EvalError> {
+        for arc in self.runtime.vertex(vertex_id)?.arcs.values() {
+            if seen.insert(arc.target) {
+                stack.push(arc.target);
+            }
+        }
+        Ok(())
+    }
+
+    fn push_reference_vertices(
+        &self,
+        vertex_id: VertexId,
+        seen: &mut HashSet<VertexId>,
+        stack: &mut Vec<VertexId>,
+    ) -> Result<(), EvalError> {
+        let mut dependencies = HashSet::new();
+        self.collect_vertex_reference_targets(vertex_id, &mut dependencies)?;
+        for dependency in dependencies {
+            if seen.insert(dependency) {
+                stack.push(dependency);
+            }
+        }
+        Ok(())
+    }
+
+    fn reference_dependency_graph(
+        &self,
+        vertices: &[VertexId],
+    ) -> Result<HashMap<VertexId, HashSet<VertexId>>, EvalError> {
+        let vertex_set = vertices.iter().copied().collect::<HashSet<_>>();
+        let mut graph = vertices
+            .iter()
+            .copied()
+            .map(|vertex| (vertex, HashSet::new()))
+            .collect::<HashMap<_, _>>();
+        for vertex_id in vertices {
+            let mut dependencies = HashSet::new();
+            self.collect_vertex_reference_targets(*vertex_id, &mut dependencies)?;
+            dependencies.retain(|dependency| vertex_set.contains(dependency));
+            if let Some(edges) = graph.get_mut(vertex_id) {
+                edges.extend(dependencies);
+            }
+        }
+        Ok(graph)
+    }
+
+    fn collect_vertex_reference_targets(
+        &self,
+        vertex_id: VertexId,
+        targets: &mut HashSet<VertexId>,
+    ) -> Result<(), EvalError> {
+        let vertex = self.runtime.vertex(vertex_id)?;
+        for conjunct_id in &vertex.conjuncts {
+            let conjunct = self.runtime.conjunct(*conjunct_id)?;
+            let mut visited = HashSet::new();
+            self.collect_expr_reference_targets(
+                conjunct.expression,
+                conjunct.environment,
+                targets,
+                &mut visited,
+            )?;
+        }
+        if self.vertex_has_direct_self_list_index(vertex_id)? {
+            targets.remove(&vertex_id);
+        }
+        Ok(())
+    }
+
+    fn vertex_has_direct_self_list_index(&self, vertex_id: VertexId) -> Result<bool, EvalError> {
+        let vertex = self.runtime.vertex(vertex_id)?;
+        for conjunct_id in &vertex.conjuncts {
+            let conjunct = self.runtime.conjunct(*conjunct_id)?;
+            if self.expr_has_direct_self_list_index(
+                conjunct.expression,
+                conjunct.environment,
+                vertex_id,
+            )? {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
+    fn expr_has_direct_self_list_index(
+        &self,
+        expression: ExprId,
+        environment: EnvironmentId,
+        vertex_id: VertexId,
+    ) -> Result<bool, EvalError> {
+        let expression = self.skip_group_exprs(expression)?;
+        match self.runtime.expression(expression)? {
+            SemanticExpr::List { items, .. } => {
+                for item in items {
+                    if self.expr_is_direct_self_index(*item, environment, vertex_id)? {
+                        return Ok(true);
+                    }
+                }
+                Ok(false)
+            }
+            SemanticExpr::Binary { op, left, right } if op == "&" => Ok(self
+                .expr_has_direct_self_list_index(*left, environment, vertex_id)?
+                || self.expr_has_direct_self_list_index(*right, environment, vertex_id)?),
+            _ => Ok(false),
+        }
+    }
+
+    fn expr_is_direct_self_index(
+        &self,
+        expression: ExprId,
+        environment: EnvironmentId,
+        vertex_id: VertexId,
+    ) -> Result<bool, EvalError> {
+        let expression = self.skip_group_exprs(expression)?;
+        let SemanticExpr::Index { base, .. } = self.runtime.expression(expression)? else {
+            return Ok(false);
+        };
+        let base = self.skip_group_exprs(*base)?;
+        let SemanticExpr::FieldReference { feature, up_count } = self.runtime.expression(base)?
+        else {
+            return Ok(false);
+        };
+        Ok(
+            self.field_reference_target_vertex(environment, *feature, *up_count)?
+                == Some(vertex_id),
+        )
+    }
+
+    fn collect_expr_reference_targets(
+        &self,
+        expression: ExprId,
+        environment: EnvironmentId,
+        targets: &mut HashSet<VertexId>,
+        visited: &mut HashSet<ExprId>,
+    ) -> Result<(), EvalError> {
+        if !visited.insert(expression) {
+            return Ok(());
+        }
+        match self.runtime.expression(expression)? {
+            SemanticExpr::Struct(members) => {
+                self.collect_struct_reference_targets(members, environment, targets, visited)?;
+            }
+            SemanticExpr::List { items, tail } => {
+                for item in items {
+                    self.collect_expr_reference_targets(*item, environment, targets, visited)?;
+                }
+                if let Some(tail) = tail {
+                    self.collect_expr_reference_targets(*tail, environment, targets, visited)?;
+                }
+            }
+            SemanticExpr::FieldReference { feature, up_count } => {
+                if let Some(target) =
+                    self.field_reference_target_vertex(environment, *feature, *up_count)?
+                {
+                    targets.insert(target);
+                }
+            }
+            SemanticExpr::LetReference { expression } | SemanticExpr::Default(expression) => {
+                self.collect_expr_reference_targets(*expression, environment, targets, visited)?;
+            }
+            SemanticExpr::Selector { base, feature } => {
+                if let Some(target) =
+                    self.selector_reference_target_vertex(*base, *feature, environment)?
+                {
+                    targets.insert(target);
+                }
+                self.collect_expr_reference_targets(*base, environment, targets, visited)?;
+            }
+            SemanticExpr::Index { base, index } => {
+                self.collect_expr_reference_targets(*base, environment, targets, visited)?;
+                self.collect_expr_reference_targets(*index, environment, targets, visited)?;
+            }
+            SemanticExpr::Slice { base, start, end } => {
+                self.collect_expr_reference_targets(*base, environment, targets, visited)?;
+                if let Some(start) = start {
+                    self.collect_expr_reference_targets(*start, environment, targets, visited)?;
+                }
+                if let Some(end) = end {
+                    self.collect_expr_reference_targets(*end, environment, targets, visited)?;
+                }
+            }
+            SemanticExpr::Call { callee, args } => {
+                self.collect_expr_reference_targets(*callee, environment, targets, visited)?;
+                for arg in args {
+                    self.collect_expr_reference_targets(*arg, environment, targets, visited)?;
+                }
+            }
+            SemanticExpr::Unary { expr, .. } => {
+                self.collect_expr_reference_targets(*expr, environment, targets, visited)?;
+            }
+            SemanticExpr::Binary { left, right, .. } => {
+                self.collect_expr_reference_targets(*left, environment, targets, visited)?;
+                self.collect_expr_reference_targets(*right, environment, targets, visited)?;
+            }
+            SemanticExpr::InterpolatedString(segments) => {
+                for segment in segments {
+                    if let StringSegment::Expr(expression) = segment {
+                        self.collect_expr_reference_targets(
+                            *expression,
+                            environment,
+                            targets,
+                            visited,
+                        )?;
+                    }
+                }
+            }
+            SemanticExpr::Comprehension(comprehension) => {
+                self.collect_comprehension_reference_targets(
+                    comprehension,
+                    environment,
+                    targets,
+                    visited,
+                )?;
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    fn collect_struct_reference_targets(
+        &self,
+        members: &[StructMember],
+        environment: EnvironmentId,
+        targets: &mut HashSet<VertexId>,
+        visited: &mut HashSet<ExprId>,
+    ) -> Result<(), EvalError> {
+        for member in members {
+            match member {
+                StructMember::Field(field) => {
+                    match &field.label {
+                        FieldLabel::Dynamic(expression) | FieldLabel::Pattern(expression) => {
+                            self.collect_expr_reference_targets(
+                                *expression,
+                                environment,
+                                targets,
+                                visited,
+                            )?;
+                        }
+                        _ => {}
+                    }
+                    self.collect_expr_reference_targets(
+                        field.expression,
+                        environment,
+                        targets,
+                        visited,
+                    )?;
+                }
+                StructMember::Comprehension(comprehension) => {
+                    self.collect_comprehension_reference_targets(
+                        comprehension,
+                        environment,
+                        targets,
+                        visited,
+                    )?;
+                }
+                _ => {}
+            }
+        }
+        Ok(())
+    }
+
+    fn collect_comprehension_reference_targets(
+        &self,
+        comprehension: &Comprehension,
+        environment: EnvironmentId,
+        targets: &mut HashSet<VertexId>,
+        visited: &mut HashSet<ExprId>,
+    ) -> Result<(), EvalError> {
+        for clause in &comprehension.clauses {
+            match clause {
+                ComprehensionClause::For { source, .. } => {
+                    self.collect_expr_reference_targets(*source, environment, targets, visited)?;
+                }
+                ComprehensionClause::If { condition } => {
+                    self.collect_expr_reference_targets(*condition, environment, targets, visited)?;
+                }
+                _ => {}
+            }
+        }
+        self.collect_expr_reference_targets(comprehension.body, environment, targets, visited)
+    }
+
+    fn selector_reference_target_vertex(
+        &self,
+        base: ExprId,
+        feature: Feature,
+        environment: EnvironmentId,
+    ) -> Result<Option<VertexId>, EvalError> {
+        let base = self.skip_group_exprs(base)?;
+        let SemanticExpr::FieldReference {
+            feature: base_feature,
+            up_count,
+        } = self.runtime.expression(base)?
+        else {
+            return Ok(None);
+        };
+        let Some(base_vertex) =
+            self.field_reference_target_vertex(environment, *base_feature, *up_count)?
+        else {
+            return Ok(None);
+        };
+        Ok(self
+            .runtime
+            .vertex(base_vertex)?
+            .arcs
+            .get(&feature)
+            .map(|arc| arc.target))
+    }
+
+    fn choice_vertex_count(&self, vertices: &HashSet<VertexId>) -> Result<usize, EvalError> {
+        let mut count = 0_usize;
+        for vertex in vertices {
+            if self.vertex_contains_choice(*vertex)? {
+                count = count.saturating_add(1);
+            }
+        }
+        Ok(count)
+    }
+
+    fn vertex_contains_choice(&self, vertex_id: VertexId) -> Result<bool, EvalError> {
+        let vertex = self.runtime.vertex(vertex_id)?;
+        for conjunct_id in &vertex.conjuncts {
+            let conjunct = self.runtime.conjunct(*conjunct_id)?;
+            let mut visited = HashSet::new();
+            if self.expr_contains_choice(conjunct.expression, &mut visited)? {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
+    fn expr_contains_choice(
+        &self,
+        expression: ExprId,
+        visited: &mut HashSet<ExprId>,
+    ) -> Result<bool, EvalError> {
+        if !visited.insert(expression) {
+            return Ok(false);
+        }
+        Ok(match self.runtime.expression(expression)? {
+            SemanticExpr::Default(_) => true,
+            SemanticExpr::Binary { op, left, right } => {
+                op == "|"
+                    || self.expr_contains_choice(*left, visited)?
+                    || self.expr_contains_choice(*right, visited)?
+            }
+            SemanticExpr::Unary { expr, .. } | SemanticExpr::LetReference { expression: expr } => {
+                self.expr_contains_choice(*expr, visited)?
+            }
+            SemanticExpr::Struct(members) => self.struct_contains_choice(members, visited)?,
+            SemanticExpr::List { items, tail } => {
+                self.exprs_contain_choice(items.iter().copied(), visited)?
+                    || self.optional_expr_contains_choice(*tail, visited)?
+            }
+            SemanticExpr::Selector { base, .. } => self.expr_contains_choice(*base, visited)?,
+            SemanticExpr::Index { base, index } => {
+                self.expr_contains_choice(*base, visited)?
+                    || self.expr_contains_choice(*index, visited)?
+            }
+            SemanticExpr::Slice { base, start, end } => {
+                self.expr_contains_choice(*base, visited)?
+                    || self.optional_expr_contains_choice(*start, visited)?
+                    || self.optional_expr_contains_choice(*end, visited)?
+            }
+            SemanticExpr::Call { callee, args } => {
+                self.expr_contains_choice(*callee, visited)?
+                    || self.exprs_contain_choice(args.iter().copied(), visited)?
+            }
+            SemanticExpr::InterpolatedString(segments) => {
+                let mut has_choice = false;
+                for segment in segments {
+                    if let StringSegment::Expr(expression) = segment {
+                        has_choice |= self.expr_contains_choice(*expression, visited)?;
+                    }
+                }
+                has_choice
+            }
+            SemanticExpr::Comprehension(comprehension) => {
+                self.comprehension_contains_choice(comprehension, visited)?
+            }
+            _ => false,
+        })
+    }
+
+    fn optional_expr_contains_choice(
+        &self,
+        expression: Option<ExprId>,
+        visited: &mut HashSet<ExprId>,
+    ) -> Result<bool, EvalError> {
+        expression.map_or(Ok(false), |expression| {
+            self.expr_contains_choice(expression, visited)
+        })
+    }
+
+    fn exprs_contain_choice(
+        &self,
+        expressions: impl IntoIterator<Item = ExprId>,
+        visited: &mut HashSet<ExprId>,
+    ) -> Result<bool, EvalError> {
+        for expression in expressions {
+            if self.expr_contains_choice(expression, visited)? {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
+    fn struct_contains_choice(
+        &self,
+        members: &[StructMember],
+        visited: &mut HashSet<ExprId>,
+    ) -> Result<bool, EvalError> {
+        for member in members {
+            match member {
+                StructMember::Field(field) => {
+                    let label_has_choice = match &field.label {
+                        FieldLabel::Dynamic(expression) | FieldLabel::Pattern(expression) => {
+                            self.expr_contains_choice(*expression, visited)?
+                        }
+                        _ => false,
+                    };
+                    if label_has_choice || self.expr_contains_choice(field.expression, visited)? {
+                        return Ok(true);
+                    }
+                }
+                StructMember::Comprehension(comprehension)
+                    if self.comprehension_contains_choice(comprehension, visited)? =>
+                {
+                    return Ok(true);
+                }
+                _ => {}
+            }
+        }
+        Ok(false)
+    }
+
+    fn comprehension_contains_choice(
+        &self,
+        comprehension: &Comprehension,
+        visited: &mut HashSet<ExprId>,
+    ) -> Result<bool, EvalError> {
+        for clause in &comprehension.clauses {
+            let has_choice = match clause {
+                ComprehensionClause::For { source, .. } => {
+                    self.expr_contains_choice(*source, visited)?
+                }
+                ComprehensionClause::If { condition } => {
+                    self.expr_contains_choice(*condition, visited)?
+                }
+                _ => false,
+            };
+            if has_choice {
+                return Ok(true);
+            }
+        }
+        self.expr_contains_choice(comprehension.body, visited)
+    }
+
+    fn cache_cycle_bottoms(&mut self, vertices: &HashSet<VertexId>) {
+        for vertex in vertices {
+            self.vertex_cache
+                .insert(*vertex, EvaluatedValue::Bottom(cycle_bottom()));
+        }
+    }
+
+    fn evaluate_fixpoint_vertices(
+        &mut self,
+        active_vertices: HashSet<VertexId>,
+    ) -> Result<(), EvalError> {
+        let ordered_vertices = sorted_vertices(active_vertices.iter().copied());
+        let previous_values = ordered_vertices
+            .iter()
+            .map(|vertex| {
+                (
+                    *vertex,
+                    self.vertex_cache
+                        .get(vertex)
+                        .cloned()
+                        .unwrap_or(EvaluatedValue::Top),
+                )
+            })
+            .collect::<HashMap<_, _>>();
+        let saved_active = mem::replace(&mut self.fixpoint_active_vertices, active_vertices);
+        let saved_previous = mem::replace(&mut self.fixpoint_previous_values, previous_values);
+        let saved_forcing = mem::take(&mut self.fixpoint_forcing_vertices);
+        let result = self.iterate_fixpoint_vertices(&ordered_vertices);
+        self.fixpoint_forcing_vertices = saved_forcing;
+        self.fixpoint_previous_values = saved_previous;
+        self.fixpoint_active_vertices = saved_active;
+        result
+    }
+
+    fn iterate_fixpoint_vertices(
+        &mut self,
+        ordered_vertices: &[VertexId],
+    ) -> Result<(), EvalError> {
+        let mut final_values = HashMap::new();
+        let mut converged = false;
+        for _ in 0..MAX_FIXPOINT_ITERATIONS {
+            self.clear_fixpoint_cache_entries(ordered_vertices);
+            let next_values = self.evaluate_fixpoint_iteration(ordered_vertices)?;
+            if next_values == self.fixpoint_previous_values {
+                final_values = next_values;
+                converged = true;
+                break;
+            }
+            self.fixpoint_previous_values.clone_from(&next_values);
+            final_values = next_values;
+        }
+        if !converged {
+            final_values = ordered_vertices
+                .iter()
+                .copied()
+                .map(|vertex| (vertex, cycle_fixpoint_limit_bottom()))
+                .collect();
+        }
+        self.clear_fixpoint_cache_entries(ordered_vertices);
+        self.vertex_cache.extend(final_values);
+        Ok(())
+    }
+
+    fn clear_fixpoint_cache_entries(&mut self, ordered_vertices: &[VertexId]) {
+        for vertex in ordered_vertices {
+            self.vertex_cache.remove(vertex);
+        }
+    }
+
+    fn evaluate_fixpoint_iteration(
+        &mut self,
+        ordered_vertices: &[VertexId],
+    ) -> Result<HashMap<VertexId, EvaluatedValue>, EvalError> {
+        let mut next_values = HashMap::with_capacity(ordered_vertices.len());
+        for vertex in ordered_vertices {
+            self.fixpoint_forcing_vertices.insert(*vertex);
+            let value = self.evaluate_vertex_at(*vertex, 0)?;
+            self.fixpoint_forcing_vertices.remove(vertex);
+            next_values.insert(*vertex, value);
+        }
+        Ok(next_values)
     }
 
     fn evaluate_expr_at(
@@ -2545,6 +3143,117 @@ fn comprehension_items(
     }
 }
 
+fn sorted_vertices(vertices: impl IntoIterator<Item = VertexId>) -> Vec<VertexId> {
+    let mut vertices = vertices.into_iter().collect::<Vec<_>>();
+    vertices.sort_unstable();
+    vertices
+}
+
+fn cyclic_graph_components(graph: &HashMap<VertexId, HashSet<VertexId>>) -> Vec<HashSet<VertexId>> {
+    let mut visited = HashSet::new();
+    let mut order = Vec::new();
+    for vertex in sorted_vertices(graph.keys().copied()) {
+        visit_dependency_order(vertex, graph, &mut visited, &mut order);
+    }
+    let reverse = reverse_dependency_graph(graph);
+    let mut components = Vec::new();
+    visited.clear();
+    while let Some(vertex) = order.pop() {
+        if visited.contains(&vertex) {
+            continue;
+        }
+        let mut component = HashSet::new();
+        visit_dependency_component(vertex, &reverse, &mut visited, &mut component);
+        components.push(component);
+    }
+    components.into_iter().filter(is_cyclic_component).collect()
+}
+
+fn visit_dependency_order(
+    vertex: VertexId,
+    graph: &HashMap<VertexId, HashSet<VertexId>>,
+    visited: &mut HashSet<VertexId>,
+    order: &mut Vec<VertexId>,
+) {
+    if !visited.insert(vertex) {
+        return;
+    }
+    let neighbors = graph
+        .get(&vertex)
+        .map(|edges| sorted_vertices(edges.iter().copied()))
+        .unwrap_or_default();
+    for neighbor in neighbors {
+        visit_dependency_order(neighbor, graph, visited, order);
+    }
+    order.push(vertex);
+}
+
+fn reverse_dependency_graph(
+    graph: &HashMap<VertexId, HashSet<VertexId>>,
+) -> HashMap<VertexId, HashSet<VertexId>> {
+    let mut reverse = graph
+        .keys()
+        .copied()
+        .map(|vertex| (vertex, HashSet::new()))
+        .collect::<HashMap<_, _>>();
+    for (source, targets) in graph {
+        for target in targets {
+            reverse.entry(*target).or_default().insert(*source);
+        }
+    }
+    reverse
+}
+
+fn visit_dependency_component(
+    vertex: VertexId,
+    graph: &HashMap<VertexId, HashSet<VertexId>>,
+    visited: &mut HashSet<VertexId>,
+    component: &mut HashSet<VertexId>,
+) {
+    if !visited.insert(vertex) {
+        return;
+    }
+    component.insert(vertex);
+    let neighbors = graph
+        .get(&vertex)
+        .map(|edges| sorted_vertices(edges.iter().copied()))
+        .unwrap_or_default();
+    for neighbor in neighbors {
+        visit_dependency_component(neighbor, graph, visited, component);
+    }
+}
+
+fn is_cyclic_component(component: &HashSet<VertexId>) -> bool {
+    component.len() > 1
+}
+
+fn cycle_fixpoint_limit_bottom() -> EvaluatedValue {
+    EvaluatedValue::Bottom(Bottom::new(
+        "cue.eval.cycle_fixpoint_limit",
+        "cycle fixpoint did not converge",
+        None,
+        false,
+    ))
+}
+
+fn cycle_bottom() -> Bottom {
+    Bottom::new(
+        "cue.eval.cycle",
+        "cycle has unresolved disjunctions",
+        None,
+        false,
+    )
+}
+
+fn depth_limit_bottom() -> EvaluatedValue {
+    EvaluatedValue::Bottom(Bottom::new(
+        "cue.eval.depth_limit",
+        "evaluation depth limit exceeded",
+        None,
+        false,
+    ))
+}
+
 fn value_from_base(base: &BaseValue) -> EvaluatedValue {
     match base {
         BaseValue::Top => EvaluatedValue::Top,
@@ -2624,11 +3333,11 @@ fn evaluate_unary(op: &str, value: EvaluatedValue) -> EvaluatedValue {
             pattern,
             negated: op == "!~",
         },
-        ("<" | "<=" | ">" | ">=", EvaluatedValue::Number(value)) => {
-            if let Some(op) = numeric_bound_op(op) {
+        ("<" | "<=" | ">" | ">=", value) => {
+            if let (Some(op), Some(value)) = (numeric_bound_op(op), numeric_bound_literal(&value)) {
                 EvaluatedValue::NumericConstraint(vec![NumericBound { op, value }])
             } else {
-                invalid_unary(op, &EvaluatedValue::Number(value))
+                invalid_unary(op, &value)
             }
         }
         (op, value) => EvaluatedValue::Bottom(Bottom::new(
@@ -2637,6 +3346,22 @@ fn evaluate_unary(op: &str, value: EvaluatedValue) -> EvaluatedValue {
             None,
             false,
         )),
+    }
+}
+
+fn numeric_bound_literal(value: &EvaluatedValue) -> Option<String> {
+    match value {
+        EvaluatedValue::Number(value) => Some(value.clone()),
+        EvaluatedValue::Default(value) => numeric_bound_literal(value),
+        EvaluatedValue::Disjunction(disjuncts) => {
+            let mut defaults = disjuncts
+                .iter()
+                .filter(|disjunct| disjunct.default)
+                .filter_map(|disjunct| numeric_bound_literal(&disjunct.value));
+            let value = defaults.next()?;
+            defaults.next().is_none().then_some(value)
+        }
+        _ => None,
     }
 }
 
@@ -4374,6 +5099,16 @@ fn evaluate_len(args: Vec<EvaluatedValue>) -> EvaluatedValue {
 }
 
 fn evaluate_binary(op: &str, left: EvaluatedValue, right: EvaluatedValue) -> EvaluatedValue {
+    if should_distribute_binary(op) && (is_choice_value(&left) || is_choice_value(&right)) {
+        return evaluate_choice_binary(op, left, right);
+    }
+    evaluate_plain_binary(op, left, right)
+}
+
+fn evaluate_plain_binary(op: &str, left: EvaluatedValue, right: EvaluatedValue) -> EvaluatedValue {
+    if let Some(value) = evaluate_incomplete_binary(op, &left, &right) {
+        return value;
+    }
     match op {
         "&&" => evaluate_bool_binary("&&", left, right),
         "||" => evaluate_bool_binary("||", left, right),
@@ -4393,6 +5128,57 @@ fn evaluate_binary(op: &str, left: EvaluatedValue, right: EvaluatedValue) -> Eva
             false,
         )),
     }
+}
+
+fn should_distribute_binary(op: &str) -> bool {
+    matches!(op, "+" | "*" | "-" | "/" | "<" | "<=" | ">" | ">=")
+}
+
+fn is_choice_value(value: &EvaluatedValue) -> bool {
+    matches!(
+        value,
+        EvaluatedValue::Default(_) | EvaluatedValue::Disjunction(_)
+    )
+}
+
+fn evaluate_choice_binary(op: &str, left: EvaluatedValue, right: EvaluatedValue) -> EvaluatedValue {
+    let left_disjuncts = disjuncts_from(left);
+    let right_disjuncts = disjuncts_from(right);
+    let mut results =
+        Vec::with_capacity(left_disjuncts.len().saturating_mul(right_disjuncts.len()));
+    for left in &left_disjuncts {
+        for right in &right_disjuncts {
+            let value = evaluate_plain_binary(
+                op,
+                left.value.as_ref().clone(),
+                right.value.as_ref().clone(),
+            );
+            if !matches!(value, EvaluatedValue::Bottom(_)) {
+                results.push(Disjunct {
+                    value: Box::new(value),
+                    default: left.default || right.default,
+                });
+            }
+        }
+    }
+    collapse_disjunction(EvaluatedValue::Disjunction(unique_disjuncts(results)))
+}
+
+fn evaluate_incomplete_binary(
+    op: &str,
+    left: &EvaluatedValue,
+    right: &EvaluatedValue,
+) -> Option<EvaluatedValue> {
+    if should_distribute_binary(op)
+        && (is_incomplete_binary_operand(left) || is_incomplete_binary_operand(right))
+    {
+        return Some(EvaluatedValue::Top);
+    }
+    None
+}
+
+fn is_incomplete_binary_operand(value: &EvaluatedValue) -> bool {
+    matches!(value, EvaluatedValue::Top)
 }
 
 fn evaluate_bool_binary(op: &str, left: EvaluatedValue, right: EvaluatedValue) -> EvaluatedValue {
@@ -4639,6 +5425,9 @@ fn disjuncts_from(value: EvaluatedValue) -> Vec<Disjunct> {
     match value {
         EvaluatedValue::Bottom(_) => Vec::new(),
         EvaluatedValue::Disjunction(disjuncts) => disjuncts,
+        EvaluatedValue::Default(value) if matches!(value.as_ref(), EvaluatedValue::Bottom(_)) => {
+            Vec::new()
+        }
         EvaluatedValue::Default(value) => vec![Disjunct {
             value,
             default: true,

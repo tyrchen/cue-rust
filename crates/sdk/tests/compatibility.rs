@@ -352,12 +352,12 @@ async fn push_known_gap_cases(
     ));
     push_phase9_parity_cases(context, cases);
     cases.push(expected_gap_case(
-        "eval/cycle-scheduler",
+        "eval/upstream-cycle-diagnostics",
         "semantic-gap",
         "inline and top-level structural/list cycles now resolve for the currently covered vendor \
-         cases, but full upstream cycle scheduling still needs public structural-cycle \
-         diagnostics, broader structural-cycle coverage, and lazy disjunction/default fixpoint \
-         support",
+         cases, and disjunction/default fixpoint cycles are covered by supported parity cases; \
+         remaining upstream parity work is broader cycle-diagnostic coverage and exact diagnostic \
+         shaping",
     ));
     Ok(())
 }
@@ -416,8 +416,14 @@ fn push_phase9_parity_cases(context: &Context, cases: &mut Vec<CompatibilityCase
          c[0]]}\nrootListValue: 100\nrootListT0: [rootListT0[0]]\nrootListPair: [rootListPair[1], \
          rootListPair[0]]\nrootListGrounded: [rootListGrounded[1], rootListValue]\nstructCycle: \
          {self: s1: s1 & {a: 1}, two: {s1: s2 & {a: 1}, s2: s1 & {b: 2}}, three: {s1: s2 & {a: \
-         1}, s2: s3 & {b: 2}, s3: s1 & {c: 3}}}\nstructuralBad: {a: c: a}\ninvalidDynamic: {(1): \
-         1}\ncycle: cycle\n",
+         1}, s2: s3 & {b: 2}, s3: s1 & {c: 3}}}\nfixCycle: {xa1: (xa2 & 8) | (xa4 & 9), xa2: xa3 \
+         + 2, xa3: 6 & xa1-2, xa4: xa2 + 2}\ndefaultCycle: {xa1: (xa2 & 8) | *(xa4 & 9), xa2: xa3 \
+         + 2, xa3: 6 & xa1-2, xa4: xa2 + 2}\ndefaultBound: {min: *1 | int, range: >min, range: \
+         8}\ndefaultBoundGrounded: {min: *1 | int, max: int & >min} & {max: 8}\nxb1: (xb2 & 8) | \
+         (xb4 & 9)\nxb2: xb3 + 2\nxb3: (6 & (xb1 - 2)) | (xb4 & 9)\nxb4: xb2 + 2\ndb1: *(db2 & 8) \
+         | (db4 & 9)\ndb2: db3 + 2\ndb3: *(6 & (db1 - 2)) | (db4 & 9)\ndb4: db2 + \
+         2\nabstractArithmetic: (int + 1) + (int + 1)\nboundArithmetic: (>10 * 2) & \
+         0\nstructuralBad: {a: c: a}\ninvalidDynamic: {(1): 1}\ncycle: cycle\n",
     ) else {
         cases.push(supported_case("phase9/parity-tranche", "semantic", false));
         return;
@@ -591,6 +597,36 @@ fn push_phase9_cycle_cases(value: &cue_rust::Value, cases: &mut Vec<Compatibilit
         "semantic-gap",
         structural_cycle_bottom_passes(value),
     ));
+
+    cases.push(supported_case(
+        "eval/disjunction-cycle-fixpoint",
+        "semantic-gap",
+        disjunction_cycle_fixpoint_passes(value, "fixCycle"),
+    ));
+
+    cases.push(supported_case(
+        "eval/default-disjunction-cycle-fixpoint",
+        "semantic-gap",
+        disjunction_cycle_fixpoint_passes(value, "defaultCycle"),
+    ));
+
+    cases.push(supported_case(
+        "eval/default-reference-bound",
+        "semantic-gap",
+        default_reference_bound_passes(value),
+    ));
+
+    cases.push(supported_case(
+        "eval/reject-unresolved-disjunction-cycle",
+        "semantic-gap",
+        unresolved_disjunction_cycle_passes(value),
+    ));
+
+    cases.push(supported_case(
+        "eval/reject-abstract-arithmetic",
+        "semantic-gap",
+        abstract_arithmetic_passes(value),
+    ));
 }
 
 fn tautological_list_cycles_pass(value: &cue_rust::Value) -> bool {
@@ -635,6 +671,45 @@ fn structural_cycle_bottom_passes(value: &cue_rust::Value) -> bool {
                     if bottom.code == "cue.eval.structural_cycle"
             )
         })
+}
+
+fn disjunction_cycle_fixpoint_passes(value: &cue_rust::Value, root: &str) -> bool {
+    evaluated_path_number(value, &[root, "xa1"], "8")
+        && evaluated_path_number(value, &[root, "xa2"], "8")
+        && evaluated_path_number(value, &[root, "xa3"], "6")
+        && evaluated_path_number(value, &[root, "xa4"], "10")
+}
+
+fn default_reference_bound_passes(value: &cue_rust::Value) -> bool {
+    evaluated_path_number(value, &["defaultBound", "range"], "8")
+        && evaluated_path_number(value, &["defaultBoundGrounded", "max"], "8")
+}
+
+fn unresolved_disjunction_cycle_passes(value: &cue_rust::Value) -> bool {
+    path_is_cycle_bottom(value, &["xb1"]) && path_is_cycle_bottom(value, &["db1"])
+}
+
+fn path_is_cycle_bottom(value: &cue_rust::Value, path: &[&str]) -> bool {
+    value
+        .lookup_path(path)
+        .and_then(|value| value.evaluate())
+        .is_ok_and(|value| {
+            matches!(
+                value,
+                cue_rust::EvaluatedValue::Bottom(bottom) if bottom.code == "cue.eval.cycle"
+            )
+        })
+}
+
+fn abstract_arithmetic_passes(value: &cue_rust::Value) -> bool {
+    value
+        .lookup_path(&["abstractArithmetic"])
+        .and_then(|value| value.validate(ValidateOptions::default()))
+        .is_err()
+        && value
+            .lookup_path(&["boundArithmetic"])
+            .and_then(|value| value.validate(ValidateOptions::default()))
+            .is_err()
 }
 
 fn evaluated_path_number(value: &cue_rust::Value, path: &[&str], expected: &str) -> bool {
