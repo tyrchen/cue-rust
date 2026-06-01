@@ -342,16 +342,29 @@ mod tests {
     }
 
     #[test]
-    fn test_should_resolve_structural_cycles_to_fixpoint() -> Result<(), Box<dyn std::error::Error>>
+    fn test_should_resolve_local_list_self_index_cycles() -> Result<(), Box<dyn std::error::Error>>
     {
         let context = Context::new();
         let value = context.compile_source(
             "test.cue",
-            "a: 100\nlist: {p1: c: [c[1], a], p2: c: [a, c[0]]}\nshadow: {x: {y: {z: x, x: \
-             1}}}\ntop: s1: s1 & {a: 1}\nnodes: {\nself: s1: s1 & {a: 1}\ntwo: {s1: s2 & {a: 1}, \
-             s2: s1 & {b: 2}}\nthree: {s1: s2 & {a: 1}, s2: s3 & {b: 2}, s3: s1 & {c: 3}}\n}\n",
+            "a: 100\nlist: {t0: c: [c[0]], grouped: c: [(c)[0]], pair: c: [c[1], c[0]], p1: c: \
+             [c[1], a], p2: c: [a, c[0]], open: c: [c[1], ...int], badIndex: c: [c[\"x\"]], \
+             chain: c: [c[1], c[2], 42], addSelf: c: [c[0] + 1], foreign: {a: {b: a}.b, c: [a[1], \
+             2]}, constrained: {a: 100, c: [c[1], a] & [100, 100]}}\n",
         )?;
 
+        assert_eq!(
+            EvaluatedValue::List(vec![EvaluatedValue::Top]),
+            value.lookup_path(&["list", "t0", "c"])?.evaluate()?,
+        );
+        assert_eq!(
+            EvaluatedValue::List(vec![EvaluatedValue::Top]),
+            value.lookup_path(&["list", "grouped", "c"])?.evaluate()?,
+        );
+        assert_eq!(
+            EvaluatedValue::List(vec![EvaluatedValue::Top, EvaluatedValue::Top]),
+            value.lookup_path(&["list", "pair", "c"])?.evaluate()?,
+        );
         assert_eq!(
             EvaluatedValue::List(vec![
                 EvaluatedValue::Number("100".to_owned()),
@@ -366,11 +379,91 @@ mod tests {
             ]),
             value.lookup_path(&["list", "p2", "c"])?.evaluate()?,
         );
+        assert_eq!(
+            EvaluatedValue::OpenList {
+                items: vec![EvaluatedValue::Kind(ValueKind::Int)],
+                tail: Box::new(EvaluatedValue::Kind(ValueKind::Int)),
+            },
+            value.lookup_path(&["list", "open", "c"])?.evaluate()?,
+        );
+        assert!(matches!(
+            value.lookup_path(&["list", "badIndex", "c"])?.evaluate()?,
+            EvaluatedValue::List(items)
+                if matches!(
+                    items.first(),
+                    Some(EvaluatedValue::Bottom(bottom))
+                        if bottom.code == "cue.eval.invalid_index"
+                ),
+        ));
+        assert_eq!(
+            EvaluatedValue::List(vec![
+                EvaluatedValue::Number("42".to_owned()),
+                EvaluatedValue::Number("42".to_owned()),
+                EvaluatedValue::Number("42".to_owned()),
+            ]),
+            value.lookup_path(&["list", "chain", "c"])?.evaluate()?,
+        );
+        assert!(matches!(
+            value.lookup_path(&["list", "addSelf", "c"])?.evaluate()?,
+            EvaluatedValue::List(items)
+                if matches!(
+                    items.first(),
+                    Some(EvaluatedValue::Bottom(bottom))
+                        if bottom.code == "cue.eval.unsupported_add"
+                ),
+        ));
+        assert!(matches!(
+            value.lookup_path(&["list", "foreign", "c"])?.evaluate()?,
+            EvaluatedValue::List(items)
+                if matches!(
+                    items.first(),
+                    Some(EvaluatedValue::Bottom(bottom))
+                        if bottom.code == "cue.eval.structural_cycle"
+                ),
+        ));
+        assert_eq!(
+            EvaluatedValue::List(vec![
+                EvaluatedValue::Number("100".to_owned()),
+                EvaluatedValue::Number("100".to_owned()),
+            ]),
+            value
+                .lookup_path(&["list", "constrained", "c"])?
+                .evaluate()?,
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_should_resolve_structural_cycles_to_fixpoint() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let context = Context::new();
+        let value = context.compile_source(
+            "test.cue",
+            "shadow: {x: {y: {z: x, x: 1}}}\nordinary: {y: x, x: y}\ninvalid: {a: c: a}\ntop: s1: \
+             s1 & {a: 1}\nnodes: {\nself: s1: s1 & {a: 1}\ntwo: {s1: s2 & {a: 1}, s2: s1 & {b: \
+             2}}\nthree: {s1: s2 & {a: 1}, s2: s3 & {b: 2}, s3: s1 & {c: 3}}\n}\n",
+        )?;
+
         assert_evaluated_path(
             &value.lookup_path(&["shadow", "x", "y"])?,
             "z",
             &EvaluatedValue::Number("1".to_owned()),
         )?;
+        assert_eq!(
+            EvaluatedValue::Top,
+            value.lookup_path(&["ordinary", "x"])?.evaluate()?,
+        );
+        assert_eq!(
+            EvaluatedValue::Top,
+            value.lookup_path(&["ordinary", "y"])?.evaluate()?,
+        );
+        let mut options = ValidateOptions::default();
+        options.concrete = false;
+        value.lookup_path(&["ordinary"])?.validate(options)?;
+        assert!(matches!(
+            value.lookup_path(&["invalid", "a", "c"])?.evaluate()?,
+            EvaluatedValue::Bottom(bottom) if bottom.code == "cue.eval.structural_cycle",
+        ));
         assert_evaluated_path(
             &value.lookup_path(&["top", "s1"])?,
             "a",

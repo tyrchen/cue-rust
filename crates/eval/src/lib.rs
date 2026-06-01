@@ -500,15 +500,23 @@ struct Evaluator<'runtime> {
     local_value_scopes: Vec<LocalValueScope>,
     local_evaluating: Vec<HashSet<Feature>>,
     local_bindings: Vec<IndexMap<String, EvaluatedValue>>,
+    field_evaluation_stack: Vec<FieldEvaluation>,
     vertex_cache: HashMap<VertexId, EvaluatedValue>,
     evaluating_vertices: HashSet<VertexId>,
     cycle_fallback_to_top: u32,
+    defer_list_self_indexes: u32,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct LocalField {
     expression: ExprId,
     metadata: FieldMetadata,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct FieldEvaluation {
+    scope_index: usize,
+    feature: Feature,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -549,9 +557,11 @@ impl<'runtime> Evaluator<'runtime> {
             local_value_scopes: Vec::new(),
             local_evaluating: Vec::new(),
             local_bindings: Vec::new(),
+            field_evaluation_stack: Vec::new(),
             vertex_cache: HashMap::new(),
             evaluating_vertices: HashSet::new(),
             cycle_fallback_to_top: 0,
+            defer_list_self_indexes: 0,
         }
     }
 
@@ -688,21 +698,7 @@ impl<'runtime> Evaluator<'runtime> {
                 self.evaluate_struct_fields(fields, environment, depth + 1)?
             }
             SemanticExpr::List { items, tail } => {
-                let mut values = Vec::with_capacity(items.len());
-                for item in items {
-                    match self.evaluate_expr_at(*item, environment, depth + 1)? {
-                        EvaluatedValue::ComprehensionItems(items) => values.extend(items),
-                        value => values.push(value),
-                    }
-                }
-                if let Some(tail) = tail {
-                    EvaluatedValue::OpenList {
-                        items: values,
-                        tail: Box::new(self.evaluate_expr_at(*tail, environment, depth + 1)?),
-                    }
-                } else {
-                    EvaluatedValue::List(values)
-                }
+                self.evaluate_list_expr(items, *tail, environment, depth + 1)?
             }
             SemanticExpr::FieldReference { feature, up_count } => {
                 self.evaluate_field_reference(environment, *feature, *up_count, depth + 1)?
@@ -724,7 +720,7 @@ impl<'runtime> Evaluator<'runtime> {
             SemanticExpr::Index { base, index } => {
                 let base_value = self.evaluate_expr_at(*base, environment, depth + 1)?;
                 let index_value = self.evaluate_expr_at(*index, environment, depth + 1)?;
-                evaluate_index(base_value, index_value)
+                evaluate_index(base_value, index_value, self.defer_list_self_indexes > 0)
             }
             SemanticExpr::Slice { base, start, end } => {
                 let base_value = self.evaluate_expr_at(*base, environment, depth + 1)?;
@@ -869,9 +865,14 @@ impl<'runtime> Evaluator<'runtime> {
         };
         if let Some(feature) = static_feature {
             self.mark_local_feature_evaluating(feature);
+            self.field_evaluation_stack.push(FieldEvaluation {
+                scope_index: self.current_local_struct_scope_index(),
+                feature,
+            });
         }
         let value_result = self.evaluate_expr_at(field.expression, environment, depth);
         if let Some(feature) = static_feature {
+            self.field_evaluation_stack.pop();
             self.unmark_local_feature_evaluating(feature);
         }
         let mut value = value_result?;
@@ -899,6 +900,10 @@ impl<'runtime> Evaluator<'runtime> {
         if let Some(features) = self.local_evaluating.last_mut() {
             features.remove(&feature);
         }
+    }
+
+    fn current_local_struct_scope_index(&self) -> usize {
+        self.local_evaluating.len().saturating_sub(1)
     }
 
     fn evaluate_with_cycle_fallback<T>(
@@ -958,6 +963,86 @@ impl<'runtime> Evaluator<'runtime> {
             self.evaluate_expr_at(right, environment, depth)?
         };
         Ok(evaluate_binary(op, left, right))
+    }
+
+    fn evaluate_list_item(
+        &mut self,
+        item: ExprId,
+        environment: EnvironmentId,
+        depth: u32,
+    ) -> Result<EvaluatedValue, EvalError> {
+        if self.is_direct_self_list_index(item)? {
+            self.defer_list_self_indexes = self.defer_list_self_indexes.saturating_add(1);
+            let value = self.evaluate_expr_at(item, environment, depth);
+            self.defer_list_self_indexes = self.defer_list_self_indexes.saturating_sub(1);
+            return value;
+        }
+        self.evaluate_expr_at(item, environment, depth)
+    }
+
+    fn is_direct_self_list_index(&self, item: ExprId) -> Result<bool, EvalError> {
+        let item = self.skip_group_exprs(item)?;
+        let SemanticExpr::Index { base, .. } = self.runtime.expression(item)? else {
+            return Ok(false);
+        };
+        let base = self.skip_group_exprs(*base)?;
+        let SemanticExpr::FieldReference { feature, up_count } = self.runtime.expression(base)?
+        else {
+            return Ok(false);
+        };
+        Ok(*up_count == 0
+            && self
+                .field_evaluation_stack
+                .last()
+                .is_some_and(|current| current.feature == *feature))
+    }
+
+    fn skip_group_exprs(&self, expression: ExprId) -> Result<ExprId, EvalError> {
+        let mut current = expression;
+        loop {
+            let SemanticExpr::Unary { op, expr } = self.runtime.expression(current)? else {
+                return Ok(current);
+            };
+            if op != "group" {
+                return Ok(current);
+            }
+            current = *expr;
+        }
+    }
+
+    fn evaluate_list_expr(
+        &mut self,
+        items: &[ExprId],
+        tail: Option<ExprId>,
+        environment: EnvironmentId,
+        depth: u32,
+    ) -> Result<EvaluatedValue, EvalError> {
+        let mut values = Vec::with_capacity(items.len());
+        for item in items {
+            match self.evaluate_list_item(*item, environment, depth)? {
+                EvaluatedValue::ComprehensionItems(items) => values.extend(items),
+                value => values.push(value),
+            }
+        }
+        let tail_value = tail
+            .map(|tail| self.evaluate_expr_at(tail, environment, depth))
+            .transpose()?;
+        resolve_deferred_list_indexes(&mut values, tail_value.as_ref());
+        Ok(if tail.is_some() {
+            EvaluatedValue::OpenList {
+                items: values,
+                tail: Box::new(tail_value.unwrap_or_else(|| {
+                    EvaluatedValue::Bottom(Bottom::new(
+                        "cue.eval.invalid_open_list",
+                        "open list tail did not evaluate",
+                        None,
+                        false,
+                    ))
+                })),
+            }
+        } else {
+            EvaluatedValue::List(values)
+        })
     }
 
     fn evaluate_pattern_field(
@@ -1410,9 +1495,22 @@ impl<'runtime> Evaluator<'runtime> {
                         .local_evaluating
                         .get(struct_scope_index)
                         .is_some_and(|features| features.contains(&feature))
-                        && self.cycle_fallback_to_top > 0
                     {
-                        return Ok(Some(EvaluatedValue::Top));
+                        if self.defer_list_self_indexes > 0
+                            && self.is_current_local_field(struct_scope_index, feature)
+                        {
+                            return Ok(Some(EvaluatedValue::Bottom(structural_cycle_bottom())));
+                        }
+                        if self.cycle_fallback_to_top > 0 {
+                            return Ok(Some(EvaluatedValue::Top));
+                        }
+                        return Ok(Some(
+                            if self.is_structural_ancestor_cycle(struct_scope_index) {
+                                EvaluatedValue::Bottom(structural_cycle_bottom())
+                            } else {
+                                EvaluatedValue::Top
+                            },
+                        ));
                     }
                     if is_optional_constraint(field.metadata) {
                         let label = self.feature_label(feature);
@@ -1425,6 +1523,18 @@ impl<'runtime> Evaluator<'runtime> {
             }
         }
         Ok(None)
+    }
+
+    fn is_current_local_field(&self, scope_index: usize, feature: Feature) -> bool {
+        self.field_evaluation_stack
+            .last()
+            .is_some_and(|current| current.scope_index == scope_index && current.feature == feature)
+    }
+
+    fn is_structural_ancestor_cycle(&self, scope_index: usize) -> bool {
+        self.field_evaluation_stack
+            .last()
+            .is_some_and(|current| current.scope_index > scope_index)
     }
 
     fn evaluate_dynamic_reference(&self, name: &str) -> EvaluatedValue {
@@ -1683,6 +1793,30 @@ fn optional_reference_bottom(label: &str) -> EvaluatedValue {
         format!("cannot reference optional field `{label}`"),
         None,
         false,
+    ))
+}
+
+fn structural_cycle_bottom() -> Bottom {
+    Bottom::new("cue.eval.structural_cycle", "structural cycle", None, false)
+}
+
+fn deferred_list_index(index: EvaluatedValue) -> EvaluatedValue {
+    let EvaluatedValue::Number(index) = index else {
+        return invalid_list_index_type();
+    };
+    let Some(index) = parse_list_index(&index) else {
+        return EvaluatedValue::Bottom(Bottom::new(
+            "cue.eval.invalid_index",
+            format!("invalid list index `{index}`"),
+            None,
+            false,
+        ));
+    };
+    EvaluatedValue::Bottom(Bottom::new(
+        "cue.eval.deferred_list_index",
+        index.to_string(),
+        None,
+        true,
     ))
 }
 
@@ -4442,8 +4576,27 @@ fn number_satisfies_bounds(value: &str, bounds: &[NumericBound]) -> Result<bool,
     Ok(true)
 }
 
-fn evaluate_index(base: EvaluatedValue, index: EvaluatedValue) -> EvaluatedValue {
+fn evaluate_index(
+    base: EvaluatedValue,
+    index: EvaluatedValue,
+    defer_list_self_index: bool,
+) -> EvaluatedValue {
     match base {
+        EvaluatedValue::Bottom(bottom)
+            if bottom.code == "cue.eval.structural_cycle"
+                && defer_list_self_index
+                && matches!(index, EvaluatedValue::Number(_)) =>
+        {
+            deferred_list_index(index)
+        }
+        EvaluatedValue::Bottom(bottom)
+            if bottom.code == "cue.eval.structural_cycle"
+                && defer_list_self_index
+                && !matches!(index, EvaluatedValue::Number(_)) =>
+        {
+            invalid_list_index_type()
+        }
+        EvaluatedValue::Bottom(bottom) => EvaluatedValue::Bottom(bottom),
         EvaluatedValue::List(items) => evaluate_list_index(&items, index),
         EvaluatedValue::OpenList { items, tail } => evaluate_open_list_index(&items, &tail, index),
         EvaluatedValue::Struct(fields)
@@ -4463,12 +4616,7 @@ fn evaluate_index(base: EvaluatedValue, index: EvaluatedValue) -> EvaluatedValue
 
 fn evaluate_list_index(items: &[EvaluatedValue], index: EvaluatedValue) -> EvaluatedValue {
     let EvaluatedValue::Number(index) = index else {
-        return EvaluatedValue::Bottom(Bottom::new(
-            "cue.eval.invalid_index",
-            "list index must be a non-negative integer",
-            None,
-            false,
-        ));
+        return invalid_list_index_type();
     };
     let Some(index) = parse_list_index(&index) else {
         return EvaluatedValue::Bottom(Bottom::new(
@@ -4486,6 +4634,60 @@ fn evaluate_list_index(items: &[EvaluatedValue], index: EvaluatedValue) -> Evalu
             false,
         ))
     })
+}
+
+fn invalid_list_index_type() -> EvaluatedValue {
+    EvaluatedValue::Bottom(Bottom::new(
+        "cue.eval.invalid_index",
+        "list index must be a non-negative integer",
+        None,
+        false,
+    ))
+}
+
+fn resolve_deferred_list_indexes(items: &mut [EvaluatedValue], tail: Option<&EvaluatedValue>) {
+    let snapshot = items.to_vec();
+    for (index, item) in items.iter_mut().enumerate() {
+        *item = resolve_deferred_list_index(index, &snapshot, tail);
+    }
+}
+
+fn resolve_deferred_list_index(
+    index: usize,
+    snapshot: &[EvaluatedValue],
+    tail: Option<&EvaluatedValue>,
+) -> EvaluatedValue {
+    let mut next = index;
+    let mut seen = HashSet::new();
+    loop {
+        if !seen.insert(next) {
+            return EvaluatedValue::Top;
+        }
+        let Some(next_value) = snapshot.get(next) else {
+            return tail.cloned().unwrap_or_else(|| {
+                EvaluatedValue::Bottom(Bottom::new(
+                    "cue.eval.index_out_of_bounds",
+                    format!("list index {next} is out of bounds"),
+                    None,
+                    false,
+                ))
+            });
+        };
+        let Some(deferred) = deferred_list_index_target(next_value) else {
+            return next_value.clone();
+        };
+        next = deferred;
+    }
+}
+
+fn deferred_list_index_target(value: &EvaluatedValue) -> Option<usize> {
+    let EvaluatedValue::Bottom(bottom) = value else {
+        return None;
+    };
+    if bottom.code != "cue.eval.deferred_list_index" {
+        return None;
+    }
+    parse_list_index(&bottom.message)
 }
 
 fn evaluate_open_list_index(
