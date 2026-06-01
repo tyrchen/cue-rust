@@ -497,15 +497,24 @@ struct Evaluator<'runtime> {
     export_options: Option<ExportOptions>,
     local_fields: Vec<IndexMap<Feature, LocalField>>,
     local_values: Vec<IndexMap<Feature, EvaluatedValue>>,
+    local_value_scopes: Vec<LocalValueScope>,
+    local_evaluating: Vec<HashSet<Feature>>,
     local_bindings: Vec<IndexMap<String, EvaluatedValue>>,
     vertex_cache: HashMap<VertexId, EvaluatedValue>,
     evaluating_vertices: HashSet<VertexId>,
+    cycle_fallback_to_top: u32,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct LocalField {
     expression: ExprId,
     metadata: FieldMetadata,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum LocalValueScope {
+    Struct,
+    Overlay,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -537,9 +546,12 @@ impl<'runtime> Evaluator<'runtime> {
             export_options: None,
             local_fields: Vec::new(),
             local_values: Vec::new(),
+            local_value_scopes: Vec::new(),
+            local_evaluating: Vec::new(),
             local_bindings: Vec::new(),
             vertex_cache: HashMap::new(),
             evaluating_vertices: HashSet::new(),
+            cycle_fallback_to_top: 0,
         }
     }
 
@@ -568,6 +580,9 @@ impl<'runtime> Evaluator<'runtime> {
             return Ok(value.clone());
         }
         if !self.evaluating_vertices.insert(vertex_id) {
+            if self.cycle_fallback_to_top > 0 {
+                return Ok(EvaluatedValue::Top);
+            }
             return Ok(EvaluatedValue::Bottom(Bottom::new(
                 "cue.eval.cycle",
                 "cyclic reference cannot be resolved by the current evaluator",
@@ -731,9 +746,7 @@ impl<'runtime> Evaluator<'runtime> {
                 evaluate_unary(op, value)
             }
             SemanticExpr::Binary { op, left, right } => {
-                let left = self.evaluate_expr_at(*left, environment, depth + 1)?;
-                let right = self.evaluate_expr_at(*right, environment, depth + 1)?;
-                evaluate_binary(op, left, right)
+                self.evaluate_binary_expr(op, *left, *right, environment, depth + 1)?
             }
             SemanticExpr::Default(expr) => EvaluatedValue::Default(Box::new(
                 self.evaluate_expr_at(*expr, environment, depth + 1)?,
@@ -782,40 +795,49 @@ impl<'runtime> Evaluator<'runtime> {
             })
             .collect();
         self.local_fields.push(local_fields);
-        for member in members {
-            match member {
-                StructMember::Field(field) => {
-                    self.evaluate_field_member(field, environment, depth, &mut values)?;
+        self.local_values.push(IndexMap::new());
+        self.local_value_scopes.push(LocalValueScope::Struct);
+        self.local_evaluating.push(HashSet::new());
+        let result = (|| {
+            for member in members {
+                match member {
+                    StructMember::Field(field) => {
+                        self.evaluate_field_member(field, environment, depth, &mut values)?;
+                    }
+                    StructMember::Comprehension(comprehension) => {
+                        let value =
+                            self.evaluate_comprehension(comprehension, environment, depth, true)?;
+                        Self::merge_struct_member_value(value, None, &mut values);
+                    }
+                    _ => {}
                 }
-                StructMember::Comprehension(comprehension) => {
-                    let value =
-                        self.evaluate_comprehension(comprehension, environment, depth, true)?;
-                    Self::merge_struct_member_value(value, None, &mut values);
+            }
+            for member in members {
+                let StructMember::Field(field) = member else {
+                    continue;
+                };
+                if matches!(&field.label, FieldLabel::Pattern(_))
+                    && let Some(pattern) =
+                        self.evaluate_pattern_field(field, environment, depth, &mut values)?
+                {
+                    patterns.push(pattern);
                 }
-                _ => {}
             }
-        }
-        for member in members {
-            let StructMember::Field(field) = member else {
-                continue;
-            };
-            if matches!(&field.label, FieldLabel::Pattern(_))
-                && let Some(pattern) =
-                    self.evaluate_pattern_field(field, environment, depth, &mut values)?
-            {
-                patterns.push(pattern);
+            apply_struct_patterns(&patterns, &mut values);
+            if patterns.is_empty() {
+                Ok(EvaluatedValue::Struct(values))
+            } else {
+                Ok(EvaluatedValue::PatternedStruct {
+                    fields: values,
+                    patterns,
+                })
             }
-        }
-        apply_struct_patterns(&patterns, &mut values);
+        })();
+        self.local_evaluating.pop();
+        self.local_value_scopes.pop();
+        self.local_values.pop();
         self.local_fields.pop();
-        if patterns.is_empty() {
-            Ok(EvaluatedValue::Struct(values))
-        } else {
-            Ok(EvaluatedValue::PatternedStruct {
-                fields: values,
-                patterns,
-            })
-        }
+        result
     }
 
     fn evaluate_field_member(
@@ -841,12 +863,52 @@ impl<'runtime> Evaluator<'runtime> {
                 return Ok(());
             }
         };
-        let mut value = self.evaluate_expr_at(field.expression, environment, depth)?;
+        let static_feature = match &field.label {
+            FieldLabel::Static(feature) => Some(*feature),
+            _ => None,
+        };
+        if let Some(feature) = static_feature {
+            self.mark_local_feature_evaluating(feature);
+        }
+        let value_result = self.evaluate_expr_at(field.expression, environment, depth);
+        if let Some(feature) = static_feature {
+            self.unmark_local_feature_evaluating(feature);
+        }
+        let mut value = value_result?;
         if self.export_options.is_some() && is_optional_constraint(field.metadata) {
             value = EvaluatedValue::OptionalField(Box::new(value));
         }
         merge_field_value(label, value, field.span, values);
+        if let Some(feature) = static_feature
+            && !is_optional_constraint(field.metadata)
+            && let Some(value) = values.get(&self.feature_label(feature)).cloned()
+            && let Some(local_values) = self.local_values.last_mut()
+        {
+            local_values.insert(feature, value);
+        }
         Ok(())
+    }
+
+    fn mark_local_feature_evaluating(&mut self, feature: Feature) {
+        if let Some(features) = self.local_evaluating.last_mut() {
+            features.insert(feature);
+        }
+    }
+
+    fn unmark_local_feature_evaluating(&mut self, feature: Feature) {
+        if let Some(features) = self.local_evaluating.last_mut() {
+            features.remove(&feature);
+        }
+    }
+
+    fn evaluate_with_cycle_fallback<T>(
+        &mut self,
+        evaluate: impl FnOnce(&mut Self) -> Result<T, EvalError>,
+    ) -> Result<T, EvalError> {
+        self.cycle_fallback_to_top = self.cycle_fallback_to_top.saturating_add(1);
+        let result = evaluate(self);
+        self.cycle_fallback_to_top = self.cycle_fallback_to_top.saturating_sub(1);
+        result
     }
 
     fn evaluate_field_label(
@@ -871,6 +933,31 @@ impl<'runtime> Evaluator<'runtime> {
                 false,
             ))),
         }
+    }
+
+    fn evaluate_binary_expr(
+        &mut self,
+        op: &str,
+        left: ExprId,
+        right: ExprId,
+        environment: EnvironmentId,
+        depth: u32,
+    ) -> Result<EvaluatedValue, EvalError> {
+        let left = if op == "&" {
+            self.evaluate_with_cycle_fallback(|evaluator| {
+                evaluator.evaluate_expr_at(left, environment, depth)
+            })?
+        } else {
+            self.evaluate_expr_at(left, environment, depth)?
+        };
+        let right = if op == "&" {
+            self.evaluate_with_cycle_fallback(|evaluator| {
+                evaluator.evaluate_expr_at(right, environment, depth)
+            })?
+        } else {
+            self.evaluate_expr_at(right, environment, depth)?
+        };
+        Ok(evaluate_binary(op, left, right))
     }
 
     fn evaluate_pattern_field(
@@ -1171,7 +1258,9 @@ impl<'runtime> Evaluator<'runtime> {
             )));
         };
         self.local_values.push(values);
+        self.local_value_scopes.push(LocalValueScope::Overlay);
         let evaluated = self.evaluate_expr_at(less, environment, depth + 1);
+        self.local_value_scopes.pop();
         self.local_values.pop();
         evaluated
     }
@@ -1250,26 +1339,9 @@ impl<'runtime> Evaluator<'runtime> {
         depth: u32,
     ) -> Result<EvaluatedValue, EvalError> {
         if up_count == 0
-            && let Some(value) = self
-                .local_values
-                .iter()
-                .rev()
-                .find_map(|values| values.get(&feature).cloned())
+            && let Some(value) = self.evaluate_local_field_reference(feature, environment, depth)?
         {
             return Ok(value);
-        }
-        if up_count == 0
-            && let Some(field) = self
-                .local_fields
-                .iter()
-                .rev()
-                .find_map(|fields| fields.get(&feature).copied())
-        {
-            if is_optional_constraint(field.metadata) {
-                let label = self.feature_label(feature);
-                return Ok(optional_reference_bottom(&label));
-            }
-            return self.evaluate_expr_at(field.expression, environment, depth + 1);
         }
 
         let mut environment_id = environment;
@@ -1302,6 +1374,57 @@ impl<'runtime> Evaluator<'runtime> {
             return Ok(optional_reference_bottom(&label));
         }
         self.evaluate_vertex_at(arc.target, depth + 1)
+    }
+
+    fn evaluate_local_field_reference(
+        &mut self,
+        feature: Feature,
+        environment: EnvironmentId,
+        depth: u32,
+    ) -> Result<Option<EvaluatedValue>, EvalError> {
+        let mut struct_scope_index = self.local_fields.len();
+        for (scope, values) in self
+            .local_value_scopes
+            .iter()
+            .zip(self.local_values.iter())
+            .rev()
+        {
+            match scope {
+                LocalValueScope::Overlay => {
+                    if let Some(value) = values.get(&feature) {
+                        return Ok(Some(value.clone()));
+                    }
+                }
+                LocalValueScope::Struct => {
+                    struct_scope_index = struct_scope_index.saturating_sub(1);
+                    let Some(fields) = self.local_fields.get(struct_scope_index) else {
+                        continue;
+                    };
+                    let Some(field) = fields.get(&feature).copied() else {
+                        continue;
+                    };
+                    if let Some(value) = values.get(&feature) {
+                        return Ok(Some(value.clone()));
+                    }
+                    if self
+                        .local_evaluating
+                        .get(struct_scope_index)
+                        .is_some_and(|features| features.contains(&feature))
+                        && self.cycle_fallback_to_top > 0
+                    {
+                        return Ok(Some(EvaluatedValue::Top));
+                    }
+                    if is_optional_constraint(field.metadata) {
+                        let label = self.feature_label(feature);
+                        return Ok(Some(optional_reference_bottom(&label)));
+                    }
+                    return self
+                        .evaluate_expr_at(field.expression, environment, depth + 1)
+                        .map(Some);
+                }
+            }
+        }
+        Ok(None)
     }
 
     fn evaluate_dynamic_reference(&self, name: &str) -> EvaluatedValue {

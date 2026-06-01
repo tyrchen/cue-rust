@@ -354,8 +354,9 @@ async fn push_known_gap_cases(
     cases.push(expected_gap_case(
         "eval/cycle-scheduler",
         "semantic-gap",
-        "evaluation now uses an operation-local cycle cache; full upstream cycle scheduling still \
-         needs lazy disjunction/default fixpoint support",
+        "structural and externally grounded list cycles now resolve, but full upstream cycle \
+         scheduling still needs structural-cycle diagnostics, tautological list, and lazy \
+         disjunction/default fixpoint support",
     ));
     Ok(())
 }
@@ -409,8 +410,10 @@ fn push_phase9_parity_cases(context: &Context, cases: &mut Vec<CompatibilityCase
          & {a: \"bad\"}\n#ClosedDef: {env: a: \"A\", env: b: \"B\"}\nclosedDefinitionBad: \
          #ClosedDef & {env: c: \"C\"}\nclosedPatternOk: close({[=~\"^a\"]: string}) & {apple: \
          \"ok\"}\nclosedPatternBad: close({[=~\"^a\"]: string}) & {banana: \
-         \"bad\"}\ncloseShallow: close({a: b: int}) & {a: c: int}\ninvalidDynamic: {(1): \
-         1}\ncycle: cycle\n",
+         \"bad\"}\ncloseShallow: close({a: b: int}) & {a: c: int}\ngroundedList: {a: 100, p1: c: \
+         [c[1], a], p2: c: [a, c[0]]}\nstructCycle: {self: s1: s1 & {a: 1}, two: {s1: s2 & {a: \
+         1}, s2: s1 & {b: 2}}, three: {s1: s2 & {a: 1}, s2: s3 & {b: 2}, s3: s1 & {c: \
+         3}}}\ninvalidDynamic: {(1): 1}\ncycle: cycle\n",
     ) else {
         cases.push(supported_case("phase9/parity-tranche", "semantic", false));
         return;
@@ -550,6 +553,65 @@ fn push_phase9_semantic_cases(value: &cue_rust::Value, cases: &mut Vec<Compatibi
         "eval/cycle-safe-cache",
         "semantic-gap",
         cycle_passed,
+    ));
+    push_phase9_cycle_cases(value, cases);
+}
+
+fn push_phase9_cycle_cases(value: &cue_rust::Value, cases: &mut Vec<CompatibilityCase>) {
+    let grounded_list_passed = value
+        .lookup_path(&["groundedList", "p1", "c"])
+        .and_then(|value| value.evaluate())
+        .is_ok_and(|value| {
+            value
+                == cue_rust::EvaluatedValue::List(vec![
+                    cue_rust::EvaluatedValue::Number("100".to_owned()),
+                    cue_rust::EvaluatedValue::Number("100".to_owned()),
+                ])
+        })
+        && value
+            .lookup_path(&["groundedList", "p2", "c"])
+            .and_then(|value| value.evaluate())
+            .is_ok_and(|value| {
+                value
+                    == cue_rust::EvaluatedValue::List(vec![
+                        cue_rust::EvaluatedValue::Number("100".to_owned()),
+                        cue_rust::EvaluatedValue::Number("100".to_owned()),
+                    ])
+            });
+    cases.push(supported_case(
+        "eval/grounded-list-cycle",
+        "semantic-gap",
+        grounded_list_passed,
+    ));
+
+    let structural_cycle_passed = value
+        .lookup_path(&["structCycle", "self", "s1", "a"])
+        .and_then(|value| value.evaluate())
+        .is_ok_and(|value| value == cue_rust::EvaluatedValue::Number("1".to_owned()))
+        && value
+            .lookup_path(&["structCycle", "two", "s1", "b"])
+            .and_then(|value| value.evaluate())
+            .is_ok_and(|value| value == cue_rust::EvaluatedValue::Number("2".to_owned()))
+        && value
+            .lookup_path(&["structCycle", "two", "s2", "a"])
+            .and_then(|value| value.evaluate())
+            .is_ok_and(|value| value == cue_rust::EvaluatedValue::Number("1".to_owned()))
+        && value
+            .lookup_path(&["structCycle", "three", "s1", "c"])
+            .and_then(|value| value.evaluate())
+            .is_ok_and(|value| value == cue_rust::EvaluatedValue::Number("3".to_owned()))
+        && value
+            .lookup_path(&["structCycle", "three", "s2", "a"])
+            .and_then(|value| value.evaluate())
+            .is_ok_and(|value| value == cue_rust::EvaluatedValue::Number("1".to_owned()))
+        && value
+            .lookup_path(&["structCycle", "three", "s3", "b"])
+            .and_then(|value| value.evaluate())
+            .is_ok_and(|value| value == cue_rust::EvaluatedValue::Number("2".to_owned()));
+    cases.push(supported_case(
+        "eval/structural-cycle-fixpoint",
+        "semantic-gap",
+        structural_cycle_passed,
     ));
 }
 

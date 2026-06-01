@@ -342,6 +342,74 @@ mod tests {
     }
 
     #[test]
+    fn test_should_resolve_structural_cycles_to_fixpoint() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let context = Context::new();
+        let value = context.compile_source(
+            "test.cue",
+            "a: 100\nlist: {p1: c: [c[1], a], p2: c: [a, c[0]]}\nshadow: {x: {y: {z: x, x: \
+             1}}}\ntop: s1: s1 & {a: 1}\nnodes: {\nself: s1: s1 & {a: 1}\ntwo: {s1: s2 & {a: 1}, \
+             s2: s1 & {b: 2}}\nthree: {s1: s2 & {a: 1}, s2: s3 & {b: 2}, s3: s1 & {c: 3}}\n}\n",
+        )?;
+
+        assert_eq!(
+            EvaluatedValue::List(vec![
+                EvaluatedValue::Number("100".to_owned()),
+                EvaluatedValue::Number("100".to_owned()),
+            ]),
+            value.lookup_path(&["list", "p1", "c"])?.evaluate()?,
+        );
+        assert_eq!(
+            EvaluatedValue::List(vec![
+                EvaluatedValue::Number("100".to_owned()),
+                EvaluatedValue::Number("100".to_owned()),
+            ]),
+            value.lookup_path(&["list", "p2", "c"])?.evaluate()?,
+        );
+        assert_evaluated_path(
+            &value.lookup_path(&["shadow", "x", "y"])?,
+            "z",
+            &EvaluatedValue::Number("1".to_owned()),
+        )?;
+        assert_evaluated_path(
+            &value.lookup_path(&["top", "s1"])?,
+            "a",
+            &EvaluatedValue::Number("1".to_owned()),
+        )?;
+        assert_evaluated_path(
+            &value.lookup_path(&["nodes", "self", "s1"])?,
+            "a",
+            &EvaluatedValue::Number("1".to_owned()),
+        )?;
+        assert_evaluated_path(
+            &value.lookup_path(&["nodes", "two", "s1"])?,
+            "b",
+            &EvaluatedValue::Number("2".to_owned()),
+        )?;
+        assert_evaluated_path(
+            &value.lookup_path(&["nodes", "two", "s2"])?,
+            "a",
+            &EvaluatedValue::Number("1".to_owned()),
+        )?;
+        assert_evaluated_path(
+            &value.lookup_path(&["nodes", "three", "s1"])?,
+            "c",
+            &EvaluatedValue::Number("3".to_owned()),
+        )?;
+        assert_evaluated_path(
+            &value.lookup_path(&["nodes", "three", "s2"])?,
+            "a",
+            &EvaluatedValue::Number("1".to_owned()),
+        )?;
+        assert_evaluated_path(
+            &value.lookup_path(&["nodes", "three", "s3"])?,
+            "b",
+            &EvaluatedValue::Number("2".to_owned()),
+        )?;
+        Ok(())
+    }
+
+    #[test]
     fn test_should_evaluate_regex_match_and_constraints() -> Result<(), Box<dyn std::error::Error>>
     {
         let context = Context::new();
