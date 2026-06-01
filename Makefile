@@ -1,3 +1,5 @@
+FUZZ_TARGET ?= $(shell rustc +nightly -vV | sed -n 's/^host: //p')
+
 build:
 	@cargo build --workspace --all-targets
 
@@ -26,8 +28,8 @@ deny:
 	@cargo deny check
 
 fuzz-smoke:
-	@cargo +nightly fuzz run scanner -- -runs=1
-	@cargo +nightly fuzz run decoder -- -runs=1
+	@cargo +nightly fuzz run scanner --target $(FUZZ_TARGET) -- -runs=1
+	@cargo +nightly fuzz run decoder --target $(FUZZ_TARGET) -- -runs=1
 
 compat-report:
 	@cargo test -p cue-rust --test compatibility -- --ignored --nocapture
