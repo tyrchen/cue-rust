@@ -38,7 +38,9 @@ jobs:
           fetch-depth: 0
           submodules: recursive
       - name: Install Rust
-        run: rustup toolchain install stable --component llvm-tools-preview
+        run: |
+          rustup toolchain install stable --component llvm-tools-preview
+          rustup toolchain install nightly --component rustfmt
       - name: Install cargo-llvm-cov
         uses: taiki-e/install-action@cargo-llvm-cov
       - name: install nextest
@@ -49,7 +51,7 @@ jobs:
       # - name: Install Protoc
       #   uses: arduino/setup-protoc@v2
       - name: Check code format
-        run: cargo fmt --all -- --check
+        run: cargo +nightly fmt --all -- --check
       - name: Check the package for errors
         run: cargo check --all
       - name: Lint rust sources
