@@ -16,6 +16,96 @@ use serde::Serialize;
 use tokio::fs;
 
 static NEXT_FIXTURE_ID: AtomicU64 = AtomicU64::new(0);
+const STDLIB_MATH_SOURCE: &str =
+    "import \"math\"\npi: math.Pi\nmaxExp: math.MaxExp\nfloor: math.Floor(math.Pi)\nround: \
+     math.Round(-2.5)\neven: math.RoundToEven(2.5)\nabs: math.Abs(-2.2)\nacos: \
+     math.Acos(0.5)\nacosh: math.Acosh(1)\nasin: math.Asin(0.5)\nasinOverflow: \
+     math.Asin(2.0e400)\nasinh: math.Asinh(0)\natan: math.Atan(1)\natan2: math.Atan2(1, \
+     1)\natanh: math.Atanh(0.5)\nfloatUnderflow: math.Sin(1e-400)\nfloatUnderflowBoundary: \
+     math.Sin(1e-324)\nfloatOverflowBoundary: math.Sin(1.7976931348623158e308)\nmultiple: 12 & \
+     math.MultipleOf(2) & math.MultipleOf(3)\nbounded: 4 & math.MultipleOf(2) & >3\nbad: 10 & \
+     math.MultipleOf(3)\nsign: math.Signbit(-4)\nsignZero: math.Signbit(-0)\npow10: \
+     math.Pow10(-2)\ncopySign: math.Copysign(5, -2.2)\ndim: math.Dim(3, 2.5)\nerf: \
+     math.Erf(0)\nerfc: math.Erfc(0)\ngamma: math.Gamma(5)\nilogb: math.Ilogb(8)\nj0: \
+     math.J0(0)\nj1: math.J1(0)\njacobi: math.Jacobi(1000, 201)\njacobiNeg: math.Jacobi(-1, \
+     3)\njacobiZero: math.Jacobi(0, 3)\njacobiCommon: math.Jacobi(3, 9)\njacobiNegDenom: \
+     math.Jacobi(1, -3)\njacobiBig: math.Jacobi(1, \
+     170141183460469231731687303715884105729)\njacobiBad: math.Jacobi(1000, 2000)\njn: math.Jn(0, \
+     0)\njnNext: math.Jn(1, 0)\nldexp: math.Ldexp(0.5, 3)\npow: math.Pow(8, 4)\npowDecimal: \
+     math.Pow(2.5, 2)\npowNeg: math.Pow(-2, 3)\npowNegEven: math.Pow(-2, 4)\npowNegExp: \
+     math.Pow(2, -3)\npowNegDecimalExp: math.Pow(1.25, -2)\npowNegZero: math.Pow(-0, 3)\ncbrt: \
+     math.Cbrt(2)\ncbrtNeg: math.Cbrt(-8)\ncbrtNegZero: math.Cbrt(-0)\ncos: math.Cos(0)\ncosh: \
+     math.Cosh(0)\nexpm1: math.Expm1(1)\nhypot: math.Hypot(3, 4)\nlog1p: math.Log1p(1)\nlogb: \
+     math.Logb(8)\nlogbMax: math.Logb(1.7976931348623157e308)\nlogbSubnormal: \
+     math.Logb(5e-324)\nmod: math.Mod(5.5, 2)\nsin: math.Sin(0)\nsinh: math.Sinh(0)\nsqrt: \
+     math.Sqrt(9)\ntan: math.Tan(0)\ntanh: math.Tanh(0)\nremainder: math.Remainder(5.5, 2)\ny0: \
+     math.Y0(1)\ny1: math.Y1(1)\nyn: math.Yn(2, 1)\n";
+const STDLIB_MATH_EXPECTED_NUMBERS: &[(&str, &str)] = &[
+    (
+        "pi",
+        "3.14159265358979323846264338327950288419716939937510582097494459",
+    ),
+    ("maxExp", "2147483647"),
+    ("floor", "3"),
+    ("round", "-3"),
+    ("even", "2"),
+    ("abs", "2.2"),
+    ("acos", "1.0471975511965979"),
+    ("acosh", "0"),
+    ("asin", "0.5235987755982989"),
+    ("asinh", "0"),
+    ("atan", "0.7853981633974483"),
+    ("atan2", "0.7853981633974483"),
+    ("atanh", "0.5493061443340548"),
+    ("multiple", "12"),
+    ("bounded", "4"),
+    ("pow10", "0.01"),
+    ("copySign", "-5"),
+    ("dim", "0.5"),
+    ("erf", "0"),
+    ("erfc", "1"),
+    ("gamma", "24"),
+    ("ilogb", "3"),
+    ("j0", "1"),
+    ("j1", "0"),
+    ("jacobi", "1"),
+    ("jacobiNeg", "-1"),
+    ("jacobiZero", "0"),
+    ("jacobiCommon", "0"),
+    ("jacobiNegDenom", "1"),
+    ("jacobiBig", "1"),
+    ("jn", "1"),
+    ("jnNext", "0"),
+    ("ldexp", "4"),
+    ("pow", "4096"),
+    ("powDecimal", "6.25"),
+    ("powNeg", "-8"),
+    ("powNegEven", "16"),
+    ("powNegExp", "0.125"),
+    ("powNegDecimalExp", "0.64"),
+    ("powNegZero", "-0"),
+    ("cbrt", "1.259921049894873164767210607278228"),
+    ("cbrtNeg", "-2"),
+    ("cbrtNegZero", "-0"),
+    ("cos", "1"),
+    ("cosh", "1"),
+    ("expm1", "1.718281828459045"),
+    ("hypot", "5"),
+    ("log1p", "0.6931471805599453"),
+    ("logb", "3"),
+    ("logbMax", "1023"),
+    ("logbSubnormal", "-1074"),
+    ("mod", "1.5"),
+    ("sin", "0"),
+    ("sinh", "0"),
+    ("sqrt", "3"),
+    ("tan", "0"),
+    ("tanh", "0"),
+    ("remainder", "-0.5"),
+    ("y0", "0.08825696421567697"),
+    ("y1", "-0.7812128213002887"),
+    ("yn", "-1.6506826068162543"),
+];
 
 #[derive(Debug, Serialize)]
 struct CompatibilityReport {
@@ -347,84 +437,12 @@ fn push_stdlib_math_case(
     context: &Context,
     cases: &mut Vec<CompatibilityCase>,
 ) -> Result<(), Box<dyn Error>> {
-    let exact_math = context.compile_source(
-        "stdlib-math.cue",
-        "import \"math\"\npi: math.Pi\nmaxExp: math.MaxExp\nfloor: math.Floor(math.Pi)\nround: \
-         math.Round(-2.5)\neven: math.RoundToEven(2.5)\nabs: math.Abs(-2.2)\nacos: \
-         math.Acos(0.5)\nacosh: math.Acosh(1)\nasin: math.Asin(0.5)\nasinOverflow: \
-         math.Asin(2.0e400)\nasinh: math.Asinh(0)\natan: math.Atan(1)\natan2: math.Atan2(1, \
-         1)\natanh: math.Atanh(0.5)\nfloatUnderflow: math.Sin(1e-400)\nmultiple: 12 & \
-         math.MultipleOf(2) & math.MultipleOf(3)\nbounded: 4 & math.MultipleOf(2) & >3\nbad: 10 & \
-         math.MultipleOf(3)\nsign: math.Signbit(-4)\nsignZero: math.Signbit(-0)\npow10: \
-         math.Pow10(-2)\ncopySign: math.Copysign(5, -2.2)\ndim: math.Dim(3, 2.5)\njacobi: \
-         math.Jacobi(1000, 201)\njacobiNeg: math.Jacobi(-1, 3)\njacobiZero: math.Jacobi(0, \
-         3)\njacobiCommon: math.Jacobi(3, 9)\njacobiNegDenom: math.Jacobi(1, -3)\njacobiBig: \
-         math.Jacobi(1, 170141183460469231731687303715884105729)\njacobiBad: math.Jacobi(1000, \
-         2000)\npow: math.Pow(8, 4)\npowDecimal: math.Pow(2.5, 2)\npowNeg: math.Pow(-2, \
-         3)\npowNegEven: math.Pow(-2, 4)\npowNegExp: math.Pow(2, -3)\npowNegDecimalExp: \
-         math.Pow(1.25, -2)\npowNegZero: math.Pow(-0, 3)\ncbrt: math.Cbrt(2)\ncbrtNeg: \
-         math.Cbrt(-8)\ncbrtNegZero: math.Cbrt(-0)\ncos: math.Cos(0)\ncosh: math.Cosh(0)\nexpm1: \
-         math.Expm1(1)\nhypot: math.Hypot(3, 4)\nlog1p: math.Log1p(1)\nlogb: \
-         math.Logb(8)\nlogbMax: math.Logb(1.7976931348623157e308)\nlogbSubnormal: \
-         math.Logb(5e-324)\nmod: math.Mod(5.5, 2)\nsin: math.Sin(0)\nsinh: math.Sinh(0)\nsqrt: \
-         math.Sqrt(9)\ntan: math.Tan(0)\ntanh: math.Tanh(0)\n",
-    )?;
-    let expected_numbers = [
-        (
-            "pi",
-            "3.14159265358979323846264338327950288419716939937510582097494459",
-        ),
-        ("maxExp", "2147483647"),
-        ("floor", "3"),
-        ("round", "-3"),
-        ("even", "2"),
-        ("abs", "2.2"),
-        ("acos", "1.0471975511965979"),
-        ("acosh", "0"),
-        ("asin", "0.5235987755982989"),
-        ("asinh", "0"),
-        ("atan", "0.7853981633974483"),
-        ("atan2", "0.7853981633974483"),
-        ("atanh", "0.5493061443340548"),
-        ("multiple", "12"),
-        ("bounded", "4"),
-        ("pow10", "0.01"),
-        ("copySign", "-5"),
-        ("dim", "0.5"),
-        ("jacobi", "1"),
-        ("jacobiNeg", "-1"),
-        ("jacobiZero", "0"),
-        ("jacobiCommon", "0"),
-        ("jacobiNegDenom", "1"),
-        ("jacobiBig", "1"),
-        ("pow", "4096"),
-        ("powDecimal", "6.25"),
-        ("powNeg", "-8"),
-        ("powNegEven", "16"),
-        ("powNegExp", "0.125"),
-        ("powNegDecimalExp", "0.64"),
-        ("powNegZero", "-0"),
-        ("cbrt", "1.259921049894873164767210607278228"),
-        ("cbrtNeg", "-2"),
-        ("cbrtNegZero", "-0"),
-        ("cos", "1"),
-        ("cosh", "1"),
-        ("expm1", "1.718281828459045"),
-        ("hypot", "5"),
-        ("log1p", "0.6931471805599453"),
-        ("logb", "3"),
-        ("logbMax", "1023"),
-        ("logbSubnormal", "-1074"),
-        ("mod", "1.5"),
-        ("sin", "0"),
-        ("sinh", "0"),
-        ("sqrt", "3"),
-        ("tan", "0"),
-        ("tanh", "0"),
-    ];
-    let passed = number_paths_match(&exact_math, &expected_numbers)?
+    let exact_math = context.compile_source("stdlib-math.cue", STDLIB_MATH_SOURCE)?;
+    let passed = number_paths_match(&exact_math, STDLIB_MATH_EXPECTED_NUMBERS)?
         && bottom_path(&exact_math, "asinOverflow")?
         && bottom_path(&exact_math, "floatUnderflow")?
+        && bottom_path(&exact_math, "floatUnderflowBoundary")?
+        && bottom_path(&exact_math, "floatOverflowBoundary")?
         && bool_path_matches(&exact_math, "sign", true)?
         && bool_path_matches(&exact_math, "signZero", true)?
         && validation_fails(&exact_math, "bad")?
@@ -503,6 +521,18 @@ async fn push_known_gap_cases(
         "stdlib-gap",
         "finite float64 math builtins are supported where CUE delegates to Go float64; NaN and \
          infinity results still need an explicit evaluator representation and encoding policy",
+    ));
+    cases.push(expected_gap_case(
+        "stdlib/math-decimal-transcendentals",
+        "stdlib-gap",
+        "CUE's math.Exp, math.Exp2, math.Log, math.Log10, and math.Log2 use APD decimal \
+         semantics; they need decimal-context implementations rather than float64 shortcuts",
+    ));
+    cases.push(expected_gap_case(
+        "stdlib/math-inverse-error-functions",
+        "stdlib-gap",
+        "math.Erf and math.Erfc are covered through CUE's float64 path; math.Erfinv and \
+         math.Erfcinv still need parity implementations",
     ));
     Ok(())
 }

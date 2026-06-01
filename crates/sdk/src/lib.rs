@@ -1611,6 +1611,8 @@ atan: math.Atan(1)
 atan2: math.Atan2(1, 1)
 atanh: math.Atanh(0.5)
 floatUnderflow: math.Sin(1e-400)
+floatUnderflowBoundary: math.Sin(1e-324)
+floatOverflowBoundary: math.Sin(1.7976931348623158e308)
 copySign: math.Copysign(5, -2.2)
 copySignZero: math.Copysign(0, -1)
 cbrt: math.Cbrt(2)
@@ -1620,8 +1622,14 @@ cos: math.Cos(0)
 cosh: math.Cosh(0)
 dimPositive: math.Dim(3, 2.5)
 dimZero: math.Dim(5, 7.2)
+erf: math.Erf(0)
+erfc: math.Erfc(0)
 expm1: math.Expm1(1)
+gamma: math.Gamma(5)
 hypot: math.Hypot(3, 4)
+ilogb: math.Ilogb(8)
+j0: math.J0(0)
+j1: math.J1(0)
 jacobi: math.Jacobi(1000, 201)
 jacobiEven: math.Jacobi(1000, 2000)
 jacobiNegative: math.Jacobi(-1, 3)
@@ -1629,6 +1637,9 @@ jacobiZero: math.Jacobi(0, 3)
 jacobiCommonFactor: math.Jacobi(3, 9)
 jacobiNegativeDenominator: math.Jacobi(1, -3)
 jacobiBig: math.Jacobi(1, 170141183460469231731687303715884105729)
+jn: math.Jn(0, 0)
+jnNext: math.Jn(1, 0)
+ldexp: math.Ldexp(0.5, 3)
 multipleBool: math.MultipleOf(5, 2.5)
 multipleConstraint: 9 & math.MultipleOf(3)
 multiConstraint: 12 & math.MultipleOf(2) & math.MultipleOf(3)
@@ -1661,6 +1672,10 @@ powNegativeEven: math.Pow(-2, 4)
 powNegativeExponent: math.Pow(2, -3)
 powNegativeDecimalExponent: math.Pow(1.25, -2)
 powNegativeZero: math.Pow(-0, 3)
+remainder: math.Remainder(5.5, 2)
+y0: math.Y0(1)
+y1: math.Y1(1)
+yn: math.Yn(2, 1)
 "#,
         )?;
 
@@ -1749,6 +1764,14 @@ powNegativeZero: math.Pow(-0, 3)
             value.lookup_path(&["floatUnderflow"])?.evaluate()?,
             EvaluatedValue::Bottom(_),
         ));
+        assert!(matches!(
+            value.lookup_path(&["floatUnderflowBoundary"])?.evaluate()?,
+            EvaluatedValue::Bottom(_),
+        ));
+        assert!(matches!(
+            value.lookup_path(&["floatOverflowBoundary"])?.evaluate()?,
+            EvaluatedValue::Bottom(_),
+        ));
         assert_evaluated_path(&value, "copySign", &EvaluatedValue::Number("-5".to_owned()))?;
         assert_evaluated_path(
             &value,
@@ -1778,12 +1801,18 @@ powNegativeZero: math.Pow(-0, 3)
             &EvaluatedValue::Number("0.5".to_owned()),
         )?;
         assert_evaluated_path(&value, "dimZero", &EvaluatedValue::Number("0".to_owned()))?;
+        assert_evaluated_path(&value, "erf", &EvaluatedValue::Number("0".to_owned()))?;
+        assert_evaluated_path(&value, "erfc", &EvaluatedValue::Number("1".to_owned()))?;
         assert_evaluated_path(
             &value,
             "expm1",
             &EvaluatedValue::Number("1.718281828459045".to_owned()),
         )?;
+        assert_evaluated_path(&value, "gamma", &EvaluatedValue::Number("24".to_owned()))?;
         assert_evaluated_path(&value, "hypot", &EvaluatedValue::Number("5".to_owned()))?;
+        assert_evaluated_path(&value, "ilogb", &EvaluatedValue::Number("3".to_owned()))?;
+        assert_evaluated_path(&value, "j0", &EvaluatedValue::Number("1".to_owned()))?;
+        assert_evaluated_path(&value, "j1", &EvaluatedValue::Number("0".to_owned()))?;
         assert_evaluated_path(&value, "jacobi", &EvaluatedValue::Number("1".to_owned()))?;
         assert!(matches!(
             value.lookup_path(&["jacobiEven"])?.evaluate()?,
@@ -1810,6 +1839,9 @@ powNegativeZero: math.Pow(-0, 3)
             &EvaluatedValue::Number("1".to_owned()),
         )?;
         assert_evaluated_path(&value, "jacobiBig", &EvaluatedValue::Number("1".to_owned()))?;
+        assert_evaluated_path(&value, "jn", &EvaluatedValue::Number("1".to_owned()))?;
+        assert_evaluated_path(&value, "jnNext", &EvaluatedValue::Number("0".to_owned()))?;
+        assert_evaluated_path(&value, "ldexp", &EvaluatedValue::Number("4".to_owned()))?;
         assert_evaluated_path(&value, "multipleBool", &EvaluatedValue::Bool(true))?;
         assert_evaluated_path(
             &value,
@@ -1910,6 +1942,26 @@ powNegativeZero: math.Pow(-0, 3)
             &value,
             "powNegativeZero",
             &EvaluatedValue::Number("-0".to_owned()),
+        )?;
+        assert_evaluated_path(
+            &value,
+            "remainder",
+            &EvaluatedValue::Number("-0.5".to_owned()),
+        )?;
+        assert_evaluated_path(
+            &value,
+            "y0",
+            &EvaluatedValue::Number("0.08825696421567697".to_owned()),
+        )?;
+        assert_evaluated_path(
+            &value,
+            "y1",
+            &EvaluatedValue::Number("-0.7812128213002887".to_owned()),
+        )?;
+        assert_evaluated_path(
+            &value,
+            "yn",
+            &EvaluatedValue::Number("-1.6506826068162543".to_owned()),
         )?;
 
         let mut cue_options = EncodeOptions::default();

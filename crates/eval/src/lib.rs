@@ -20,8 +20,8 @@ use cue_rust_adt::{
 use cue_rust_source::{Diagnostic, DiagnosticReport, Severity, Span};
 use indexmap::IndexMap;
 use libm::{
-    acos, acosh, asin, asinh, atan, atan2, atanh, cos, cosh, expm1, fmod, hypot, ilogb, log1p, sin,
-    sinh, sqrt, tan, tanh,
+    acos, acosh, asin, asinh, atan, atan2, atanh, cos, cosh, erf, erfc, expm1, fmod, hypot, ilogb,
+    j0, j1, jn, ldexp, log1p, remainder, sin, sinh, sqrt, tan, tanh, tgamma, y0, y1, yn,
 };
 use num_bigint::{BigInt, Sign};
 use regex::{Regex, RegexBuilder};
@@ -37,7 +37,8 @@ const MAX_COMPREHENSION_GENERATED_ITEMS: usize = MAX_BUILTIN_GENERATED_ITEMS;
 const MAX_SCHEMA_SORT_ITEMS: usize = 100_000;
 const MAX_FIXPOINT_ITERATIONS: usize = 64;
 const CUE_DECIMAL_PRECISION: u64 = 34;
-const MIN_FLOAT64_DECIMAL_EXPONENT: i64 = -324;
+const MAX_FLOAT64_DECIMAL: &str = "1.797693134862315708145274237317043567981e+308";
+const MIN_FLOAT64_DECIMAL: &str = "4.940656458412465441765687928682213723651e-324";
 const INVALID_DYNAMIC_LABEL_FIELD: &str = "<invalid-dynamic-label>";
 const INVALID_PATTERN_LABEL_FIELD: &str = "<invalid-pattern-label>";
 const MATH_E: &str = "2.71828182845904523536028747135266249775724709369995957496696763";
@@ -3486,16 +3487,25 @@ fn evaluate_math_builtin(name: &str, args: Vec<EvaluatedValue>) -> EvaluatedValu
         "math.Cosh" => evaluate_math_float_unary("math.Cosh", args, cosh),
         "math.Copysign" => evaluate_math_copysign(args),
         "math.Dim" => evaluate_math_dim(args),
+        "math.Erf" => evaluate_math_float_unary("math.Erf", args, erf),
+        "math.Erfc" => evaluate_math_float_unary("math.Erfc", args, erfc),
         "math.Expm1" => evaluate_math_float_unary("math.Expm1", args, expm1),
         "math.Floor" => evaluate_math_rounding("math.Floor", args, RoundingMode::Floor),
+        "math.Gamma" => evaluate_math_float_unary("math.Gamma", args, tgamma),
         "math.Hypot" => evaluate_math_float_binary("math.Hypot", args, hypot),
+        "math.Ilogb" => evaluate_math_float_to_integer_unary("math.Ilogb", args, ilogb),
+        "math.J0" => evaluate_math_float_unary("math.J0", args, j0),
+        "math.J1" => evaluate_math_float_unary("math.J1", args, j1),
         "math.Jacobi" => evaluate_math_jacobi(args),
+        "math.Jn" => evaluate_math_integer_float_binary("math.Jn", args, math_jn),
+        "math.Ldexp" => evaluate_math_float_integer_binary("math.Ldexp", args, math_ldexp),
         "math.Log1p" => evaluate_math_float_unary("math.Log1p", args, log1p),
         "math.Logb" => evaluate_math_float_unary("math.Logb", args, float_logb),
         "math.Mod" => evaluate_math_float_binary("math.Mod", args, fmod),
         "math.MultipleOf" => evaluate_math_multiple_of(args),
         "math.Pow" => evaluate_math_pow(args),
         "math.Pow10" => evaluate_math_pow10(args),
+        "math.Remainder" => evaluate_math_float_binary("math.Remainder", args, remainder),
         "math.Round" => evaluate_math_rounding("math.Round", args, RoundingMode::HalfUp),
         "math.RoundToEven" => {
             evaluate_math_rounding("math.RoundToEven", args, RoundingMode::HalfEven)
@@ -3507,6 +3517,9 @@ fn evaluate_math_builtin(name: &str, args: Vec<EvaluatedValue>) -> EvaluatedValu
         "math.Tan" => evaluate_math_float_unary("math.Tan", args, tan),
         "math.Tanh" => evaluate_math_float_unary("math.Tanh", args, tanh),
         "math.Trunc" => evaluate_math_rounding("math.Trunc", args, RoundingMode::Down),
+        "math.Y0" => evaluate_math_float_unary("math.Y0", args, y0),
+        "math.Y1" => evaluate_math_float_unary("math.Y1", args, y1),
+        "math.Yn" => evaluate_math_integer_float_binary("math.Yn", args, math_yn),
         _ => unsupported_builtin(name),
     }
 }
@@ -3589,6 +3602,39 @@ fn evaluate_math_float_binary(
     function: fn(f64, f64) -> f64,
 ) -> EvaluatedValue {
     let Some((left, right)) = two_float_args(args) else {
+        return invalid_math_builtin_arg(name);
+    };
+    finite_float_result(name, function(left, right))
+}
+
+fn evaluate_math_float_to_integer_unary(
+    name: &str,
+    args: Vec<EvaluatedValue>,
+    function: fn(f64) -> i32,
+) -> EvaluatedValue {
+    let Some(value) = single_float_arg(args) else {
+        return invalid_math_builtin_arg(name);
+    };
+    EvaluatedValue::Number(function(value).to_string())
+}
+
+fn evaluate_math_float_integer_binary(
+    name: &str,
+    args: Vec<EvaluatedValue>,
+    function: fn(f64, i128) -> f64,
+) -> EvaluatedValue {
+    let Some((left, right)) = float_and_integer_args(args) else {
+        return invalid_math_builtin_arg(name);
+    };
+    finite_float_result(name, function(left, right))
+}
+
+fn evaluate_math_integer_float_binary(
+    name: &str,
+    args: Vec<EvaluatedValue>,
+    function: fn(i128, f64) -> f64,
+) -> EvaluatedValue {
+    let Some((left, right)) = integer_and_float_args(args) else {
         return invalid_math_builtin_arg(name);
     };
     finite_float_result(name, function(left, right))
@@ -3788,6 +3834,16 @@ fn two_decimal_args(args: Vec<EvaluatedValue>) -> Option<(BigDecimal, BigDecimal
 fn two_float_args(args: Vec<EvaluatedValue>) -> Option<(f64, f64)> {
     let (left, right) = two_number_arg_texts(args)?;
     Some((parse_finite_f64(&left)?, parse_finite_f64(&right)?))
+}
+
+fn float_and_integer_args(args: Vec<EvaluatedValue>) -> Option<(f64, i128)> {
+    let (left, right) = two_number_arg_texts(args)?;
+    Some((parse_finite_f64(&left)?, parse_integer(&right)?))
+}
+
+fn integer_and_float_args(args: Vec<EvaluatedValue>) -> Option<(i128, f64)> {
+    let (left, right) = two_number_arg_texts(args)?;
+    Some((parse_integer(&left)?, parse_finite_f64(&right)?))
 }
 
 fn two_bigint_args(args: Vec<EvaluatedValue>) -> Option<(BigInt, BigInt)> {
@@ -4112,6 +4168,30 @@ fn float_logb(value: f64) -> f64 {
     } else {
         f64::from(ilogb(value))
     }
+}
+
+fn math_ldexp(value: f64, exponent: i128) -> f64 {
+    match i32::try_from(exponent) {
+        Ok(exponent) => ldexp(value, exponent),
+        Err(_) if exponent.is_negative() => value.copysign(0.0),
+        Err(_) => f64::INFINITY.copysign(value),
+    }
+}
+
+fn math_jn(order: i128, value: f64) -> f64 {
+    jn(saturating_i128_to_i32(order), value)
+}
+
+fn math_yn(order: i128, value: f64) -> f64 {
+    yn(saturating_i128_to_i32(order), value)
+}
+
+fn saturating_i128_to_i32(value: i128) -> i32 {
+    i32::try_from(value).unwrap_or(if value.is_negative() {
+        i32::MIN
+    } else {
+        i32::MAX
+    })
 }
 
 fn finite_float_result(name: &str, value: f64) -> EvaluatedValue {
@@ -6178,15 +6258,6 @@ impl DecimalNumber {
             scale: 0,
         }
     }
-
-    fn is_nonzero_below_float64_range(&self) -> bool {
-        self.sign != 0 && self.decimal_exponent() < MIN_FLOAT64_DECIMAL_EXPONENT
-    }
-
-    fn decimal_exponent(&self) -> i64 {
-        let digit_count = i64::try_from(self.digits.len()).unwrap_or(i64::MAX);
-        digit_count.saturating_sub(self.scale).saturating_sub(1)
-    }
 }
 
 fn evaluate_disjunction(left: EvaluatedValue, right: EvaluatedValue) -> EvaluatedValue {
@@ -6580,7 +6651,7 @@ fn number_operand(value: EvaluatedValue) -> Result<f64, Bottom> {
 
 fn parse_finite_f64(value: &str) -> Option<f64> {
     let decimal = parse_decimal_number(value)?;
-    if decimal.is_nonzero_below_float64_range() {
+    if !decimal_fits_float64(&decimal)? {
         return None;
     }
     value
@@ -6588,6 +6659,23 @@ fn parse_finite_f64(value: &str) -> Option<f64> {
         .parse::<f64>()
         .ok()
         .filter(|value| value.is_finite())
+}
+
+fn decimal_fits_float64(value: &DecimalNumber) -> Option<bool> {
+    if value.sign == 0 {
+        return Some(true);
+    }
+    let smallest = parse_decimal_number(MIN_FLOAT64_DECIMAL)?;
+    let max = parse_decimal_number(MAX_FLOAT64_DECIMAL)?;
+    let magnitude = DecimalNumber {
+        sign: 1,
+        digits: value.digits.clone(),
+        scale: value.scale,
+    };
+    Some(
+        compare_decimal_numbers(&magnitude, &smallest) != Ordering::Less
+            && compare_decimal_numbers(&magnitude, &max) != Ordering::Greater,
+    )
 }
 
 fn parse_exact_decimal(value: &str) -> Option<BigDecimal> {
