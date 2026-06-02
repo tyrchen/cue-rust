@@ -478,6 +478,22 @@ mod tests {
             .map_err(Into::into)
     }
 
+    fn unify_validate_out(
+        schema_source: &str,
+        data_json: &str,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let schema = Context::new()
+            .compile_source("schema.cue", schema_source)?
+            .lookup_path(&["out"])?;
+        let data = decode_bytes(
+            Encoding::Json,
+            data_json.as_bytes(),
+            DecodeOptions::default(),
+        )?;
+        schema.unify(&data)?.validate(ValidateOptions::default())?;
+        Ok(())
+    }
+
     #[test]
     fn test_should_compile_source_and_lookup_value() -> Result<(), Box<dyn std::error::Error>> {
         let context = Context::new();
@@ -579,6 +595,21 @@ mod tests {
             .expect_err("required non-concrete field must remain an export error");
         let error_debug = format!("{error:?}");
         assert!(error_debug.contains("incomplete"), "{error_debug}");
+        Ok(())
+    }
+
+    #[test]
+    fn test_should_unify_decoded_json_with_defaulted_disjunction_schema()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let schema = "#A: {t: *\"x\" | \"y\" | \"z\"}\nout: #A\n";
+        unify_validate_out(schema, r#"{"t":"y"}"#)?;
+        unify_validate_out(schema, r#"{"t":"x"}"#)?;
+        assert!(unify_validate_out(schema, r#"{"t":"q"}"#).is_err());
+
+        unify_validate_out(
+            "#Actor: {id: string, type: *\"user\" | \"bot\" | \"service\"}\nout: #Actor\n",
+            r#"{"id":"x","type":"service"}"#,
+        )?;
         Ok(())
     }
 

@@ -871,7 +871,7 @@ impl Value {
 
     fn select_path(mut current: EvaluatedValue, selectors: &[Selector]) -> Result<Self, EvalError> {
         for selector in selectors {
-            current = current.resolve_defaults();
+            current = resolve_default_selection_value(current);
             current = select_value(current, selector)?;
         }
         Ok(Self::from_evaluated(current))
@@ -3365,7 +3365,7 @@ impl<'runtime> Evaluator<'runtime> {
 
     fn select_field(&self, base: EvaluatedValue, feature: Feature) -> EvaluatedValue {
         let label = self.feature_label(feature);
-        match resolve_default_operand_value(base) {
+        match resolve_default_selection_value(base) {
             EvaluatedValue::Struct(fields)
             | EvaluatedValue::PatternedStruct { fields, .. }
             | EvaluatedValue::ClosedStruct(fields)
@@ -6835,6 +6835,27 @@ fn resolve_default_operand_value(value: EvaluatedValue) -> EvaluatedValue {
     match value {
         EvaluatedValue::FixpointPrevious(value) => strip_fixpoint_previous_values(*value),
         value => resolve_default_value(value),
+    }
+}
+
+fn resolve_default_selection_value(value: EvaluatedValue) -> EvaluatedValue {
+    match value {
+        EvaluatedValue::FixpointPrevious(value) | EvaluatedValue::Default(value) => {
+            resolve_default_selection_value(*value)
+        }
+        EvaluatedValue::Disjunction(disjuncts) => {
+            let defaults = disjuncts
+                .iter()
+                .filter(|disjunct| disjunct.default)
+                .collect::<Vec<_>>();
+            if defaults.len() == 1
+                && let Some(disjunct) = defaults.first()
+            {
+                return resolve_default_selection_value((*disjunct.value).clone());
+            }
+            EvaluatedValue::Disjunction(disjuncts)
+        }
+        value => value,
     }
 }
 
