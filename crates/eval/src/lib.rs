@@ -789,7 +789,7 @@ impl Value {
             return Err(EvalError::Diagnostics(self.diagnostics.clone()));
         }
         if let Some(evaluated) = &self.evaluated {
-            return Ok(evaluated.clone());
+            return Ok(apply_export_options(evaluated.clone(), options));
         }
         let Some(root) = self.root else {
             return Err(EvalError::Diagnostics(single_diagnostic(
@@ -860,6 +860,7 @@ impl Value {
         let options = ExportOptions {
             include_definitions: path.needs_definitions(),
             include_hidden: path.needs_hidden(),
+            include_optional: true,
             ..ExportOptions::default()
         };
         let current = self.evaluate_export(options)?;
@@ -875,6 +876,7 @@ impl Value {
         let options = ExportOptions {
             include_definitions: path.iter().any(|label| label.starts_with('#')),
             include_hidden: path.iter().any(|label| label.starts_with('_')),
+            include_optional: true,
             ..ExportOptions::default()
         };
         let current = self.evaluate_export(options)?;
@@ -888,6 +890,14 @@ impl Value {
             current = select_value(current, selector)?;
         }
         Ok(Self::from_evaluated(current))
+    }
+}
+
+fn apply_export_options(value: EvaluatedValue, options: ExportOptions) -> EvaluatedValue {
+    if options.include_optional {
+        value
+    } else {
+        prune_optional_fields(value)
     }
 }
 

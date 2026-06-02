@@ -1833,6 +1833,16 @@ mod tests {
     }
 
     #[test]
+    fn test_should_allow_present_optional_field_when_unifying_closed_schema()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let schema = "#S: {a: int, b?: string}\nout: #S\n";
+        unify_validate_out(schema, r#"{"a":1,"b":"x"}"#)?;
+        unify_validate_out(schema, r#"{"a":1}"#)?;
+        assert!(unify_validate_out("#S: {a: int}\nout: #S\n", r#"{"a":1,"b":"x"}"#).is_err());
+        Ok(())
+    }
+
+    #[test]
     fn test_should_preserve_external_data_keys_that_look_like_cue_metadata()
     -> Result<(), Box<dyn std::error::Error>> {
         let value = decode_bytes(
