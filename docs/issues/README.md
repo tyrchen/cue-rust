@@ -20,7 +20,7 @@ export).
 | [0002](./0002-unset-optional-fields-block-concrete-export.md) | Unset optional fields (`b?: T`) block concrete export instead of being omitted | medium-high (blocks embedders) | `crates/encoding` + `crates/eval` | **fixed `cc57fa3`** |
 | [0003](./0003-value-unify-collapses-defaulted-disjunction-fields.md) | `Value::unify` collapses defaulted-disjunction fields to the default before unifying (residual of 0001 on the API/`validate_artifact` path) | high (blocks embedders) | `crates/eval` (`Value::unify`) | **fixed `24b733d`** |
 | [0004](./0004-default-expr-sibling-reference-not-resolved-after-unification.md) | A default expression referencing a sibling field doesn't see values supplied by later unification (`x: bool \| *(sibling == …)`) | medium (blocks computed-default policies) | `crates/eval` | **fixed `04fc3ae`** (whole-struct export) |
-| [0005](./0005-sdk-facade-does-not-reexport-diagnostic-severity-span.md) | SDK facade doesn't re-export `Severity`/`Span`/`Diagnostic`/`ByteOffset`, so an embedder can't name them to map diagnostics | low (embedder ergonomics) | `crates/sdk` | open |
+| [0005](./0005-sdk-facade-does-not-reexport-diagnostic-severity-span.md) | SDK facade doesn't re-export `Severity`/`Span`/`Diagnostic`/`ByteOffset`, so an embedder can't name them to map diagnostics | low (embedder ergonomics) | `crates/sdk` | **fixed** (facade re-exports + `ByteOffset::get`) |
 
 ### Verified non-issue
 

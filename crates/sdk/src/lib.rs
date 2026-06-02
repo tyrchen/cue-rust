@@ -14,7 +14,9 @@ pub use cue_rust_eval::{
     ValidateOptions, Value, ValueKind,
 };
 pub use cue_rust_loader::{BuildInstance, LoadConfig, LoadError, Loader, PackageSelector};
-pub use cue_rust_source::{DiagnosticReport, SourceError, SourceLimits};
+pub use cue_rust_source::{
+    ByteOffset, Diagnostic, DiagnosticReport, Severity, SourceError, SourceLimits, Span,
+};
 pub use cue_rust_syntax::{ParseConfig, ParseMode, ParseResult, ScanResult, Token, TokenKind};
 use serde_json::Value as JsonValue;
 use thiserror::Error;
@@ -409,9 +411,9 @@ mod tests {
     use serde_json::json;
 
     use super::{
-        BuildInstance, Context, ContextConfig, CueError, DecodeOptions, EncodeOptions, Encoding,
-        EvalError, EvaluatedValue, JsonValue, Path, ValidateOptions, Value, ValueExt, ValueKind,
-        decode_bytes, encode_value,
+        BuildInstance, ByteOffset, Context, ContextConfig, CueError, DecodeOptions, EncodeOptions,
+        Encoding, EvalError, EvaluatedValue, JsonValue, Path, Severity, Span, ValidateOptions,
+        Value, ValueExt, ValueKind, decode_bytes, encode_value,
     };
 
     fn assert_evaluated_path(
@@ -521,6 +523,30 @@ mod tests {
         );
         let oversized = context.parse_source_bytes("large.cue", b"x: 123456789\n");
         assert!(oversized.diagnostics().has_errors());
+        Ok(())
+    }
+
+    #[test]
+    fn test_should_reexport_diagnostic_inspection_types_from_facade()
+    -> Result<(), Box<dyn std::error::Error>> {
+        fn facade_surface(diagnostic: &crate::Diagnostic) -> (Severity, Option<Span>) {
+            (diagnostic.severity(), diagnostic.primary_span())
+        }
+
+        let context = Context::new();
+        let parsed = context.parse_source("bad.cue", "x: {\n");
+        let diagnostic = parsed
+            .diagnostics()
+            .diagnostics()
+            .first()
+            .ok_or("missing diagnostic")?;
+        let (severity, span) = facade_surface(diagnostic);
+        assert_eq!(Severity::Error, severity);
+
+        let span = span.ok_or("missing diagnostic span")?;
+        let start: ByteOffset = span.start();
+        assert!(start.get() <= span.end().get());
+        assert_eq!(7, ByteOffset(7).get());
         Ok(())
     }
 

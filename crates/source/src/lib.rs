@@ -44,6 +44,14 @@ impl SourceId {
 #[derive(Clone, Copy, Debug, Default, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct ByteOffset(pub u32);
 
+impl ByteOffset {
+    /// Returns the underlying zero-based byte offset.
+    #[must_use]
+    pub fn get(self) -> u32 {
+        self.0
+    }
+}
+
 /// A half-open byte span inside a source file.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct Span {

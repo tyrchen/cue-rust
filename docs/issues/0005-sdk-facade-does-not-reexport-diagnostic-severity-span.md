@@ -1,6 +1,6 @@
 # Issue 0005 — SDK facade does not re-export `Severity` / `Span` / `Diagnostic` / `ByteOffset`
 
-Status: open · Severity: low (embedder ergonomics) · Found: 2026-06-02
+Status: fixed · Severity: low (embedder ergonomics) · Found: 2026-06-02
 Reported against: `04fc3ae`
 Component: `crates/sdk` (the `cue_rust` facade re-export list)
 
@@ -46,6 +46,10 @@ pub use cue_rust_source::{ByteOffset, Diagnostic, Severity, Span};
 
 (`DiagnosticReport` is already exported; these complete the diagnostic-inspection
 surface so an embedder can map diagnostics without naming a lower crate.)
+
+Implemented by re-exporting the diagnostic inspection types from `cue_rust` and
+adding `ByteOffset::get()` so embedders can read offsets without accessing the
+tuple field directly.
 
 ## Suggested regression test
 
