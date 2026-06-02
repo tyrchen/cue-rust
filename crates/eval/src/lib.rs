@@ -111,6 +111,335 @@ pub enum EvalError {
     Diagnostics(DiagnosticReport),
 }
 
+/// One selector in a structured CUE value path.
+#[derive(Clone, Debug, Eq, PartialEq)]
+#[non_exhaustive]
+pub enum Selector {
+    /// Selects a regular field by label.
+    Field(String),
+    /// Selects a definition field such as `#Schema`.
+    Definition(String),
+    /// Selects a hidden field such as `_scratch`.
+    Hidden(String),
+    /// Selects a list item by zero-based index.
+    Index(usize),
+}
+
+impl Selector {
+    /// Creates a regular field selector.
+    #[must_use]
+    pub fn field(label: impl Into<String>) -> Self {
+        Self::Field(label.into())
+    }
+
+    /// Creates a definition selector.
+    ///
+    /// The leading `#` is added when `label` does not already include it.
+    #[must_use]
+    pub fn definition(label: impl Into<String>) -> Self {
+        let label = label.into();
+        if label.starts_with('#') {
+            Self::Definition(label)
+        } else {
+            Self::Definition(format!("#{label}"))
+        }
+    }
+
+    /// Creates a hidden field selector.
+    ///
+    /// The leading `_` is added when `label` does not already include it.
+    #[must_use]
+    pub fn hidden(label: impl Into<String>) -> Self {
+        let label = label.into();
+        if label.starts_with('_') {
+            Self::Hidden(label)
+        } else {
+            Self::Hidden(format!("_{label}"))
+        }
+    }
+
+    /// Creates a zero-based list index selector.
+    #[must_use]
+    pub const fn index(index: usize) -> Self {
+        Self::Index(index)
+    }
+
+    fn label(&self) -> Option<&str> {
+        match self {
+            Self::Field(label) | Self::Definition(label) | Self::Hidden(label) => Some(label),
+            Self::Index(_) => None,
+        }
+    }
+}
+
+/// Structured CUE value path.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct Path {
+    selectors: Vec<Selector>,
+}
+
+impl Path {
+    /// Creates an empty root path.
+    #[must_use]
+    pub const fn new() -> Self {
+        Self {
+            selectors: Vec::new(),
+        }
+    }
+
+    /// Creates a path from selectors.
+    #[must_use]
+    pub fn from_selectors(selectors: impl IntoIterator<Item = Selector>) -> Self {
+        Self {
+            selectors: selectors.into_iter().collect(),
+        }
+    }
+
+    /// Creates a path from regular field labels.
+    #[must_use]
+    pub fn from_fields<I, S>(fields: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        Self::from_selectors(
+            fields
+                .into_iter()
+                .map(|field| Selector::field(field.as_ref())),
+        )
+    }
+
+    /// Parses a conservative CUE path subset.
+    ///
+    /// Supported selectors are dot-separated regular fields, definitions such
+    /// as `#Schema`, hidden fields such as `_scratch`, and list indexes such as
+    /// `items[0]`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PathParseError`] when the input is malformed or uses syntax
+    /// outside this conservative subset.
+    pub fn parse(input: &str) -> Result<Self, PathParseError> {
+        input.parse()
+    }
+
+    /// Appends a regular field selector.
+    #[must_use]
+    pub fn field(mut self, label: impl Into<String>) -> Self {
+        self.selectors.push(Selector::field(label));
+        self
+    }
+
+    /// Appends a definition selector.
+    #[must_use]
+    pub fn definition(mut self, label: impl Into<String>) -> Self {
+        self.selectors.push(Selector::definition(label));
+        self
+    }
+
+    /// Appends a hidden field selector.
+    #[must_use]
+    pub fn hidden(mut self, label: impl Into<String>) -> Self {
+        self.selectors.push(Selector::hidden(label));
+        self
+    }
+
+    /// Appends a list index selector.
+    #[must_use]
+    pub fn index(mut self, index: usize) -> Self {
+        self.selectors.push(Selector::index(index));
+        self
+    }
+
+    /// Appends one selector in place.
+    pub fn push(&mut self, selector: Selector) {
+        self.selectors.push(selector);
+    }
+
+    /// Returns the selectors in this path.
+    #[must_use]
+    pub fn selectors(&self) -> &[Selector] {
+        &self.selectors
+    }
+
+    /// Returns whether this path selects the root value.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.selectors.is_empty()
+    }
+
+    fn needs_definitions(&self) -> bool {
+        self.selectors
+            .iter()
+            .any(|selector| matches!(selector, Selector::Definition(_)))
+    }
+
+    fn needs_hidden(&self) -> bool {
+        self.selectors
+            .iter()
+            .any(|selector| matches!(selector, Selector::Hidden(_)))
+    }
+}
+
+impl FromIterator<Selector> for Path {
+    fn from_iter<T: IntoIterator<Item = Selector>>(iter: T) -> Self {
+        Self::from_selectors(iter)
+    }
+}
+
+impl<const N: usize> From<[Selector; N]> for Path {
+    fn from(selectors: [Selector; N]) -> Self {
+        Self::from_selectors(selectors)
+    }
+}
+
+impl<const N: usize> From<[&str; N]> for Path {
+    fn from(fields: [&str; N]) -> Self {
+        Self::from_fields(fields)
+    }
+}
+
+impl FromStr for Path {
+    type Err = PathParseError;
+
+    fn from_str(input: &str) -> Result<Self, Self::Err> {
+        parse_path(input)
+    }
+}
+
+/// Errors produced while parsing a structured path string.
+#[derive(Clone, Debug, Error, Eq, PartialEq)]
+pub enum PathParseError {
+    /// A field segment was empty.
+    #[error("empty path segment at byte {position}")]
+    EmptySegment {
+        /// Byte position of the empty segment.
+        position: usize,
+    },
+    /// An index selector was missing its closing bracket.
+    #[error("unterminated list index at byte {position}")]
+    UnterminatedIndex {
+        /// Byte position of the opening bracket.
+        position: usize,
+    },
+    /// An index selector was not a non-negative decimal integer.
+    #[error("invalid list index `{value}` at byte {position}")]
+    InvalidIndex {
+        /// Byte position of the opening bracket.
+        position: usize,
+        /// Index text.
+        value: String,
+    },
+    /// A segment contained unsupported path syntax.
+    #[error("unsupported path character `{character}` at byte {position}")]
+    UnsupportedCharacter {
+        /// Byte position of the unsupported character.
+        position: usize,
+        /// Unsupported character.
+        character: char,
+    },
+}
+
+fn parse_path(input: &str) -> Result<Path, PathParseError> {
+    let mut selectors = Vec::new();
+    let mut position = 0;
+    let bytes = input.as_bytes();
+    if input.is_empty() {
+        return Ok(Path::new());
+    }
+    while position < bytes.len() {
+        match bytes[position] {
+            b'.' => {
+                return Err(PathParseError::EmptySegment { position });
+            }
+            b'[' => {
+                let (selector, next) = parse_index_selector(input, position)?;
+                selectors.push(selector);
+                position = next;
+            }
+            _ => {
+                let (selector, next) = parse_label_selector(input, position)?;
+                selectors.push(selector);
+                position = next;
+            }
+        }
+        if position >= bytes.len() {
+            break;
+        }
+        match bytes[position] {
+            b'.' => {
+                position += 1;
+                if position >= bytes.len() {
+                    return Err(PathParseError::EmptySegment { position });
+                }
+            }
+            b'[' => {}
+            byte => {
+                return Err(PathParseError::UnsupportedCharacter {
+                    position,
+                    character: char::from(byte),
+                });
+            }
+        }
+    }
+    Ok(Path::from_selectors(selectors))
+}
+
+fn parse_label_selector(input: &str, position: usize) -> Result<(Selector, usize), PathParseError> {
+    let bytes = input.as_bytes();
+    let mut next = position;
+    while next < bytes.len() && bytes[next] != b'.' && bytes[next] != b'[' {
+        if !is_path_label_byte(bytes[next]) {
+            return Err(PathParseError::UnsupportedCharacter {
+                position: next,
+                character: char::from(bytes[next]),
+            });
+        }
+        next += 1;
+    }
+    if next == position {
+        return Err(PathParseError::EmptySegment { position });
+    }
+    let label = &input[position..next];
+    if label == "#" || label == "_" {
+        return Err(PathParseError::EmptySegment { position });
+    }
+    let selector = if label.starts_with('#') {
+        Selector::definition(label)
+    } else if label.starts_with('_') {
+        Selector::hidden(label)
+    } else {
+        Selector::field(label)
+    };
+    Ok((selector, next))
+}
+
+fn parse_index_selector(input: &str, position: usize) -> Result<(Selector, usize), PathParseError> {
+    let bytes = input.as_bytes();
+    let Some(relative_end) = bytes[position + 1..].iter().position(|byte| *byte == b']') else {
+        return Err(PathParseError::UnterminatedIndex { position });
+    };
+    let end = position + 1 + relative_end;
+    let value = &input[position + 1..end];
+    if value.is_empty() || !value.bytes().all(|byte| byte.is_ascii_digit()) {
+        return Err(PathParseError::InvalidIndex {
+            position,
+            value: value.to_owned(),
+        });
+    }
+    let index = value
+        .parse::<usize>()
+        .map_err(|_| PathParseError::InvalidIndex {
+            position,
+            value: value.to_owned(),
+        })?;
+    Ok((Selector::index(index), end + 1))
+}
+
+const fn is_path_label_byte(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'#' | b'-')
+}
+
 /// Public value kind.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[non_exhaustive]
@@ -493,36 +822,114 @@ impl Value {
         Ok(Self::from_evaluated(unified))
     }
 
+    /// Resolves defaults in this value and returns the selected value tree.
+    ///
+    /// Disjunctions with exactly one default alternative select that default.
+    /// Disjunctions without a unique default remain disjunctions.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`EvalError`] if evaluation fails.
+    pub fn default_value(&self) -> Result<Self, EvalError> {
+        Ok(Self::from_evaluated(self.evaluate()?.resolve_defaults()))
+    }
+
+    /// Looks up a structured CUE path.
+    ///
+    /// Definition and hidden selectors opt into the export visibility required
+    /// to see those fields. Regular field selectors continue to select by label,
+    /// while index selectors select list and open-list elements.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`EvalError::Diagnostics`] when the path does not select a value.
+    pub fn lookup(&self, path: &Path) -> Result<Self, EvalError> {
+        let options = ExportOptions {
+            include_definitions: path.needs_definitions(),
+            include_hidden: path.needs_hidden(),
+            ..ExportOptions::default()
+        };
+        let current = self.evaluate_export(options)?;
+        Self::select_path(current, path.selectors())
+    }
+
     /// Looks up a string field path.
     ///
     /// # Errors
     ///
     /// Returns [`EvalError::Diagnostics`] when the path does not select a value.
     pub fn lookup_path(&self, path: &[&str]) -> Result<Self, EvalError> {
-        let mut current = self.evaluate()?;
-        for segment in path {
+        let current = self.evaluate()?;
+        let path = Path::from_fields(path.iter().copied());
+        Self::select_path(current, path.selectors())
+    }
+
+    fn select_path(mut current: EvaluatedValue, selectors: &[Selector]) -> Result<Self, EvalError> {
+        for selector in selectors {
             current = current.resolve_defaults();
-            let (EvaluatedValue::Struct(fields)
-            | EvaluatedValue::PatternedStruct { fields, .. }
-            | EvaluatedValue::ClosedStruct(fields)
-            | EvaluatedValue::ClosedPatternedStruct { fields, .. }) = current
-            else {
-                return Err(EvalError::Diagnostics(single_diagnostic(
-                    "cue.eval.invalid_lookup",
-                    format!("cannot select `{segment}` from non-struct value"),
-                    None,
-                )));
-            };
-            let Some(next) = fields.get(*segment).cloned() else {
-                return Err(EvalError::Diagnostics(single_diagnostic(
-                    "cue.eval.missing_field",
-                    format!("field `{segment}` does not exist"),
-                    None,
-                )));
-            };
-            current = next;
+            current = select_value(current, selector)?;
         }
         Ok(Self::from_evaluated(current))
+    }
+}
+
+fn select_value(value: EvaluatedValue, selector: &Selector) -> Result<EvaluatedValue, EvalError> {
+    match selector {
+        Selector::Field(_) | Selector::Definition(_) | Selector::Hidden(_) => {
+            select_field_value(value, selector)
+        }
+        Selector::Index(index) => select_index_value(value, *index),
+    }
+}
+
+fn select_field_value(
+    value: EvaluatedValue,
+    selector: &Selector,
+) -> Result<EvaluatedValue, EvalError> {
+    let Some(label) = selector.label() else {
+        return Err(EvalError::Diagnostics(single_diagnostic(
+            "cue.eval.invalid_lookup",
+            "field selector did not contain a label",
+            None,
+        )));
+    };
+    let (EvaluatedValue::Struct(fields)
+    | EvaluatedValue::PatternedStruct { fields, .. }
+    | EvaluatedValue::ClosedStruct(fields)
+    | EvaluatedValue::ClosedPatternedStruct { fields, .. }) = value
+    else {
+        return Err(EvalError::Diagnostics(single_diagnostic(
+            "cue.eval.invalid_lookup",
+            format!("cannot select `{label}` from non-struct value"),
+            None,
+        )));
+    };
+    fields.get(label).cloned().ok_or_else(|| {
+        EvalError::Diagnostics(single_diagnostic(
+            "cue.eval.missing_field",
+            format!("field `{label}` does not exist"),
+            None,
+        ))
+    })
+}
+
+fn select_index_value(value: EvaluatedValue, index: usize) -> Result<EvaluatedValue, EvalError> {
+    match value {
+        EvaluatedValue::List(items) | EvaluatedValue::ComprehensionItems(items) => {
+            items.get(index).cloned().ok_or_else(|| {
+                EvalError::Diagnostics(single_diagnostic(
+                    "cue.eval.index_out_of_bounds",
+                    format!("list index {index} is out of bounds"),
+                    None,
+                ))
+            })
+        }
+        EvaluatedValue::OpenList { items, tail } => Ok(items.get(index).cloned().unwrap_or(*tail)),
+        other => Err(EvalError::Diagnostics(single_diagnostic(
+            "cue.eval.invalid_lookup",
+            format!("cannot index non-list value of kind {}", other.kind()),
+            None,
+        ))),
     }
 }
 
@@ -8284,7 +8691,7 @@ mod tests {
     use cue_rust_adt::{BaseValue, Conjunct, Environment, Runtime, SemanticExpr, Vertex};
     use cue_rust_source::DiagnosticReport;
 
-    use super::{EvaluatedValue, ValidateOptions, Value, ValueKind};
+    use super::{EvaluatedValue, Path, Selector, ValidateOptions, Value, ValueKind};
 
     #[test]
     fn test_should_report_value_kind() -> Result<(), Box<dyn std::error::Error>> {
@@ -8341,6 +8748,60 @@ mod tests {
         fields.insert("x".to_owned(), EvaluatedValue::String("ok".into()));
         let value = Value::from_evaluated(EvaluatedValue::Struct(fields));
         assert_eq!(ValueKind::String, value.lookup_path(&["x"])?.kind()?);
+        Ok(())
+    }
+
+    #[test]
+    fn test_should_lookup_structured_path() -> Result<(), Box<dyn std::error::Error>> {
+        let mut fields = indexmap::IndexMap::new();
+        fields.insert(
+            "items".to_owned(),
+            EvaluatedValue::List(vec![
+                EvaluatedValue::String("first".into()),
+                EvaluatedValue::String("second".into()),
+            ]),
+        );
+        let value = Value::from_evaluated(EvaluatedValue::Struct(fields));
+        let path = Path::new().field("items").index(1);
+        assert_eq!(
+            EvaluatedValue::String("second".into()),
+            value.lookup(&path)?.evaluate()?,
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_should_parse_structured_path() -> Result<(), Box<dyn std::error::Error>> {
+        let path = Path::parse("#Schema._hidden[2]")?;
+        assert_eq!(
+            path.selectors(),
+            &[
+                Selector::definition("#Schema"),
+                Selector::hidden("_hidden"),
+                Selector::index(2),
+            ],
+        );
+        assert!(Path::parse("a.").is_err());
+        assert!(Path::parse("a[x]").is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn test_should_return_default_value() -> Result<(), Box<dyn std::error::Error>> {
+        let value = Value::from_evaluated(EvaluatedValue::Disjunction(vec![
+            super::Disjunct {
+                value: Box::new(EvaluatedValue::String("default".into())),
+                default: true,
+            },
+            super::Disjunct {
+                value: Box::new(EvaluatedValue::String("other".into())),
+                default: false,
+            },
+        ]));
+        assert_eq!(
+            EvaluatedValue::String("default".into()),
+            value.default_value()?.evaluate()?,
+        );
         Ok(())
     }
 }

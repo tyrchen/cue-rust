@@ -153,21 +153,24 @@ printf 'x: 1\n' | cue-rs eval -
 
 ```rust
 use cue_rust::{
-    Context, EncodeOptions, Encoding, EvaluatedValue, encode_value,
+    Context, EncodeOptions, Encoding, EvaluatedValue, Path, encode_value,
 };
 
 let context = Context::new();
-let value = context.compile_source("example.cue", "x: 1 + 2")?;
+let value = context.compile_source("example.cue", "x: { items: [*1 | 2, 3] }")?;
 
 assert_eq!(
-    EvaluatedValue::Number("3".to_owned()),
-    value.lookup_path(&["x"])?.evaluate()?,
+    EvaluatedValue::Number("1".to_owned()),
+    value
+        .lookup(&Path::new().field("x").field("items").index(0))?
+        .default_value()?
+        .evaluate()?,
 );
 
 let mut options = EncodeOptions::default();
 options.encoding = Encoding::Json;
 let json = encode_value(&value, options)?;
-assert!(json.contains("\"x\": 3"));
+assert!(json.contains("\"items\""));
 # Ok::<(), Box<dyn std::error::Error>>(())
 ```
 
@@ -186,10 +189,65 @@ let value = context.build_instance(&instances[0])?;
 # Ok::<(), Box<dyn std::error::Error>>(())
 ```
 
+### SDK 兼容性说明
+
+公开 SDK 适合做本地内嵌使用，但它还不是 Go CUE API 的完整克隆。当前内嵌方可以使用已经实现的
+结构化 path 和默认值 API：
+
+```rust
+use cue_rust::{Context, EvaluatedValue, Path};
+
+let context = Context::new();
+let value = context.compile_source(
+    "schema.cue",
+    "#Schema: { _choices: [*\"default\" | \"other\", \"second\"] }",
+)?;
+
+let path = Path::parse("#Schema._choices[0]")?;
+assert_eq!(
+    EvaluatedValue::String("default".to_owned()),
+    value.lookup(&path)?.default_value()?.evaluate()?,
+);
+# Ok::<(), Box<dyn std::error::Error>>(())
+```
+
+当前内嵌方仍然需要注意：
+
+- 没有 `FillPath` 或 builder 风格的可变构造 API。需要叠加数据或覆盖值时，分别编译成
+  `Value`，再调用 `Value::unify`。
+- 没有直接解码到 Rust struct 的 typed decode。先把具体的 `Value` 导出为 JSON，再交给
+  `serde`：
+
+```rust
+use cue_rust::{Context, EncodeOptions, Encoding, encode_value};
+use serde::Deserialize;
+
+#[derive(Debug, Deserialize)]
+struct AppConfig {
+    name: String,
+    port: u16,
+}
+
+let context = Context::new();
+let value = context.compile_source(
+    "config.cue",
+    r#"app: { name: "api", port: *8080 | int }"#,
+)?;
+
+let mut options = EncodeOptions::default();
+options.encoding = Encoding::Json;
+let json = encode_value(&value.lookup_path(&["app"])?, options)?;
+let config: AppConfig = serde_json::from_str(&json)?;
+# let _ = config;
+# Ok::<(), Box<dyn std::error::Error>>(())
+```
+
+- 没有 `Subsume`，也没有 value 级别的 attribute、源码位置、源码文件或文档注释读取 API。
+
 ## 什么时候该用它
 
 适合用 `cue-rust` 的场景：本地配置计算、数据校验、Rust 项目内嵌 CUE、对 upstream
 CUE 行为做兼容性实验。
 
-暂时继续用 Go 版 `cue` 的场景：远程 registry、完整 schema 导入导出、LSP、以及必须和
-upstream 每一个边角行为完全一致的生产流程。
+暂时继续用 Go 版 `cue` 的场景：远程 registry、OpenAPI/JSON-Schema/Proto 导入导出、
+LSP、以及必须和 upstream 每一个边角行为完全一致的生产流程。

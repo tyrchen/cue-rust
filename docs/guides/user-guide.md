@@ -159,21 +159,24 @@ Parse, compile, evaluate, and encode:
 
 ```rust
 use cue_rust::{
-    Context, EncodeOptions, Encoding, EvaluatedValue, encode_value,
+    Context, EncodeOptions, Encoding, EvaluatedValue, Path, encode_value,
 };
 
 let context = Context::new();
-let value = context.compile_source("example.cue", "x: 1 + 2")?;
+let value = context.compile_source("example.cue", "x: { items: [*1 | 2, 3] }")?;
 
 assert_eq!(
-    EvaluatedValue::Number("3".to_owned()),
-    value.lookup_path(&["x"])?.evaluate()?,
+    EvaluatedValue::Number("1".to_owned()),
+    value
+        .lookup(&Path::new().field("x").field("items").index(0))?
+        .default_value()?
+        .evaluate()?,
 );
 
 let mut options = EncodeOptions::default();
 options.encoding = Encoding::Json;
 let json = encode_value(&value, options)?;
-assert!(json.contains("\"x\": 3"));
+assert!(json.contains("\"items\""));
 # Ok::<(), Box<dyn std::error::Error>>(())
 ```
 
@@ -192,9 +195,66 @@ let value = context.build_instance(&instances[0])?;
 # Ok::<(), Box<dyn std::error::Error>>(())
 ```
 
+### SDK Compatibility Notes
+
+The public SDK is useful for local embedding, but it is not a full Go CUE API
+clone. Current embedders can use the implemented structured path and default
+APIs:
+
+```rust
+use cue_rust::{Context, EvaluatedValue, Path};
+
+let context = Context::new();
+let value = context.compile_source(
+    "schema.cue",
+    "#Schema: { _choices: [*\"default\" | \"other\", \"second\"] }",
+)?;
+
+let path = Path::parse("#Schema._choices[0]")?;
+assert_eq!(
+    EvaluatedValue::String("default".to_owned()),
+    value.lookup(&path)?.default_value()?.evaluate()?,
+);
+# Ok::<(), Box<dyn std::error::Error>>(())
+```
+
+Current embedders should still account for these limits:
+
+- No `FillPath` or builder-style mutation. To apply data or overrides, compile
+  each input into a `Value` and call `Value::unify`.
+- No typed decode into Rust structs. Export a concrete value as JSON, then hand
+  the JSON to `serde`:
+
+```rust
+use cue_rust::{Context, EncodeOptions, Encoding, encode_value};
+use serde::Deserialize;
+
+#[derive(Debug, Deserialize)]
+struct AppConfig {
+    name: String,
+    port: u16,
+}
+
+let context = Context::new();
+let value = context.compile_source(
+    "config.cue",
+    r#"app: { name: "api", port: *8080 | int }"#,
+)?;
+
+let mut options = EncodeOptions::default();
+options.encoding = Encoding::Json;
+let json = encode_value(&value.lookup_path(&["app"])?, options)?;
+let config: AppConfig = serde_json::from_str(&json)?;
+# let _ = config;
+# Ok::<(), Box<dyn std::error::Error>>(())
+```
+
+- No `Subsume`, and no value-level reads for attributes, source positions,
+  source files, or documentation comments.
+
 ## What To Expect
 
 Use `cue-rust` for local evaluation, validation, embedding, compatibility
 experiments, and Rust-native CUE workflows. Keep using the Go `cue` command when
-you need remote registry operations, full schema import/export, LSP features, or
-exact behavior for every upstream edge case.
+you need remote registry operations, OpenAPI/JSON-Schema/Proto import-export,
+LSP features, or exact behavior for every upstream edge case.

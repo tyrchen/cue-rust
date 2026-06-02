@@ -37,16 +37,43 @@ cargo run -p cue-rs -- vet ./schema.cue --data ./data.json
 Use the SDK from Rust:
 
 ```rust
-use cue_rust::{Context, EvaluatedValue};
+use cue_rust::{Context, EvaluatedValue, Path};
 
 let context = Context::new();
-let value = context.compile_source("example.cue", "x: 1 + 2")?;
+let value = context.compile_source("example.cue", "x: { items: [*1 | 2, 3] }")?;
 assert_eq!(
-    EvaluatedValue::Number("3".to_owned()),
-    value.lookup_path(&["x"])?.evaluate()?,
+    EvaluatedValue::Number("1".to_owned()),
+    value
+        .lookup(&Path::new().field("x").field("items").index(0))?
+        .default_value()?
+        .evaluate()?,
 );
 # Ok::<(), Box<dyn std::error::Error>>(())
 ```
+
+## Embedding Notes
+
+The Rust SDK intentionally exposes a smaller stable surface than Go CUE today.
+Embedders can use structured path selectors and explicit default selection:
+
+- `Path` and `Selector` select regular fields, definitions such as `#Schema`,
+  hidden fields such as `_scratch`, and list indexes.
+- `Value::lookup(&Path)` selects a structured path. The legacy
+  `Value::lookup_path(&[&str])` remains available for string field segments.
+- `Value::default_value()` resolves unique default alternatives and returns the
+  selected value.
+
+Embedders should still design around these current gaps:
+
+- There is no `FillPath` or builder-style mutation API. Compile the base CUE
+  value and the overlay/data value separately, then compose them with
+  `Value::unify`.
+- There is no typed `Decode` directly into Rust structs. Encode a concrete
+  `Value` with `encode_value(&value, EncodeOptions { encoding:
+  Encoding::Json, ..Default::default() })`, then deserialize that JSON with
+  `serde`.
+- There is no `Subsume`, and no value-level reads for attributes, source
+  positions, source files, or documentation comments.
 
 ## Guides
 
@@ -73,7 +100,7 @@ Implemented and actively tested:
 Known non-goals for the current maturity level:
 
 - network registry client and publishing flows
-- full OpenAPI, JSON Schema, Protobuf, and Go type import/export
+- full OpenAPI, JSON-Schema, Proto/Protobuf, and Go type import/export
 - LSP integration
 - complete upstream diagnostic wording parity
 - every numerical corner case in the Go CUE standard library

@@ -11,7 +11,8 @@ pub use cue_rust_encoding::{
     DecodeError, DecodeOptions, EncodeError, EncodeOptions, Encoding, decode_bytes, encode_value,
 };
 pub use cue_rust_eval::{
-    EvalError, EvalOptions, EvaluatedValue, ExportOptions, ValidateOptions, Value, ValueKind,
+    EvalError, EvalOptions, EvaluatedValue, ExportOptions, Path, PathParseError, Selector,
+    ValidateOptions, Value, ValueKind,
 };
 pub use cue_rust_loader::{BuildInstance, LoadConfig, LoadError, Loader, PackageSelector};
 pub use cue_rust_source::{DiagnosticReport, SourceError, SourceFile, SourceLimits};
@@ -197,7 +198,7 @@ fn single_diagnostic(code: &'static str, message: &'static str) -> DiagnosticRep
 #[cfg(test)]
 mod tests {
     use super::{
-        Context, CueError, DecodeOptions, EncodeOptions, Encoding, EvalError, EvaluatedValue,
+        Context, CueError, DecodeOptions, EncodeOptions, Encoding, EvalError, EvaluatedValue, Path,
         ValidateOptions, Value, ValueKind, decode_bytes, encode_value,
     };
 
@@ -747,8 +748,8 @@ mod tests {
             EvaluatedValue::Number("5".to_owned()),
             value
                 .lookup_path(&["chosen"])?
-                .evaluate()?
-                .resolve_defaults(),
+                .default_value()?
+                .evaluate()?,
         );
         assert_eq!(
             EvaluatedValue::Number("3".to_owned()),
@@ -784,6 +785,28 @@ mod tests {
         assert_eq!("5", json);
         let nested_json = encode_value(&value.lookup_path(&["nested"])?, options)?;
         assert!(nested_json.contains("\"chosen\": 5"));
+        Ok(())
+    }
+
+    #[test]
+    fn test_should_lookup_structured_definition_hidden_and_index_path()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let context = Context::new();
+        let value = context.compile_source(
+            "path.cue",
+            "#Schema: {\n  _choices: [*\"default\" | \"other\", \"second\"]\n}\n",
+        )?;
+        let builder_path = Path::new().definition("Schema").hidden("choices").index(0);
+        assert_eq!(
+            EvaluatedValue::String("default".to_owned()),
+            value.lookup(&builder_path)?.default_value()?.evaluate()?,
+        );
+        let parsed_path = Path::parse("#Schema._choices[1]")?;
+        assert_eq!(
+            EvaluatedValue::String("second".to_owned()),
+            value.lookup(&parsed_path)?.evaluate()?,
+        );
+        assert!(value.lookup_path(&["#Schema", "_choices"]).is_ok());
         Ok(())
     }
 

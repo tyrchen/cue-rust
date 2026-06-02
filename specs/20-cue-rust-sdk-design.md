@@ -1,7 +1,7 @@
 # cue-rust SDK Design
 
 Status: Draft
-Last updated: 2026-05-31
+Last updated: 2026-06-02
 Depends on: [Compiler design](14-cue-rust-compiler-design.md), [Evaluator design](15-cue-rust-evaluator-design.md), [Encoding design](21-cue-rust-encoding-design.md)
 
 ## Design Summary
@@ -56,21 +56,56 @@ impl Source {
 
 ## Value API
 
+Current stable implementation:
+
 ```rust
 pub struct Value { /* private */ }
 
 impl Value {
-    pub fn kind(&self) -> Result<ValueKind, CueError>;
-    pub fn defaulted(&self) -> Result<DefaultResult, CueError>;
-    pub fn validate(&self, options: ValidateOptions) -> Result<(), CueError>;
-    pub fn unify(&self, other: &Value) -> Result<Value, CueError>;
-    pub fn lookup_path(&self, path: &CuePath) -> Result<Value, CueError>;
-    pub fn syntax(&self, options: SyntaxOptions) -> Result<SyntaxNode, CueError>;
-    pub fn to_json(&self, options: JsonOptions) -> Result<Vec<u8>, CueError>;
+    pub fn kind(&self) -> Result<ValueKind, EvalError>;
+    pub fn evaluate(&self) -> Result<EvaluatedValue, EvalError>;
+    pub fn evaluate_export(&self, options: ExportOptions) -> Result<EvaluatedValue, EvalError>;
+    pub fn validate(&self, options: ValidateOptions) -> Result<(), EvalError>;
+    pub fn unify(&self, other: &Value) -> Result<Value, EvalError>;
+    pub fn default_value(&self) -> Result<Value, EvalError>;
+    pub fn lookup(&self, path: &Path) -> Result<Value, EvalError>;
+    pub fn lookup_path(&self, path: &[&str]) -> Result<Value, EvalError>;
 }
 ```
 
 The handle is immutable. Methods can force evaluation internally but do not mutate public state in a way callers can observe except through cached performance.
+
+Structured path support:
+
+```rust
+pub struct Path { /* private */ }
+
+pub enum Selector {
+    Field(String),
+    Definition(String),
+    Hidden(String),
+    Index(usize),
+}
+```
+
+`Path` supports builder-style construction for regular fields, definitions,
+hidden fields, and zero-based list indexes. `Path::parse` and `FromStr` support a
+conservative string subset such as `a.b[0]`, `#Schema`, and `_scratch`.
+`lookup_path(&[&str])` remains as a legacy string-field convenience wrapper.
+
+Current embedder compatibility gaps:
+
+- No `FillPath` or builder-style mutation API is exposed. Callers compose base
+  values and overlays by compiling each one and using `Value::unify`.
+- No typed `Decode` API decodes directly into Rust structs. Callers export a
+  concrete value with `encode_value` using `Encoding::Json`, then deserialize
+  with `serde`.
+- No `Subsume`, and no value-level reads for attributes, positions, source
+  files, or documentation comments are exposed.
+
+Any future addition of these Go CUE parity APIs must specify semantics,
+diagnostics, validation limits, and compatibility tests before becoming part of
+the stable facade.
 
 ## Diagnostics API
 
