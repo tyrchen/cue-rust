@@ -614,6 +614,37 @@ mod tests {
     }
 
     #[test]
+    fn test_should_recompute_default_expressions_after_struct_unification()
+    -> Result<(), Box<dyn std::error::Error>> {
+        assert_eq!(
+            json!({"s": "x", "e": "x"}),
+            export_out_json("#P: {s: string, e: *(s)}\nout: #P & {s: \"x\"}\n")?
+        );
+        assert_eq!(
+            Some(&json!(true)),
+            export_out_json("#P: {s: string, eq: *(s == \"x\")}\nout: #P & {s: \"x\"}\n")?
+                .pointer("/eq")
+        );
+
+        let policy = "#P: {\n  severity: string\n  userVisible: *false | bool\n  durationMinutes: \
+                      *0 | int\n  required: bool | *(severity == \"sev0\" || severity == \"sev1\" \
+                      || (severity == \"sev2\" && userVisible) || durationMinutes > 60)\n}\n";
+        assert_eq!(
+            Some(&json!(true)),
+            export_out_json(&format!("{policy}out: #P & {{severity: \"sev1\"}}\n"))?
+                .pointer("/required")
+        );
+        assert_eq!(
+            Some(&json!(true)),
+            export_out_json(&format!(
+                "{policy}out: #P & {{severity: \"sev3\", durationMinutes: 75}}\n"
+            ))?
+            .pointer("/required")
+        );
+        Ok(())
+    }
+
+    #[test]
     fn test_should_validate_builtin_kind_schema() -> Result<(), Box<dyn std::error::Error>> {
         let context = Context::new();
         let schema = context.compile_source("schema.cue", "name: string\n")?;

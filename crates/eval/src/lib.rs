@@ -541,6 +541,18 @@ pub enum EvaluatedValue {
     StringConstraintSet(StringConstraintSet),
     /// Default-marked value inside a disjunction.
     Default(Box<EvaluatedValue>),
+    #[doc(hidden)]
+    /// Default expression that must be evaluated against unified sibling fields.
+    DeferredDefaultExpression {
+        /// Default expression to reevaluate.
+        expression: ExprId,
+        /// Lexical environment for the expression.
+        environment: EnvironmentId,
+        /// Value computed before sibling unification.
+        fallback: Box<EvaluatedValue>,
+        /// Static sibling labels and features visible to the expression.
+        sibling_features: Vec<(String, Feature)>,
+    },
     /// Disjunction alternatives.
     Disjunction(Vec<Disjunct>),
     #[doc(hidden)]
@@ -578,6 +590,7 @@ impl EvaluatedValue {
             Self::OptionalField(value) | Self::Default(value) | Self::FixpointPrevious(value) => {
                 value.kind()
             }
+            Self::DeferredDefaultExpression { fallback, .. } => fallback.kind(),
             Self::Disjunction(disjuncts) => disjunction_kind(disjuncts),
             Self::Bottom(_) => ValueKind::Bottom,
         }
@@ -1043,10 +1056,11 @@ impl<'runtime> Evaluator<'runtime> {
         self.evaluate_vertex_at(vertex_id, 0)
     }
 
-    fn finish(self, value: EvaluatedValue) -> Result<EvaluatedValue, EvalError> {
+    fn finish(mut self, value: EvaluatedValue) -> Result<EvaluatedValue, EvalError> {
         if self.diagnostics.has_errors() {
             return Err(EvalError::Diagnostics(self.diagnostics));
         }
+        let value = self.resolve_deferred_defaults(value, None)?;
         Ok(match self.export_options {
             Some(options) if !options.include_optional => prune_optional_fields(value),
             _ => value,
@@ -1701,6 +1715,342 @@ impl<'runtime> Evaluator<'runtime> {
         self.expr_contains_choice(comprehension.body, visited)
     }
 
+    fn expr_contains_field_reference(
+        &self,
+        expression: ExprId,
+        visited: &mut HashSet<ExprId>,
+    ) -> Result<bool, EvalError> {
+        if !visited.insert(expression) {
+            return Ok(false);
+        }
+        Ok(match self.runtime.expression(expression)? {
+            SemanticExpr::FieldReference { .. } | SemanticExpr::DynamicReference { .. } => true,
+            SemanticExpr::LetReference { expression } | SemanticExpr::Default(expression) => {
+                self.expr_contains_field_reference(*expression, visited)?
+            }
+            SemanticExpr::Unary { expr, .. } => {
+                self.expr_contains_field_reference(*expr, visited)?
+            }
+            SemanticExpr::Binary { left, right, .. } => {
+                self.exprs_contain_field_reference([*left, *right], visited)?
+            }
+            SemanticExpr::Selector { base, .. } => {
+                self.expr_contains_field_reference(*base, visited)?
+            }
+            SemanticExpr::Index { base, index } => {
+                self.exprs_contain_field_reference([*base, *index], visited)?
+            }
+            SemanticExpr::Slice { base, start, end } => {
+                self.expr_contains_field_reference(*base, visited)?
+                    || self.optional_expr_contains_field_reference(*start, visited)?
+                    || self.optional_expr_contains_field_reference(*end, visited)?
+            }
+            SemanticExpr::Call { callee, args } => {
+                self.expr_contains_field_reference(*callee, visited)?
+                    || self.exprs_contain_field_reference(args.iter().copied(), visited)?
+            }
+            SemanticExpr::Struct(members) => {
+                self.struct_contains_field_reference(members, visited)?
+            }
+            SemanticExpr::List { items, tail } => {
+                self.exprs_contain_field_reference(items.iter().copied(), visited)?
+                    || self.optional_expr_contains_field_reference(*tail, visited)?
+            }
+            SemanticExpr::InterpolatedString(segments) => {
+                for segment in segments {
+                    if let StringSegment::Expr(expression) = segment
+                        && self.expr_contains_field_reference(*expression, visited)?
+                    {
+                        return Ok(true);
+                    }
+                }
+                false
+            }
+            SemanticExpr::Comprehension(comprehension) => {
+                self.comprehension_contains_field_reference(comprehension, visited)?
+            }
+            _ => false,
+        })
+    }
+
+    fn optional_expr_contains_field_reference(
+        &self,
+        expression: Option<ExprId>,
+        visited: &mut HashSet<ExprId>,
+    ) -> Result<bool, EvalError> {
+        expression.map_or(Ok(false), |expression| {
+            self.expr_contains_field_reference(expression, visited)
+        })
+    }
+
+    fn exprs_contain_field_reference(
+        &self,
+        expressions: impl IntoIterator<Item = ExprId>,
+        visited: &mut HashSet<ExprId>,
+    ) -> Result<bool, EvalError> {
+        for expression in expressions {
+            if self.expr_contains_field_reference(expression, visited)? {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
+    fn struct_contains_field_reference(
+        &self,
+        members: &[StructMember],
+        visited: &mut HashSet<ExprId>,
+    ) -> Result<bool, EvalError> {
+        for member in members {
+            match member {
+                StructMember::Field(field) => {
+                    let label_has_reference = match &field.label {
+                        FieldLabel::Dynamic(expression) | FieldLabel::Pattern(expression) => {
+                            self.expr_contains_field_reference(*expression, visited)?
+                        }
+                        _ => false,
+                    };
+                    if label_has_reference
+                        || self.expr_contains_field_reference(field.expression, visited)?
+                    {
+                        return Ok(true);
+                    }
+                }
+                StructMember::Comprehension(comprehension)
+                    if self.comprehension_contains_field_reference(comprehension, visited)? =>
+                {
+                    return Ok(true);
+                }
+                _ => {}
+            }
+        }
+        Ok(false)
+    }
+
+    fn comprehension_contains_field_reference(
+        &self,
+        comprehension: &Comprehension,
+        visited: &mut HashSet<ExprId>,
+    ) -> Result<bool, EvalError> {
+        for clause in &comprehension.clauses {
+            let has_reference = match clause {
+                ComprehensionClause::For { source, .. } => {
+                    self.expr_contains_field_reference(*source, visited)?
+                }
+                ComprehensionClause::If { condition } => {
+                    self.expr_contains_field_reference(*condition, visited)?
+                }
+                _ => false,
+            };
+            if has_reference {
+                return Ok(true);
+            }
+        }
+        self.expr_contains_field_reference(comprehension.body, visited)
+    }
+
+    fn deferred_default_sibling_features(
+        &self,
+        environment: EnvironmentId,
+    ) -> Result<Vec<(String, Feature)>, EvalError> {
+        let mut features = IndexMap::new();
+        for local_fields in &self.local_fields {
+            for feature in local_fields.keys().copied() {
+                features.insert(self.feature_label(feature), feature);
+            }
+        }
+
+        let environment = self.runtime.environment(environment)?;
+        let vertex = self.runtime.vertex(environment.vertex)?;
+        for feature in vertex.arcs.keys().copied() {
+            features.insert(self.feature_label(feature), feature);
+        }
+
+        Ok(features.into_iter().collect())
+    }
+
+    #[allow(
+        clippy::too_many_lines,
+        reason = "recursive value-tree rewrite keeps all EvaluatedValue cases explicit and \
+                  auditable"
+    )]
+    fn resolve_deferred_defaults(
+        &mut self,
+        value: EvaluatedValue,
+        sibling_fields: Option<&IndexMap<String, EvaluatedValue>>,
+    ) -> Result<EvaluatedValue, EvalError> {
+        match value {
+            EvaluatedValue::Struct(fields) => {
+                let siblings = fields.clone();
+                fields
+                    .into_iter()
+                    .map(|(label, value)| {
+                        self.resolve_deferred_defaults(value, Some(&siblings))
+                            .map(|value| (label, value))
+                    })
+                    .collect::<Result<IndexMap<_, _>, _>>()
+                    .map(EvaluatedValue::Struct)
+            }
+            EvaluatedValue::PatternedStruct { fields, patterns } => {
+                let siblings = fields.clone();
+                let fields = fields
+                    .into_iter()
+                    .map(|(label, value)| {
+                        self.resolve_deferred_defaults(value, Some(&siblings))
+                            .map(|value| (label, value))
+                    })
+                    .collect::<Result<IndexMap<_, _>, _>>()?;
+                let patterns = patterns
+                    .into_iter()
+                    .map(|pattern| {
+                        Ok(StructPatternConstraint {
+                            pattern: Box::new(
+                                self.resolve_deferred_defaults(*pattern.pattern, sibling_fields)?,
+                            ),
+                            value: Box::new(
+                                self.resolve_deferred_defaults(*pattern.value, sibling_fields)?,
+                            ),
+                            span: pattern.span,
+                        })
+                    })
+                    .collect::<Result<Vec<_>, EvalError>>()?;
+                Ok(EvaluatedValue::PatternedStruct { fields, patterns })
+            }
+            EvaluatedValue::ClosedStruct(fields) => {
+                let siblings = fields.clone();
+                fields
+                    .into_iter()
+                    .map(|(label, value)| {
+                        self.resolve_deferred_defaults(value, Some(&siblings))
+                            .map(|value| (label, value))
+                    })
+                    .collect::<Result<IndexMap<_, _>, _>>()
+                    .map(EvaluatedValue::ClosedStruct)
+            }
+            EvaluatedValue::ClosedPatternedStruct { fields, patterns } => {
+                let siblings = fields.clone();
+                let fields = fields
+                    .into_iter()
+                    .map(|(label, value)| {
+                        self.resolve_deferred_defaults(value, Some(&siblings))
+                            .map(|value| (label, value))
+                    })
+                    .collect::<Result<IndexMap<_, _>, _>>()?;
+                let patterns = patterns
+                    .into_iter()
+                    .map(|pattern| {
+                        Ok(StructPatternConstraint {
+                            pattern: Box::new(
+                                self.resolve_deferred_defaults(*pattern.pattern, sibling_fields)?,
+                            ),
+                            value: Box::new(
+                                self.resolve_deferred_defaults(*pattern.value, sibling_fields)?,
+                            ),
+                            span: pattern.span,
+                        })
+                    })
+                    .collect::<Result<Vec<_>, EvalError>>()?;
+                Ok(EvaluatedValue::ClosedPatternedStruct { fields, patterns })
+            }
+            EvaluatedValue::OptionalField(value) => self
+                .resolve_deferred_defaults(*value, sibling_fields)
+                .map(|value| EvaluatedValue::OptionalField(Box::new(value))),
+            EvaluatedValue::Default(value) => self
+                .resolve_deferred_defaults(*value, sibling_fields)
+                .map(|value| EvaluatedValue::Default(Box::new(value))),
+            EvaluatedValue::DeferredDefaultExpression {
+                expression,
+                environment,
+                fallback,
+                sibling_features,
+            } => self.evaluate_deferred_default_expression(
+                expression,
+                environment,
+                *fallback,
+                &sibling_features,
+                sibling_fields,
+            ),
+            EvaluatedValue::List(items) => items
+                .into_iter()
+                .map(|item| self.resolve_deferred_defaults(item, sibling_fields))
+                .collect::<Result<Vec<_>, _>>()
+                .map(EvaluatedValue::List),
+            EvaluatedValue::OpenList { items, tail } => {
+                let items = items
+                    .into_iter()
+                    .map(|item| self.resolve_deferred_defaults(item, sibling_fields))
+                    .collect::<Result<Vec<_>, _>>()?;
+                let tail = self.resolve_deferred_defaults(*tail, sibling_fields)?;
+                Ok(EvaluatedValue::OpenList {
+                    items,
+                    tail: Box::new(tail),
+                })
+            }
+            EvaluatedValue::Disjunction(disjuncts) => {
+                let disjuncts = disjuncts
+                    .into_iter()
+                    .map(|disjunct| {
+                        Ok(Disjunct {
+                            value: Box::new(
+                                self.resolve_deferred_defaults(*disjunct.value, sibling_fields)?,
+                            ),
+                            default: disjunct.default,
+                        })
+                    })
+                    .collect::<Result<Vec<_>, EvalError>>()?
+                    .into_iter()
+                    .filter(|disjunct| {
+                        !matches!(disjunct.value.as_ref(), EvaluatedValue::Bottom(_))
+                    })
+                    .collect();
+                Ok(collapse_disjunction(EvaluatedValue::Disjunction(
+                    unique_disjuncts(disjuncts),
+                )))
+            }
+            EvaluatedValue::FixpointPrevious(value) => self
+                .resolve_deferred_defaults(*value, sibling_fields)
+                .map(|value| EvaluatedValue::FixpointPrevious(Box::new(value))),
+            EvaluatedValue::ComprehensionItems(items) => items
+                .into_iter()
+                .map(|item| self.resolve_deferred_defaults(item, sibling_fields))
+                .collect::<Result<Vec<_>, _>>()
+                .map(EvaluatedValue::ComprehensionItems),
+            value => Ok(value),
+        }
+    }
+
+    fn evaluate_deferred_default_expression(
+        &mut self,
+        expression: ExprId,
+        environment: EnvironmentId,
+        fallback: EvaluatedValue,
+        sibling_features: &[(String, Feature)],
+        sibling_fields: Option<&IndexMap<String, EvaluatedValue>>,
+    ) -> Result<EvaluatedValue, EvalError> {
+        let Some(sibling_fields) = sibling_fields else {
+            return Ok(fallback);
+        };
+        let overlay = sibling_features
+            .iter()
+            .filter_map(|(label, feature)| {
+                sibling_fields
+                    .get(label)
+                    .cloned()
+                    .map(|value| (*feature, value))
+            })
+            .collect::<IndexMap<_, _>>();
+        if overlay.is_empty() {
+            return Ok(fallback);
+        }
+
+        self.local_values.push(overlay);
+        self.local_value_scopes.push(LocalValueScope::Overlay);
+        let evaluated = self.evaluate_expr_at(expression, environment, 0);
+        self.local_value_scopes.pop();
+        self.local_values.pop();
+        self.resolve_deferred_defaults(evaluated?, Some(sibling_fields))
+    }
+
     fn cache_cycle_bottoms(&mut self, vertices: &HashSet<VertexId>) {
         for vertex in vertices {
             self.vertex_cache
@@ -1862,9 +2212,19 @@ impl<'runtime> Evaluator<'runtime> {
             SemanticExpr::Binary { op, left, right } => {
                 self.evaluate_binary_expr(op, *left, *right, environment, depth + 1)?
             }
-            SemanticExpr::Default(expr) => EvaluatedValue::Default(Box::new(
-                self.evaluate_expr_at(*expr, environment, depth + 1)?,
-            )),
+            SemanticExpr::Default(expr) => {
+                let fallback = self.evaluate_expr_at(*expr, environment, depth + 1)?;
+                if self.expr_contains_field_reference(*expr, &mut HashSet::new())? {
+                    EvaluatedValue::Default(Box::new(EvaluatedValue::DeferredDefaultExpression {
+                        expression: *expr,
+                        environment,
+                        fallback: Box::new(fallback),
+                        sibling_features: self.deferred_default_sibling_features(environment)?,
+                    }))
+                } else {
+                    EvaluatedValue::Default(Box::new(fallback))
+                }
+            }
             SemanticExpr::InterpolatedString(segments) => {
                 self.evaluate_interpolated_string(segments, environment, depth + 1)?
             }
