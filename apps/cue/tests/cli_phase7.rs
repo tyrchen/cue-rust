@@ -18,13 +18,17 @@ async fn fixture_dir() -> Result<PathBuf, Box<dyn Error>> {
     Ok(path)
 }
 
+fn binary_path() -> Result<String, std::env::VarError> {
+    std::env::var("CARGO_BIN_EXE_cue").or_else(|_| std::env::var("CARGO_BIN_EXE_cue-rs"))
+}
+
 async fn run(args: &[&str]) -> Result<Output, Box<dyn Error>> {
-    let binary = std::env::var("CARGO_BIN_EXE_cue-rs")?;
+    let binary = binary_path()?;
     Ok(Command::new(binary).args(args).output().await?)
 }
 
 async fn run_in_dir(args: &[&str], current_dir: &PathBuf) -> Result<Output, Box<dyn Error>> {
-    let binary = std::env::var("CARGO_BIN_EXE_cue-rs")?;
+    let binary = binary_path()?;
     Ok(Command::new(binary)
         .current_dir(current_dir)
         .args(args)
@@ -33,7 +37,7 @@ async fn run_in_dir(args: &[&str], current_dir: &PathBuf) -> Result<Output, Box<
 }
 
 async fn run_with_stdin(args: &[&str], stdin: &str) -> Result<Output, Box<dyn Error>> {
-    let binary = std::env::var("CARGO_BIN_EXE_cue-rs")?;
+    let binary = binary_path()?;
     let mut child = Command::new(binary)
         .args(args)
         .stdin(std::process::Stdio::piped())

@@ -859,7 +859,12 @@ impl Value {
     ///
     /// Returns [`EvalError::Diagnostics`] when the path does not select a value.
     pub fn lookup_path(&self, path: &[&str]) -> Result<Self, EvalError> {
-        let current = self.evaluate()?;
+        let options = ExportOptions {
+            include_definitions: path.iter().any(|label| label.starts_with('#')),
+            include_hidden: path.iter().any(|label| label.starts_with('_')),
+            ..ExportOptions::default()
+        };
+        let current = self.evaluate_export(options)?;
         let path = Path::from_fields(path.iter().copied());
         Self::select_path(current, path.selectors())
     }
@@ -1042,7 +1047,10 @@ impl<'runtime> Evaluator<'runtime> {
         if self.diagnostics.has_errors() {
             return Err(EvalError::Diagnostics(self.diagnostics));
         }
-        Ok(value)
+        Ok(match self.export_options {
+            Some(options) if !options.include_optional => prune_optional_fields(value),
+            _ => value,
+        })
     }
 
     fn evaluate_vertex_at(
@@ -1845,7 +1853,11 @@ impl<'runtime> Evaluator<'runtime> {
             }
             SemanticExpr::Unary { op, expr } => {
                 let value = self.evaluate_expr_at(*expr, environment, depth + 1)?;
-                evaluate_unary(op, resolve_default_operand_value(value))
+                if op == "group" {
+                    evaluate_unary(op, strip_fixpoint_previous_values(value))
+                } else {
+                    evaluate_unary(op, resolve_default_operand_value(value))
+                }
             }
             SemanticExpr::Binary { op, left, right } => {
                 self.evaluate_binary_expr(op, *left, *right, environment, depth + 1)?
@@ -3391,9 +3403,6 @@ impl<'runtime> Evaluator<'runtime> {
             return false;
         }
         if metadata.is_hidden() && !options.include_hidden {
-            return false;
-        }
-        if is_optional_constraint(metadata) && !options.include_optional {
             return false;
         }
         true
@@ -6680,16 +6689,28 @@ fn disjuncts_from(value: EvaluatedValue) -> Vec<Disjunct> {
     match value {
         EvaluatedValue::Bottom(_) => Vec::new(),
         EvaluatedValue::Disjunction(disjuncts) => disjuncts,
-        EvaluatedValue::Default(value) if matches!(value.as_ref(), EvaluatedValue::Bottom(_)) => {
-            Vec::new()
-        }
-        EvaluatedValue::Default(value) => vec![Disjunct {
-            value,
-            default: true,
-        }],
+        EvaluatedValue::Default(value) => default_disjuncts_from(*value),
         value => vec![Disjunct {
             value: Box::new(value),
             default: false,
+        }],
+    }
+}
+
+fn default_disjuncts_from(value: EvaluatedValue) -> Vec<Disjunct> {
+    match value {
+        EvaluatedValue::Bottom(_) => Vec::new(),
+        EvaluatedValue::Default(value) => default_disjuncts_from(*value),
+        EvaluatedValue::Disjunction(disjuncts) => disjuncts
+            .into_iter()
+            .map(|mut disjunct| {
+                disjunct.default = true;
+                disjunct
+            })
+            .collect(),
+        value => vec![Disjunct {
+            value: Box::new(value),
+            default: true,
         }],
     }
 }
@@ -6895,6 +6916,77 @@ fn strip_fixpoint_previous_values(value: EvaluatedValue) -> EvaluatedValue {
         ),
         value => value,
     }
+}
+
+fn prune_optional_fields(value: EvaluatedValue) -> EvaluatedValue {
+    match value {
+        EvaluatedValue::Struct(fields) => EvaluatedValue::Struct(prune_optional_field_map(fields)),
+        EvaluatedValue::PatternedStruct { fields, patterns } => EvaluatedValue::PatternedStruct {
+            fields: prune_optional_field_map(fields),
+            patterns: patterns
+                .into_iter()
+                .map(|pattern| StructPatternConstraint {
+                    pattern: Box::new(prune_optional_fields(*pattern.pattern)),
+                    value: Box::new(prune_optional_fields(*pattern.value)),
+                    span: pattern.span,
+                })
+                .collect(),
+        },
+        EvaluatedValue::ClosedStruct(fields) => {
+            EvaluatedValue::ClosedStruct(prune_optional_field_map(fields))
+        }
+        EvaluatedValue::ClosedPatternedStruct { fields, patterns } => {
+            EvaluatedValue::ClosedPatternedStruct {
+                fields: prune_optional_field_map(fields),
+                patterns: patterns
+                    .into_iter()
+                    .map(|pattern| StructPatternConstraint {
+                        pattern: Box::new(prune_optional_fields(*pattern.pattern)),
+                        value: Box::new(prune_optional_fields(*pattern.value)),
+                        span: pattern.span,
+                    })
+                    .collect(),
+            }
+        }
+        EvaluatedValue::List(items) => {
+            EvaluatedValue::List(items.into_iter().map(prune_optional_fields).collect())
+        }
+        EvaluatedValue::OpenList { items, tail } => EvaluatedValue::OpenList {
+            items: items.into_iter().map(prune_optional_fields).collect(),
+            tail: Box::new(prune_optional_fields(*tail)),
+        },
+        EvaluatedValue::Default(value) => {
+            EvaluatedValue::Default(Box::new(prune_optional_fields(*value)))
+        }
+        EvaluatedValue::Disjunction(disjuncts) => EvaluatedValue::Disjunction(
+            disjuncts
+                .into_iter()
+                .map(|disjunct| Disjunct {
+                    value: Box::new(prune_optional_fields(*disjunct.value)),
+                    default: disjunct.default,
+                })
+                .collect(),
+        ),
+        EvaluatedValue::ComprehensionItems(items) => EvaluatedValue::ComprehensionItems(
+            items.into_iter().map(prune_optional_fields).collect(),
+        ),
+        value => value,
+    }
+}
+
+fn prune_optional_field_map(
+    fields: IndexMap<String, EvaluatedValue>,
+) -> IndexMap<String, EvaluatedValue> {
+    fields
+        .into_iter()
+        .filter_map(|(label, value)| {
+            if matches!(value, EvaluatedValue::OptionalField(_)) {
+                None
+            } else {
+                Some((label, prune_optional_fields(value)))
+            }
+        })
+        .collect()
 }
 
 fn evaluate_regex_binary(
@@ -7545,8 +7637,17 @@ fn unify_values(left: EvaluatedValue, right: EvaluatedValue, span: Option<Span>)
         }
         (EvaluatedValue::FixpointPrevious(left), right) => unify_values(*left, right, span),
         (left, EvaluatedValue::FixpointPrevious(right)) => unify_values(left, *right, span),
-        (EvaluatedValue::Default(left), right) => unify_values(*left, right, span),
-        (left, EvaluatedValue::Default(right)) => unify_values(left, *right, span),
+        (EvaluatedValue::Default(left), EvaluatedValue::Default(right)) => unify_disjunctions(
+            default_disjuncts_from(*left),
+            &default_disjuncts_from(*right),
+            span,
+        ),
+        (EvaluatedValue::Default(left), right) => {
+            unify_disjunction_with_value(default_disjuncts_from(*left), &right, span)
+        }
+        (left, EvaluatedValue::Default(right)) => {
+            unify_disjunction_with_value(default_disjuncts_from(*right), &left, span)
+        }
         (EvaluatedValue::Disjunction(left), EvaluatedValue::Disjunction(right)) => {
             unify_disjunctions(left, &right, span)
         }
@@ -8168,7 +8269,7 @@ fn fields_after_patterns(
 }
 
 fn close_recursive(value: EvaluatedValue) -> EvaluatedValue {
-    match resolve_default_value(value) {
+    match value {
         EvaluatedValue::Struct(fields) => EvaluatedValue::ClosedStruct(
             fields
                 .into_iter()
@@ -8268,8 +8369,9 @@ fn unify_closed_struct(
                 false,
             ));
         };
-        closed.insert(label, unify_values(left_value, right_value, span));
+        closed.insert(label, unify_field_values(left_value, right_value, span));
     }
+    remove_unset_optional_fields(&mut closed);
     EvaluatedValue::ClosedStruct(closed)
 }
 
@@ -8283,7 +8385,7 @@ fn unify_closed_patterned_struct(
     let mut fields = closed;
     for (label, right_value) in open {
         if let Some(left_value) = fields.shift_remove(&label) {
-            fields.insert(label, unify_values(left_value, right_value, span));
+            fields.insert(label, unify_field_values(left_value, right_value, span));
             continue;
         }
         let pattern_value = match pattern_value_for_label(&patterns, &label) {
@@ -8302,6 +8404,7 @@ fn unify_closed_patterned_struct(
     }
     let mut patterns = patterns;
     patterns.extend(open_patterns);
+    remove_unset_optional_fields(&mut fields);
     EvaluatedValue::ClosedPatternedStruct { fields, patterns }
 }
 
@@ -8337,7 +8440,7 @@ fn unify_closed_patterned_structs(
                 let Some(existing) = fields.shift_remove(&label) else {
                     continue;
                 };
-                fields.insert(label, unify_values(existing, pattern_value, span));
+                fields.insert(label, unify_field_values(existing, pattern_value, span));
             }
             Ok(None) => {
                 return EvaluatedValue::Bottom(Bottom::new(
@@ -8351,6 +8454,7 @@ fn unify_closed_patterned_structs(
         }
     }
     combined_patterns.extend(right_patterns);
+    remove_unset_optional_fields(&mut fields);
     EvaluatedValue::ClosedPatternedStruct {
         fields,
         patterns: combined_patterns,
@@ -8362,15 +8466,27 @@ fn unify_closed_structs(
     right: IndexMap<String, EvaluatedValue>,
     span: Option<Span>,
 ) -> EvaluatedValue {
-    if left.len() != right.len() || left.keys().any(|label| !right.contains_key(label)) {
-        return EvaluatedValue::Bottom(Bottom::new(
-            "cue.eval.closed_struct",
-            "closed structs have incompatible fields",
-            span,
-            false,
-        ));
+    let mut fields = left;
+    for (label, right_value) in right {
+        if let Some(left_value) = fields.shift_remove(&label) {
+            fields.insert(label, unify_field_values(left_value, right_value, span));
+        } else if matches!(right_value, EvaluatedValue::OptionalField(_)) {
+            fields.insert(label, right_value);
+        } else {
+            return EvaluatedValue::Bottom(Bottom::new(
+                "cue.eval.closed_struct",
+                "closed structs have incompatible fields",
+                span,
+                false,
+            ));
+        }
     }
-    EvaluatedValue::ClosedStruct(unify_structs(left, right, span))
+    remove_unset_optional_fields(&mut fields);
+    EvaluatedValue::ClosedStruct(fields)
+}
+
+fn remove_unset_optional_fields(fields: &mut IndexMap<String, EvaluatedValue>) {
+    fields.retain(|_, value| !matches!(value, EvaluatedValue::OptionalField(_)));
 }
 
 fn conflict_bottom(

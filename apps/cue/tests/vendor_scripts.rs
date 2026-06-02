@@ -193,8 +193,12 @@ async fn fixture_dir() -> Result<PathBuf, Box<dyn Error>> {
     Ok(path)
 }
 
+fn binary_path() -> Result<String, std::env::VarError> {
+    std::env::var("CARGO_BIN_EXE_cue").or_else(|_| std::env::var("CARGO_BIN_EXE_cue-rs"))
+}
+
 async fn run(args: &[&str]) -> Result<Output, Box<dyn Error>> {
-    let binary = std::env::var("CARGO_BIN_EXE_cue-rs")?;
+    let binary = binary_path()?;
     Ok(Command::new(binary).args(args).output().await?)
 }
 

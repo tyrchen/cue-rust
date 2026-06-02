@@ -406,6 +406,8 @@ fn single_diagnostic(code: &'static str, message: &'static str) -> DiagnosticRep
 
 #[cfg(test)]
 mod tests {
+    use serde_json::json;
+
     use super::{
         Context, ContextConfig, CueError, DecodeOptions, EncodeOptions, Encoding, EvalError,
         EvaluatedValue, JsonValue, Path, ValidateOptions, Value, ValueExt, ValueKind, decode_bytes,
@@ -468,6 +470,14 @@ mod tests {
         assert_eq!(&expected, value);
     }
 
+    fn export_out_json(source: &str) -> Result<JsonValue, Box<dyn std::error::Error>> {
+        let value = Context::new().compile_source("test.cue", source)?;
+        value
+            .lookup_path(&["out"])?
+            .to_serde_json_value()
+            .map_err(Into::into)
+    }
+
     #[test]
     fn test_should_compile_source_and_lookup_value() -> Result<(), Box<dyn std::error::Error>> {
         let context = Context::new();
@@ -516,6 +526,59 @@ mod tests {
             Some(8080),
             json_value.get("port").and_then(JsonValue::as_i64)
         );
+        Ok(())
+    }
+
+    #[test]
+    fn test_should_unify_defaulted_disjunction_with_non_default_member()
+    -> Result<(), Box<dyn std::error::Error>> {
+        assert_eq!(
+            json!("b"),
+            export_out_json("out: (*\"a\" | \"b\" | \"c\") & \"b\"\n")?
+        );
+        assert_eq!(
+            json!(true),
+            export_out_json("out: (*false | bool) & true\n")?
+        );
+        assert_eq!(
+            json!({"x": "b"}),
+            export_out_json("#H: {x: *\"a\" | \"b\" | \"c\"}\nout: #H & {x: \"b\"}\n")?
+        );
+        assert_eq!(
+            json!({"auto": true}),
+            export_out_json("#B: {auto: *false | bool}\nout: #B & {auto: true}\n")?
+        );
+        assert_eq!(
+            json!({"n": 30}),
+            export_out_json("#C: {n: *15 | int}\nout: #C & {n: 30}\n")?
+        );
+        assert_eq!(
+            json!("a"),
+            export_out_json("out: *\"a\" | \"b\" | \"c\"\n")?
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_should_omit_unset_optional_fields_from_concrete_export()
+    -> Result<(), Box<dyn std::error::Error>> {
+        assert_eq!(
+            json!({"a": 1}),
+            export_out_json("#S: {a: int, b?: string}\nout: #S & {a: 1}\n")?
+        );
+        assert_eq!(
+            json!({"a": 1, "b": "x"}),
+            export_out_json("#S: {a: int, b?: string}\nout: #S & {a: 1, b: \"x\"}\n")?
+        );
+        assert_eq!(
+            json!({"a": 1}),
+            export_out_json("#S: {a: int, b?: =~\"^x$\"}\nout: #S & {a: 1}\n")?
+        );
+
+        let error = export_out_json("#S: {a: int, b: string}\nout: #S & {a: 1}\n")
+            .expect_err("required non-concrete field must remain an export error");
+        let error_debug = format!("{error:?}");
+        assert!(error_debug.contains("incomplete"), "{error_debug}");
         Ok(())
     }
 
