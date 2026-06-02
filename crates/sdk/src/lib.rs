@@ -5,7 +5,6 @@
 
 use camino::Utf8PathBuf;
 use cue_rust_adt::Runtime;
-pub use cue_rust_compiler::CompiledInstance;
 use cue_rust_compiler::{CompileError, CompileOptions, Compiler};
 pub use cue_rust_encoding::{
     DecodeError, DecodeOptions, EncodeError, EncodeOptions, Encoding, decode_bytes, encode_value,
@@ -15,16 +14,27 @@ pub use cue_rust_eval::{
     ValidateOptions, Value, ValueKind,
 };
 pub use cue_rust_loader::{BuildInstance, LoadConfig, LoadError, Loader, PackageSelector};
-pub use cue_rust_source::{DiagnosticReport, SourceError, SourceFile, SourceLimits};
-pub use cue_rust_syntax::{
-    AstFile, ComprehensionClause, ComprehensionDecl, Decl, Expr, FieldDecl, FieldMarker,
-    ImportDecl, Label, LetDecl, PackageClause, ParseConfig, ParseMode, ParseResult, ParsedSource,
-    ScanResult, StringPart, Token, TokenKind,
-};
+pub use cue_rust_source::{DiagnosticReport, SourceError, SourceLimits};
+pub use cue_rust_syntax::{ParseConfig, ParseMode, ParseResult, ScanResult, Token, TokenKind};
+use serde_json::Value as JsonValue;
 use thiserror::Error;
 
 /// Current SDK version.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
+
+/// Experimental lower-level re-exports.
+///
+/// These types expose parser, compiler, and source internals that are useful
+/// for tool authors, tests, and compatibility work. They are not yet part of
+/// the stable embedder facade.
+pub mod experimental {
+    pub use cue_rust_compiler::CompiledInstance;
+    pub use cue_rust_source::SourceFile;
+    pub use cue_rust_syntax::{
+        AstFile, ComprehensionClause, ComprehensionDecl, Decl, Expr, FieldDecl, FieldMarker,
+        ImportDecl, Label, LetDecl, PackageClause, ParsedSource, StringPart,
+    };
+}
 
 /// Top-level SDK error.
 #[derive(Debug, Error)]
@@ -49,10 +59,83 @@ pub enum CueError {
     Diagnostics(DiagnosticReport),
 }
 
+/// Configuration for a [`Context`].
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct ContextConfig {
+    parse_mode: ParseMode,
+    source_limits: SourceLimits,
+    include_comments: bool,
+}
+
+impl ContextConfig {
+    /// Creates a builder for context configuration.
+    #[must_use]
+    pub fn builder() -> ContextConfigBuilder {
+        ContextConfigBuilder::default()
+    }
+
+    /// Returns the parser mode.
+    #[must_use]
+    pub fn parse_mode(self) -> ParseMode {
+        self.parse_mode
+    }
+
+    /// Returns source size limits.
+    #[must_use]
+    pub fn source_limits(self) -> SourceLimits {
+        self.source_limits
+    }
+
+    /// Returns whether comments are retained by scanner/parser results.
+    #[must_use]
+    pub fn include_comments(self) -> bool {
+        self.include_comments
+    }
+
+    fn parse_config(self) -> ParseConfig {
+        ParseConfig::new(self.parse_mode, self.source_limits).with_comments(self.include_comments)
+    }
+}
+
+/// Builder for [`ContextConfig`].
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct ContextConfigBuilder {
+    config: ContextConfig,
+}
+
+impl ContextConfigBuilder {
+    /// Sets the parser mode.
+    #[must_use]
+    pub fn parse_mode(mut self, parse_mode: ParseMode) -> Self {
+        self.config.parse_mode = parse_mode;
+        self
+    }
+
+    /// Sets source size limits.
+    #[must_use]
+    pub fn source_limits(mut self, source_limits: SourceLimits) -> Self {
+        self.config.source_limits = source_limits;
+        self
+    }
+
+    /// Sets whether comments are retained by scanner/parser results.
+    #[must_use]
+    pub fn include_comments(mut self, include_comments: bool) -> Self {
+        self.config.include_comments = include_comments;
+        self
+    }
+
+    /// Builds the context configuration.
+    #[must_use]
+    pub fn build(self) -> ContextConfig {
+        self.config
+    }
+}
+
 /// Top-level SDK context.
 #[derive(Clone, Debug, Default)]
 pub struct Context {
-    parse_config: ParseConfig,
+    config: ContextConfig,
 }
 
 impl Context {
@@ -62,29 +145,47 @@ impl Context {
         Self::default()
     }
 
+    /// Creates a context with explicit facade configuration.
+    #[must_use]
+    pub fn with_config(config: ContextConfig) -> Self {
+        Self { config }
+    }
+
     /// Creates a context with an explicit parser configuration.
     #[must_use]
     pub fn with_parse_config(parse_config: ParseConfig) -> Self {
-        Self { parse_config }
+        Self {
+            config: ContextConfig::builder()
+                .parse_mode(parse_config.mode())
+                .source_limits(parse_config.limits())
+                .include_comments(parse_config.include_comments())
+                .build(),
+        }
+    }
+
+    /// Returns the context configuration.
+    #[must_use]
+    pub fn config(&self) -> ContextConfig {
+        self.config
     }
 
     /// Parses a named source into a tolerant AST and diagnostics.
     #[must_use]
     pub fn parse_source(&self, name: impl Into<String>, content: impl Into<String>) -> ParseResult {
         let content = content.into();
-        cue_rust_syntax::parse_bytes(name, content.as_bytes(), self.parse_config)
+        cue_rust_syntax::parse_bytes(name, content.as_bytes(), self.config.parse_config())
     }
 
     /// Parses raw source bytes into a tolerant AST and diagnostics.
     #[must_use]
     pub fn parse_source_bytes(&self, name: impl Into<String>, bytes: &[u8]) -> ParseResult {
-        cue_rust_syntax::parse_bytes(name, bytes, self.parse_config)
+        cue_rust_syntax::parse_bytes(name, bytes, self.config.parse_config())
     }
 
     /// Scans raw source bytes into syntax tokens and diagnostics.
     #[must_use]
     pub fn scan_source_bytes(&self, name: impl Into<String>, bytes: &[u8]) -> ScanResult {
-        cue_rust_syntax::scan_bytes(name, bytes, self.parse_config)
+        cue_rust_syntax::scan_bytes(name, bytes, self.config.parse_config())
     }
 
     /// Loads local package arguments into build instances.
@@ -184,6 +285,114 @@ impl Context {
     }
 }
 
+/// Convenience methods for SDK values.
+pub trait ValueExt {
+    /// Encodes this value as concrete pretty JSON.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CueError`] when evaluation, validation, or JSON encoding fails.
+    fn to_json(&self) -> Result<String, CueError>;
+
+    /// Encodes this value as pretty JSON with explicit encode options.
+    ///
+    /// The output encoding is forced to [`Encoding::Json`]; the other encode
+    /// options are honored.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CueError`] when evaluation, validation, or JSON encoding fails.
+    fn to_json_with(&self, options: EncodeOptions) -> Result<String, CueError>;
+
+    /// Encodes this value as a [`serde_json::Value`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CueError`] when evaluation, validation, JSON encoding, or JSON
+    /// parsing fails.
+    fn to_serde_json_value(&self) -> Result<JsonValue, CueError>;
+
+    /// Encodes this value as a [`serde_json::Value`] with explicit options.
+    ///
+    /// The output encoding is forced to [`Encoding::Json`]; the other encode
+    /// options are honored.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CueError`] when evaluation, validation, JSON encoding, or JSON
+    /// parsing fails.
+    fn to_serde_json_value_with(&self, options: EncodeOptions) -> Result<JsonValue, CueError>;
+}
+
+impl ValueExt for Value {
+    fn to_json(&self) -> Result<String, CueError> {
+        value_to_json(self)
+    }
+
+    fn to_json_with(&self, options: EncodeOptions) -> Result<String, CueError> {
+        value_to_json_with(self, options)
+    }
+
+    fn to_serde_json_value(&self) -> Result<JsonValue, CueError> {
+        value_to_serde_json_value(self)
+    }
+
+    fn to_serde_json_value_with(&self, options: EncodeOptions) -> Result<JsonValue, CueError> {
+        value_to_serde_json_value_with(self, options)
+    }
+}
+
+/// Encodes a value as concrete pretty JSON.
+///
+/// # Errors
+///
+/// Returns [`CueError`] when evaluation, validation, or JSON encoding fails.
+pub fn value_to_json(value: &Value) -> Result<String, CueError> {
+    value_to_json_with(value, EncodeOptions::default())
+}
+
+/// Encodes a value as pretty JSON with explicit encode options.
+///
+/// The output encoding is forced to [`Encoding::Json`]; the other encode
+/// options are honored.
+///
+/// # Errors
+///
+/// Returns [`CueError`] when evaluation, validation, or JSON encoding fails.
+pub fn value_to_json_with(value: &Value, mut options: EncodeOptions) -> Result<String, CueError> {
+    options.encoding = Encoding::Json;
+    encode_value(value, options).map_err(CueError::from)
+}
+
+/// Encodes a value as a [`serde_json::Value`].
+///
+/// # Errors
+///
+/// Returns [`CueError`] when evaluation, validation, JSON encoding, or JSON
+/// parsing fails.
+pub fn value_to_serde_json_value(value: &Value) -> Result<JsonValue, CueError> {
+    value_to_serde_json_value_with(value, EncodeOptions::default())
+}
+
+/// Encodes a value as a [`serde_json::Value`] with explicit options.
+///
+/// The output encoding is forced to [`Encoding::Json`]; the other encode
+/// options are honored.
+///
+/// # Errors
+///
+/// Returns [`CueError`] when evaluation, validation, JSON encoding, or JSON
+/// parsing fails.
+pub fn value_to_serde_json_value_with(
+    value: &Value,
+    options: EncodeOptions,
+) -> Result<JsonValue, CueError> {
+    let json = value_to_json_with(value, options)?;
+    serde_json::from_str(&json)
+        .map_err(EncodeError::from)
+        .map_err(CueError::from)
+}
+
 fn single_diagnostic(code: &'static str, message: &'static str) -> DiagnosticReport {
     let mut report = DiagnosticReport::new();
     report.push(cue_rust_source::Diagnostic::new(
@@ -198,8 +407,9 @@ fn single_diagnostic(code: &'static str, message: &'static str) -> DiagnosticRep
 #[cfg(test)]
 mod tests {
     use super::{
-        Context, CueError, DecodeOptions, EncodeOptions, Encoding, EvalError, EvaluatedValue, Path,
-        ValidateOptions, Value, ValueKind, decode_bytes, encode_value,
+        Context, ContextConfig, CueError, DecodeOptions, EncodeOptions, Encoding, EvalError,
+        EvaluatedValue, JsonValue, Path, ValidateOptions, Value, ValueExt, ValueKind, decode_bytes,
+        encode_value,
     };
 
     fn assert_evaluated_path(
@@ -263,6 +473,49 @@ mod tests {
         let context = Context::new();
         let value = context.compile_source("test.cue", "x: 1\n")?;
         assert_eq!(ValueKind::Number, value.lookup_path(&["x"])?.kind()?);
+        Ok(())
+    }
+
+    #[test]
+    fn test_should_apply_context_config() -> Result<(), Box<dyn std::error::Error>> {
+        let limits = crate::SourceLimits::new(8)?;
+        let context = Context::with_config(
+            ContextConfig::builder()
+                .source_limits(limits)
+                .include_comments(true)
+                .build(),
+        );
+        assert_eq!(limits, context.config().source_limits());
+        let tokens = context.scan_source_bytes("comment.cue", b"// hi\n");
+        assert!(
+            tokens
+                .tokens()
+                .iter()
+                .any(|token| token.kind() == crate::TokenKind::Comment)
+        );
+        let oversized = context.parse_source_bytes("large.cue", b"x: 123456789\n");
+        assert!(oversized.diagnostics().has_errors());
+        Ok(())
+    }
+
+    #[test]
+    fn test_should_encode_value_with_facade_json_helpers() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let context = Context::new();
+        let value =
+            context.compile_source("json.cue", "app: {name: \"api\", port: *8080 | int}")?;
+        let app = value.lookup_path(&["app"])?;
+        let json = app.to_json()?;
+        assert!(json.contains("\"name\": \"api\""));
+        let json_value = app.to_serde_json_value()?;
+        assert_eq!(
+            Some("api"),
+            json_value.get("name").and_then(JsonValue::as_str)
+        );
+        assert_eq!(
+            Some(8080),
+            json_value.get("port").and_then(JsonValue::as_i64)
+        );
         Ok(())
     }
 

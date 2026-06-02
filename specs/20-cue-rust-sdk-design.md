@@ -31,7 +31,7 @@ pub struct Context { /* private */ }
 
 impl Context {
     pub fn new() -> Self;
-    pub fn with_config(config: ContextConfig) -> Result<Self, ContextError>;
+    pub fn with_config(config: ContextConfig) -> Self;
     pub fn parse_source(&self, source: Source) -> ParseResult;
     pub fn compile_source(&self, source: Source) -> Result<Value, CueError>;
     pub fn load(&self, config: LoadConfig) -> Result<Vec<BuildInstance>, CueError>;
@@ -39,7 +39,10 @@ impl Context {
 }
 ```
 
-`ContextConfig` uses `typed-builder` because it will exceed five fields as limits, features, registries, builtins, and tracing options are added.
+`ContextConfig::builder()` configures parser mode, source limits, and comment
+retention for current local embedding workflows. Future feature knobs for
+registries, builtins, tracing, or compatibility profiles can extend this type
+without changing `Context::new()`.
 
 ## Source API
 
@@ -93,6 +96,25 @@ hidden fields, and zero-based list indexes. `Path::parse` and `FromStr` support 
 conservative string subset such as `a.b[0]`, `#Schema`, and `_scratch`.
 `lookup_path(&[&str])` remains as a legacy string-field convenience wrapper.
 
+Facade convenience API:
+
+```rust
+pub trait ValueExt {
+    pub fn to_json(&self) -> Result<String, CueError>;
+    pub fn to_json_with(&self, options: EncodeOptions) -> Result<String, CueError>;
+    pub fn to_serde_json_value(&self) -> Result<serde_json::Value, CueError>;
+    pub fn to_serde_json_value_with(&self, options: EncodeOptions) -> Result<serde_json::Value, CueError>;
+}
+```
+
+The crate also exposes free-function equivalents for callers that prefer not to
+import extension traits.
+
+Stable top-level re-exports are limited to app embedding types: context,
+diagnostics, loading, value operations, structured paths, validation, and
+encoding. Parser AST, source-file internals, and compiler result types are
+available under `cue_rust::experimental` until their stability contract is clear.
+
 Current embedder compatibility gaps:
 
 - No `FillPath` or builder-style mutation API is exposed. Callers compose base
@@ -135,8 +157,15 @@ Every public options type is `Debug`, `Clone` when cheap enough, and `#[non_exha
 
 - Top-level SDK facade evolves conservatively.
 - Internal crates use `pub(crate)` aggressively.
-- Experimental APIs are behind crate features with `experimental_` prefix.
+- Experimental lower-level APIs are grouped under `cue_rust::experimental`.
 - No public type exposes arena ids until their lifetime and stability contract is clear.
+- Workspace internal crate dependencies include both `path` and exact `version`
+  metadata so local development and crates.io packaging use the same dependency
+  graph shape.
+- Publishing is ordered from dependency leaves to the facade:
+  `cue-rust-source`, `cue-rust-adt`, `cue-rust-syntax`, `cue-rust-eval`,
+  `cue-rust-loader`, `cue-rust-compiler`, `cue-rust-encoding`, then
+  `cue-rust`.
 
 ## Examples And Docs
 

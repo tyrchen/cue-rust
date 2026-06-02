@@ -8,7 +8,7 @@ license.workspace = true
 documentation.workspace = true
 repository.workspace = true
 homepage.workspace = true
-readme.workspace = true
+readme = "../../README.md"
 
 [lib]
 name = "cue_rust"
@@ -22,12 +22,12 @@ cue-rust-eval.workspace = true
 cue-rust-loader.workspace = true
 cue-rust-source.workspace = true
 cue-rust-syntax.workspace = true
+serde_json.workspace = true
 thiserror.workspace = true
 
 [dev-dependencies]
 criterion.workspace = true
 serde.workspace = true
-serde_json.workspace = true
 tokio.workspace = true
 
 [[bench]]

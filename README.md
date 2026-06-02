@@ -37,7 +37,7 @@ cargo run -p cue-rs -- vet ./schema.cue --data ./data.json
 Use the SDK from Rust:
 
 ```rust
-use cue_rust::{Context, EvaluatedValue, Path};
+use cue_rust::{Context, EvaluatedValue, Path, ValueExt};
 
 let context = Context::new();
 let value = context.compile_source("example.cue", "x: { items: [*1 | 2, 3] }")?;
@@ -48,6 +48,8 @@ assert_eq!(
         .default_value()?
         .evaluate()?,
 );
+let json = value.to_json()?;
+assert!(json.contains("\"items\""));
 # Ok::<(), Box<dyn std::error::Error>>(())
 ```
 
@@ -62,6 +64,13 @@ Embedders can use structured path selectors and explicit default selection:
   `Value::lookup_path(&[&str])` remains available for string field segments.
 - `Value::default_value()` resolves unique default alternatives and returns the
   selected value.
+- `ValueExt::to_json()` and `ValueExt::to_serde_json_value()` provide facade
+  helpers for common Rust embedding workflows.
+- `ContextConfig::builder()` configures source limits, parser mode, and comment
+  retention for `Context`.
+- Lower-level parser, source, and compiler internals are available under
+  `cue_rust::experimental`; they are useful for tooling but not yet stable
+  embedder API.
 
 Embedders should still design around these current gaps:
 
@@ -118,6 +127,20 @@ make clippy-pedantic
 make vendor-corpus
 make compat-report
 make ci
+```
+
+Publishing uses the internal crate dependency order. Publish or dry-run the
+workspace crates in this order before publishing the facade crate:
+
+```bash
+cargo publish -p cue-rust-source --dry-run
+cargo publish -p cue-rust-adt --dry-run
+cargo publish -p cue-rust-syntax --dry-run
+cargo publish -p cue-rust-eval --dry-run
+cargo publish -p cue-rust-loader --dry-run
+cargo publish -p cue-rust-compiler --dry-run
+cargo publish -p cue-rust-encoding --dry-run
+cargo publish -p cue-rust --dry-run
 ```
 
 Before claiming a production-facing change is ready, run the full gate used by

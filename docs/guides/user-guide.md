@@ -159,10 +159,15 @@ Parse, compile, evaluate, and encode:
 
 ```rust
 use cue_rust::{
-    Context, EncodeOptions, Encoding, EvaluatedValue, Path, encode_value,
+    Context, ContextConfig, EvaluatedValue, Path, SourceLimits, ValueExt,
 };
 
-let context = Context::new();
+let context = Context::with_config(
+    ContextConfig::builder()
+        .source_limits(SourceLimits::default())
+        .include_comments(false)
+        .build(),
+);
 let value = context.compile_source("example.cue", "x: { items: [*1 | 2, 3] }")?;
 
 assert_eq!(
@@ -173,9 +178,7 @@ assert_eq!(
         .evaluate()?,
 );
 
-let mut options = EncodeOptions::default();
-options.encoding = Encoding::Json;
-let json = encode_value(&value, options)?;
+let json = value.to_json()?;
 assert!(json.contains("\"items\""));
 # Ok::<(), Box<dyn std::error::Error>>(())
 ```
@@ -202,7 +205,7 @@ clone. Current embedders can use the implemented structured path and default
 APIs:
 
 ```rust
-use cue_rust::{Context, EvaluatedValue, Path};
+use cue_rust::{Context, EvaluatedValue, Path, ValueExt};
 
 let context = Context::new();
 let value = context.compile_source(
@@ -215,8 +218,19 @@ assert_eq!(
     EvaluatedValue::String("default".to_owned()),
     value.lookup(&path)?.default_value()?.evaluate()?,
 );
+
+let json_value = value
+    .lookup(&Path::parse("#Schema._choices")?)?
+    .to_serde_json_value()?;
+assert!(json_value.is_array());
 # Ok::<(), Box<dyn std::error::Error>>(())
 ```
+
+The stable facade is centered on `Context`, `ContextConfig`, `Value`, `Path`,
+`Selector`, validation options, encoding options, and diagnostic/error types.
+Lower-level parser, source, and compiler internals live under
+`cue_rust::experimental`; use that module for tooling experiments, not for a
+stable app embedding contract.
 
 Current embedders should still account for these limits:
 

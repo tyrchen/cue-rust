@@ -153,10 +153,15 @@ printf 'x: 1\n' | cue-rs eval -
 
 ```rust
 use cue_rust::{
-    Context, EncodeOptions, Encoding, EvaluatedValue, Path, encode_value,
+    Context, ContextConfig, EvaluatedValue, Path, SourceLimits, ValueExt,
 };
 
-let context = Context::new();
+let context = Context::with_config(
+    ContextConfig::builder()
+        .source_limits(SourceLimits::default())
+        .include_comments(false)
+        .build(),
+);
 let value = context.compile_source("example.cue", "x: { items: [*1 | 2, 3] }")?;
 
 assert_eq!(
@@ -167,9 +172,7 @@ assert_eq!(
         .evaluate()?,
 );
 
-let mut options = EncodeOptions::default();
-options.encoding = Encoding::Json;
-let json = encode_value(&value, options)?;
+let json = value.to_json()?;
 assert!(json.contains("\"items\""));
 # Ok::<(), Box<dyn std::error::Error>>(())
 ```
@@ -195,7 +198,7 @@ let value = context.build_instance(&instances[0])?;
 结构化 path 和默认值 API：
 
 ```rust
-use cue_rust::{Context, EvaluatedValue, Path};
+use cue_rust::{Context, EvaluatedValue, Path, ValueExt};
 
 let context = Context::new();
 let value = context.compile_source(
@@ -208,8 +211,17 @@ assert_eq!(
     EvaluatedValue::String("default".to_owned()),
     value.lookup(&path)?.default_value()?.evaluate()?,
 );
+
+let json_value = value
+    .lookup(&Path::parse("#Schema._choices")?)?
+    .to_serde_json_value()?;
+assert!(json_value.is_array());
 # Ok::<(), Box<dyn std::error::Error>>(())
 ```
+
+稳定 facade 以 `Context`、`ContextConfig`、`Value`、`Path`、`Selector`、校验选项、编码选项和
+诊断/错误类型为中心。更底层的 parser、source、compiler 内部类型放在
+`cue_rust::experimental` 下；它们适合工具链实验，不适合作为稳定 app 内嵌契约。
 
 当前内嵌方仍然需要注意：
 

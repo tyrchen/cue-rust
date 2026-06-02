@@ -36,14 +36,14 @@ tracing-subscriber = { version = "0.3.23", features = ["env-filter", "fmt"] }
 typed-builder = "0.23.2"
 
 # workspace crates
-cue-rust-adt = { path = "crates/adt" }
-cue-rust-compiler = { path = "crates/compiler" }
-cue-rust-encoding = { path = "crates/encoding" }
-cue-rust-eval = { path = "crates/eval" }
-cue-rust-loader = { path = "crates/loader" }
-cue-rust-source = { path = "crates/source" }
-cue-rust-syntax = { path = "crates/syntax" }
-cue-rust = { path = "crates/sdk" }
+cue-rust-adt = { version = "0.1.0", path = "crates/adt" }
+cue-rust-compiler = { version = "0.1.0", path = "crates/compiler" }
+cue-rust-encoding = { version = "0.1.0", path = "crates/encoding" }
+cue-rust-eval = { version = "0.1.0", path = "crates/eval" }
+cue-rust-loader = { version = "0.1.0", path = "crates/loader" }
+cue-rust-source = { version = "0.1.0", path = "crates/source" }
+cue-rust-syntax = { version = "0.1.0", path = "crates/syntax" }
+cue-rust = { version = "0.1.0", path = "crates/sdk" }
 
 [workspace.lints.rust]
 missing_debug_implementations = "warn"
