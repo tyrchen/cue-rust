@@ -409,9 +409,9 @@ mod tests {
     use serde_json::json;
 
     use super::{
-        Context, ContextConfig, CueError, DecodeOptions, EncodeOptions, Encoding, EvalError,
-        EvaluatedValue, JsonValue, Path, ValidateOptions, Value, ValueExt, ValueKind, decode_bytes,
-        encode_value,
+        BuildInstance, Context, ContextConfig, CueError, DecodeOptions, EncodeOptions, Encoding,
+        EvalError, EvaluatedValue, JsonValue, Path, ValidateOptions, Value, ValueExt, ValueKind,
+        decode_bytes, encode_value,
     };
 
     fn assert_evaluated_path(
@@ -610,6 +610,40 @@ mod tests {
             "#Actor: {id: string, type: *\"user\" | \"bot\" | \"service\"}\nout: #Actor\n",
             r#"{"id":"x","type":"service"}"#,
         )?;
+        Ok(())
+    }
+
+    #[test]
+    fn test_should_preserve_defaulted_disjunction_on_direct_field_selection()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let context = Context::new();
+        let source = "#A: {text: *\"x\" | string, required: *false | bool}\nout: #A\n";
+        let parsed = context.parse_source("test.cue", source);
+        let instance = BuildInstance::new(None, vec![parsed.ast().ok_or("missing ast")?.clone()]);
+        let value = context.build_instance(&instance)?;
+
+        assert_eq!(
+            json!("x"),
+            value.lookup_path(&["out", "text"])?.to_serde_json_value()?
+        );
+        assert_eq!(
+            json!(false),
+            value
+                .lookup_path(&["out", "required"])?
+                .to_serde_json_value()?
+        );
+        assert_eq!(
+            json!("x"),
+            context
+                .compile_instance_expression(&instance, "out.text")?
+                .to_serde_json_value()?
+        );
+        assert_eq!(
+            json!(false),
+            context
+                .compile_instance_expression(&instance, "out.required")?
+                .to_serde_json_value()?
+        );
         Ok(())
     }
 
