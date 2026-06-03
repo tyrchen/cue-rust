@@ -41,7 +41,7 @@ vendor-corpus:
 bench-smoke:
 	@cargo bench -p cue-rust --bench phase9 -- --sample-size 10 --warm-up-time 0.1 --measurement-time 0.1 --save-baseline smoke
 
-check: build test fmt-check clippy doc audit deny
+check: build test fmt-check clippy-pedantic doc audit deny
 
 ci: check check-agent-sync fuzz-smoke
 

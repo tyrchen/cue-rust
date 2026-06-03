@@ -1,6 +1,6 @@
 # Issue 0001 — Unifying a defaulted disjunction with a non-default member yields a spurious conflict
 
-Status: open · Severity: **high (blocking embedders)** · Found: 2026-06-02
+Status: fixed in `cc57fa3` + `24b733d` · Severity: **high (blocking embedders)** · Found: 2026-06-02
 Reported against: `d0181ce` (also reproduces on `ee8220e`, `da88884`)
 Component: `crates/eval` (`unify_values` / `disjuncts_from` / `Default` handling)
 

@@ -17,6 +17,7 @@ use cue_rust::{
     CueError, DecodeOptions, EncodeError, EncodeOptions, Encoding, EvalError, ExportOptions, Value,
     decode_bytes, encode_value,
 };
+use tokio::io::AsyncReadExt;
 
 /// cue-rust command-line arguments.
 #[derive(Debug, Parser)]
@@ -647,17 +648,35 @@ async fn read_file_or_stdin(file: &Path, limits: cue_rust::SourceLimits) -> Resu
     if file == Path::new("-") {
         return read_stdin_bytes(limits).await;
     }
-    let bytes = tokio::fs::read(file)
+    let limit = limits.max_file_bytes();
+    let metadata = tokio::fs::metadata(file)
         .await
-        .with_context(|| format!("failed to read input file {}", file.display()))?;
-    if bytes.len() > limits.max_file_bytes() {
+        .with_context(|| format!("failed to inspect input file {}", file.display()))?;
+    let limit_u64 = u64::try_from(limit).unwrap_or(u64::MAX);
+    if metadata.is_file() && metadata.len() > limit_u64 {
         return Err(anyhow!(
             "input file {} exceeds maximum size of {} bytes",
             file.display(),
-            limits.max_file_bytes()
+            limit,
         ));
     }
-    Ok(bytes)
+    let read_limit = limit_u64.saturating_add(1);
+    let mut input = Vec::new();
+    tokio::fs::File::open(file)
+        .await
+        .with_context(|| format!("failed to open input file {}", file.display()))?
+        .take(read_limit)
+        .read_to_end(&mut input)
+        .await
+        .with_context(|| format!("failed to read input file {}", file.display()))?;
+    if input.len() > limit {
+        return Err(anyhow!(
+            "input file {} exceeds maximum size of {} bytes",
+            file.display(),
+            limit,
+        ));
+    }
+    Ok(input)
 }
 
 async fn scan_files(files: &[PathBuf], load_options: &CliLoadOptions) -> Result<ExitCode> {

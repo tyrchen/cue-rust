@@ -5,6 +5,7 @@
 
 use camino::Utf8PathBuf;
 use cue_rust_adt::Runtime;
+pub use cue_rust_compiler::DEFAULT_MAX_COMPILE_DEPTH;
 use cue_rust_compiler::{CompileError, CompileOptions, Compiler};
 pub use cue_rust_encoding::{
     DecodeError, DecodeOptions, EncodeError, EncodeOptions, Encoding, decode_bytes, encode_value,
@@ -17,7 +18,9 @@ pub use cue_rust_loader::{BuildInstance, LoadConfig, LoadError, Loader, PackageS
 pub use cue_rust_source::{
     ByteOffset, Diagnostic, DiagnosticReport, Severity, SourceError, SourceLimits, Span,
 };
-pub use cue_rust_syntax::{ParseConfig, ParseMode, ParseResult, ScanResult, Token, TokenKind};
+pub use cue_rust_syntax::{
+    DEFAULT_MAX_PARSE_DEPTH, ParseConfig, ParseMode, ParseResult, ScanResult, Token, TokenKind,
+};
 use serde_json::Value as JsonValue;
 use thiserror::Error;
 
@@ -62,11 +65,25 @@ pub enum CueError {
 }
 
 /// Configuration for a [`Context`].
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ContextConfig {
     parse_mode: ParseMode,
     source_limits: SourceLimits,
     include_comments: bool,
+    max_parse_depth: u32,
+    max_compile_depth: u32,
+}
+
+impl Default for ContextConfig {
+    fn default() -> Self {
+        Self {
+            parse_mode: ParseMode::default(),
+            source_limits: SourceLimits::default(),
+            include_comments: false,
+            max_parse_depth: DEFAULT_MAX_PARSE_DEPTH,
+            max_compile_depth: DEFAULT_MAX_COMPILE_DEPTH,
+        }
+    }
 }
 
 impl ContextConfig {
@@ -94,8 +111,22 @@ impl ContextConfig {
         self.include_comments
     }
 
+    /// Returns the maximum recursive parse depth.
+    #[must_use]
+    pub fn max_parse_depth(self) -> u32 {
+        self.max_parse_depth
+    }
+
+    /// Returns the maximum recursive compiler lowering depth.
+    #[must_use]
+    pub fn max_compile_depth(self) -> u32 {
+        self.max_compile_depth
+    }
+
     fn parse_config(self) -> ParseConfig {
-        ParseConfig::new(self.parse_mode, self.source_limits).with_comments(self.include_comments)
+        ParseConfig::new(self.parse_mode, self.source_limits)
+            .with_comments(self.include_comments)
+            .with_max_depth(self.max_parse_depth)
     }
 }
 
@@ -124,6 +155,20 @@ impl ContextConfigBuilder {
     #[must_use]
     pub fn include_comments(mut self, include_comments: bool) -> Self {
         self.config.include_comments = include_comments;
+        self
+    }
+
+    /// Sets the maximum recursive parse depth.
+    #[must_use]
+    pub fn max_parse_depth(mut self, max_parse_depth: u32) -> Self {
+        self.config.max_parse_depth = max_parse_depth;
+        self
+    }
+
+    /// Sets the maximum recursive compiler lowering depth.
+    #[must_use]
+    pub fn max_compile_depth(mut self, max_compile_depth: u32) -> Self {
+        self.config.max_compile_depth = max_compile_depth;
         self
     }
 
@@ -161,6 +206,7 @@ impl Context {
                 .parse_mode(parse_config.mode())
                 .source_limits(parse_config.limits())
                 .include_comments(parse_config.include_comments())
+                .max_parse_depth(parse_config.max_depth())
                 .build(),
         }
     }
@@ -243,8 +289,10 @@ impl Context {
     /// Returns [`CueError`] when compilation emits errors or ADT construction fails.
     pub fn build_instance(&self, instance: &BuildInstance) -> Result<Value, CueError> {
         let mut runtime = Runtime::default();
-        let compiled =
-            Compiler::new(&mut runtime).compile_instance(instance, CompileOptions::default())?;
+        let compiled = Compiler::new(&mut runtime).compile_instance(
+            instance,
+            CompileOptions::default().with_max_depth(self.config.max_compile_depth),
+        )?;
         let diagnostics = compiled.diagnostics().clone();
         if diagnostics.has_errors() {
             return Err(CueError::Diagnostics(diagnostics));
@@ -524,6 +572,24 @@ mod tests {
         let oversized = context.parse_source_bytes("large.cue", b"x: 123456789\n");
         assert!(oversized.diagnostics().has_errors());
         Ok(())
+    }
+
+    #[test]
+    fn test_should_apply_context_parse_depth_config() {
+        let context = Context::with_config(ContextConfig::builder().max_parse_depth(3).build());
+        let error = context
+            .compile_source("deep.cue", "x: [[[[1]]]]\n")
+            .expect_err("deep source should fail at configured parse depth");
+        let CueError::Diagnostics(diagnostics) = error else {
+            panic!("expected diagnostics for parse depth limit");
+        };
+        assert!(diagnostics.has_errors());
+        assert!(
+            diagnostics
+                .diagnostics()
+                .iter()
+                .any(|diagnostic| diagnostic.code() == "cue.parse.max_depth_exceeded")
+        );
     }
 
     #[test]
@@ -1673,15 +1739,66 @@ mod tests {
     #[test]
     fn test_should_unescape_string_and_bytes_literals() -> Result<(), Box<dyn std::error::Error>> {
         let context = Context::new();
-        let value = context.compile_source("test.cue", "s: \"foo\\nbar\"\nb: 'a\\n\\xff'\n")?;
+        let value = context.compile_source(
+            "test.cue",
+            "s: \"foo\\nbar\"\nu: \"\\u0041\"\nbf: \"a\\b\\f\"\nb: 'a\\n\\xff\\x41'\n",
+        )?;
         assert_eq!(
             EvaluatedValue::String("foo\nbar".to_owned()),
             value.lookup_path(&["s"])?.evaluate()?,
         );
         assert_eq!(
-            EvaluatedValue::Bytes(vec![b'a', b'\n', 0xff]),
+            EvaluatedValue::String("A".to_owned()),
+            value.lookup_path(&["u"])?.evaluate()?,
+        );
+        assert_eq!(
+            EvaluatedValue::String("a\u{0008}\u{000c}".to_owned()),
+            value.lookup_path(&["bf"])?.evaluate()?,
+        );
+        assert_eq!(
+            EvaluatedValue::Bytes(vec![b'a', b'\n', 0xff, b'A']),
             value.lookup_path(&["b"])?.evaluate()?,
         );
+        Ok(())
+    }
+
+    #[test]
+    fn test_should_reject_invalid_literal_escape() {
+        let context = Context::new();
+        let error = context
+            .compile_source("test.cue", "bad: \"\\q\"\n")
+            .expect_err("invalid escape should fail compilation");
+        let CueError::Diagnostics(diagnostics) = error else {
+            panic!("expected diagnostics for invalid escape");
+        };
+        assert!(diagnostics.has_errors());
+        assert!(
+            diagnostics
+                .diagnostics()
+                .iter()
+                .any(|diagnostic| diagnostic.code() == "cue.compile.invalid_escape")
+        );
+    }
+
+    #[test]
+    fn test_should_limit_disjunction_cartesian_expansion() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let left = (0_u32..65)
+            .map(|value| value.to_string())
+            .collect::<Vec<_>>()
+            .join(" | ");
+        let right = (100_u32..165)
+            .map(|value| value.to_string())
+            .collect::<Vec<_>>()
+            .join(" | ");
+        let source = format!("x: ({left}) * ({right})\n");
+        let value = Context::new().compile_source("test.cue", &source)?;
+        let result = value.lookup_path(&["x"])?.evaluate()?;
+        assert!(matches!(
+            result,
+            EvaluatedValue::Bottom(bottom)
+                if bottom.code == "cue.eval.disjunction_expansion_limit"
+        ));
         Ok(())
     }
 

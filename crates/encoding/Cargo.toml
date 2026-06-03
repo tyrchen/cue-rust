@@ -11,6 +11,7 @@ homepage.workspace = true
 readme = "../../README.md"
 
 [dependencies]
+bigdecimal.workspace = true
 cue-rust-eval.workspace = true
 cue-rust-source.workspace = true
 indexmap.workspace = true

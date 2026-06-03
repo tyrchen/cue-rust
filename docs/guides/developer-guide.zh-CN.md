@@ -1,29 +1,46 @@
 # 开发指南
 
-这份文档写给要改 `cue-rust` 本身的人。
+这份文档写给要改 `cue-rust` 的开发者。
 
-## 仓库结构
+## 目录结构
 
 ```text
-apps/cue/        命令行工具，二进制名是 cue-rs
-crates/adt/      ADT 运行时数据结构
+apps/cue/        命令行 package，安装后的命令叫 cue
+crates/adt/      语义图和运行时数据结构
 crates/compiler/ AST 到 ADT 的 lowering
-crates/encoding/ JSON、YAML、TOML 和 CUE-like 输出
-crates/eval/     evaluator、校验、内建函数、导出 profile
-crates/loader/   本地包加载、模块内导入、stdin、tag
+crates/encoding/ JSON、YAML、TOML、CUE-like 编解码
+crates/eval/     求值、校验、内建函数、默认值、导出规则
+crates/loader/   本地包加载、stdin、overlay、tag、data file
 crates/sdk/      对外的 cue-rust facade
-crates/source/   源文件、大小限制、诊断
+crates/source/   源文件、大小限制、span、诊断
 crates/syntax/   scanner、parser、AST
+docs/guides/     用户和开发文档
+docs/issues/     详细问题报告和修复记录
 docs/research/   调研记录
 specs/           产品、设计、路线图和实现计划
-vendors/         vendored upstream CUE，用来做 parity 对照
+vendors/         vendored upstream CUE，用来做兼容性对照
 ```
 
-对外 crate 是 `cue-rust`，命令行 package 是 `cue-rs`。
+对外 SDK crate 是 `cue-rust`。命令行 package 是 `cue-rs`，二进制命令是 `cue`。
 
-## 日常开发命令
+## 架构分层
 
-优先用 Makefile 里的目标：
+这个项目按层组织。改代码时，尽量让逻辑留在它该在的层。
+
+1. `source` 负责源文件名、字节上限、UTF-8、span、行号索引和诊断。
+2. `syntax` 把 CUE 扫描、解析成容错 AST。
+3. `loader` 把本地输入整理成 build instance，处理 overlay、tag、外部数据文件和模块内导入。
+4. `compiler` 把 AST 降到 ADT runtime。
+5. `eval` 做求值、unify、约束检查、默认值、内建函数、validate/export。
+6. `encoding` 在 evaluated value 和 JSON/YAML/TOML/CUE-like 数据之间转换。
+7. `sdk` 提供业务代码使用的稳定入口。
+8. `apps/cue` 负责命令行参数、IO、错误上下文和退出码。
+
+不要跨层抄近路。比如 evaluator 不应该读文件，encoder 不应该重新解释源码。
+
+## 日常开发
+
+优先用 Makefile：
 
 ```bash
 make build
@@ -33,7 +50,15 @@ make vendor-corpus
 make compat-report
 ```
 
-准备提交生产相关改动前，跑完整 gate：
+生产相关改动收尾前，至少跑：
+
+```bash
+make check
+make check-agent-sync
+make fuzz-smoke
+```
+
+`make check` 包含：
 
 ```bash
 cargo build --workspace --all-targets
@@ -45,72 +70,101 @@ cargo audit
 cargo deny check
 ```
 
-不要跑 `cargo clean`。项目约定里明确禁止，除非用户单独批准。
+不要跑 `cargo clean`，除非用户明确同意。
 
-## 代码规则
+## 代码要求
 
-`AGENTS.md` 是本仓库的硬性规则，不是建议。最容易踩坑的几条：
+仓库规则写在 `AGENTS.md`。平时最该注意的是这些：
 
-- crate 使用 Rust 2024，禁止 unsafe
-- library error 用 `thiserror`，CLI 里用 `anyhow`
-- 外部输入路径上不要用 `unwrap`、`expect`、`todo`、`unimplemented`、`panic`
-- loader、parser、CLI、decode、encode 边界都要做输入校验
-- 能用类型表达的约束不要塞进松散字符串
-- public item 要写文档注释
-- 改动范围要收住，围绕当前 phase 或 gap 做完整一批
+- 使用 Rust 2024
+- 禁止 unsafe
+- public item 要有文档注释
+- library error 用 `thiserror`，CLI 串流程用 `anyhow`
+- 生产代码不要在外部输入路径上用 `unwrap`、`expect`、`todo`、`unimplemented` 或会被用户输入触发的 panic
+- source、parser、loader、decoder、encoder、CLI 边界都要校验输入
+- 文件大小、decode 深度、集合大小、内建函数生成量、正则大小、disjunction 展开、parse/compile/eval 递归都要有明确上限
+- 能用类型和 checked arithmetic 表达的约束，不要藏在随意拼出来的字符串里
+- 改动要围绕当前问题收住，不要顺手大重构
 
-新增自动化时，优先加 Makefile target，不要散落新的 shell 脚本。
-
-## 架构分层
-
-主流程按层推进：
-
-1. `source` 处理字节、文件名、大小限制和诊断。
-2. `syntax` 扫描并解析成容错 AST。
-3. `loader` 把文件组织成 build instance，处理本地输入、tag、data file、模块内导入。
-4. `compiler` 把 AST 降到 ADT runtime。
-5. `eval` 求值、应用约束、处理内建函数，并提供 validate/export 行为。
-6. `encoding` 把具体值编码出去。
-7. `sdk` 提供对外稳定入口。
-8. `apps/cue` 把 SDK 接成命令行。
-
-不要跨层抄近路。比如 evaluator 不应该读文件，encoder 不应该重新解释源码语法。
+新增自动化时，优先加 Makefile target，不要散落临时脚本。
 
 ## 做兼容性改动
 
-upstream CUE 放在 `vendors/cue`。处理 parity gap 时按这个顺序来：
+upstream CUE 放在 `vendors/cue`。
 
-1. 找到 upstream 里的 fixture 或实现代码，确认真实行为。
-2. 判断这个 gap 对当前成熟度是否真的重要。
-3. 在 `crates/sdk/tests/` 下补 Rust integration test。
-4. 做一批架构上说得通的实现，不要为了一个 fixture 写特判。
-5. 只有可执行覆盖证明 gap 已关闭，才通过 `make compat-report` 更新报告。
+处理兼容性缺口时，建议按这个顺序：
 
-好的 parity 改动通常会同时碰 parser、compiler、evaluator。只靠对齐某个输出字符串，不能算真正支持。
+1. 先找 upstream fixture、实现代码或 spec，确认真实行为。
+2. 判断这个缺口是否属于当前版本要覆盖的范围。
+3. 先补一个聚焦的 Rust 测试。公开行为通常放在 `crates/sdk/tests` 或 `apps/cue/tests`。
+4. 在正确的层实现，不要写只服务某个 fixture 的特判。
+5. 只有可执行测试证明缺口关闭后，才更新 compatibility report。
 
-## 测试分层
+不少兼容性问题会同时影响 parser、compiler 和 evaluator。只把某个输出字符串凑对，不代表语义真的对。
 
-按目的选测试：
+## 测试怎么放
 
-- crate 内 unit test：测局部行为
-- `crates/sdk` 测试：测公开 API
-- `crates/sdk/tests/vendor_corpus.rs`：承接 upstream fixture
-- `apps/cue` integration test：测命令行行为
-- compatibility report：维护 pass 和 expected-fail 的机器可读账本
-- fuzz smoke：保证 scanner 和 decoder 不容易被输入打崩
+按问题范围选测试层级：
+
+- crate 内 unit test：测局部逻辑
+- SDK 测试：测公开 API
+- CLI 测试：测命令行流程、输出和退出码
+- vendor fixture：对照 upstream 行为
+- compatibility report：记录 pass 和 expected-fail
+- fuzz smoke：保证 scanner 和 decoder 不容易被随机输入打崩
 
 测试名沿用仓库里的 `test_should_...` 风格。
 
+修 bug 时，能先写复现就先写复现。修安全或资源边界时，要直接测边界本身，不要只测下游现象。
+
 ## 改 CLI
 
-CLI 应该保持薄层，只负责参数、IO、退出码和用户能看懂的错误上下文。核心逻辑要放进 SDK
-或者更底层 crate。
+CLI 保持薄层。它负责：
 
-新增命令行可见行为时，尽量在 `apps/cue/tests` 里补 vendor-style script test。
+- 参数解析
+- stdin/stdout/stderr
+- 文件 IO 的用户上下文
+- 退出码
+- 用户能看懂的错误信息
+
+CUE 的核心行为应该放在 SDK 或更底层 crate。命令行可见行为有变化时，在 `apps/cue/tests` 里补集成测试。
 
 ## 改文档
 
-规格文档放 `specs/`，用户和开发文档放 `docs/`，调研记录放 `docs/research/`。新增
-docs 时更新 `docs/index.md`；新增 specs 时更新 `specs/index.md`。
+- 用户和开发文档放 `docs/guides/`
+- 问题报告和修复记录放 `docs/issues/`
+- 调研记录放 `docs/research/`
+- 产品和实现规格放 `specs/`
 
-文档要说实话。还属于兼容性缺口的地方，就明确写缺口，不要暗示已经完全对齐 upstream。
+新增 docs 时更新 `docs/index.md`。新增 specs 时更新 `specs/index.md`。
+
+文档要诚实。还没支持的行为就明确说是缺口，不要写得像已经完整对齐 upstream。
+
+## 发版检查
+
+版本升级时：
+
+1. 更新 `Cargo.toml` 里的 `workspace.package.version` 和 workspace 内部依赖版本。
+2. 重新生成 `Cargo.lock`。
+3. 如果能力范围或成熟度有变化，同步更新 README 和用户文档。
+4. 跑完整检查：
+
+```bash
+make check
+make check-agent-sync
+make fuzz-smoke
+```
+
+发布前按依赖顺序 dry-run：
+
+```bash
+cargo publish -p cue-rust-source --dry-run
+cargo publish -p cue-rust-adt --dry-run
+cargo publish -p cue-rust-syntax --dry-run
+cargo publish -p cue-rust-eval --dry-run
+cargo publish -p cue-rust-loader --dry-run
+cargo publish -p cue-rust-compiler --dry-run
+cargo publish -p cue-rust-encoding --dry-run
+cargo publish -p cue-rust --dry-run
+cargo publish -p cue-rs --dry-run
+```

@@ -1,99 +1,119 @@
 # User Guide
 
-This guide covers the supported user-facing surface of `cue-rust`: the `cue-rs`
-CLI and the public Rust SDK.
+This guide covers the user-facing surface of `cue-rust` `0.2.0`: the `cue` CLI
+and the public Rust SDK.
 
-## Install
+## Install And Run
 
-From the repository root:
+Install the CLI from the repository:
 
 ```bash
 cargo install --path apps/cue --force
-cue-rs version
+cue version
 ```
 
-During development you can run the binary without installing it:
+Run it without installing:
 
 ```bash
 cargo run -p cue-rs -- version
 ```
 
+The Cargo package is named `cue-rs`; the installed binary is named `cue`.
+
 ## Evaluate CUE
 
-Create a file:
+Create `config.cue`:
 
 ```cue
-// config.cue
 package config
 
 app: {
     name: "api"
     port: *8080 | int
+    replicas: 2
 }
 ```
 
-Evaluate it:
+Evaluate the file:
 
 ```bash
-cue-rs eval config.cue
+cue eval config.cue
 ```
 
-Select one field or expression:
+Select a field:
 
 ```bash
-cue-rs eval -e app.name config.cue
-cue-rs eval -e 'app.port + 1' config.cue
+cue eval -e app.name config.cue
 ```
 
-Show definition, hidden, or optional fields when you need schema-oriented output:
+Evaluate an expression in the file context:
 
 ```bash
-cue-rs eval --show-definitions --show-hidden --show-optional config.cue
+cue eval -e 'app.port + 1' config.cue
 ```
 
-## Export Data
-
-Export concrete values as JSON, YAML, TOML, or CUE-like syntax:
+Schema-oriented output can include definitions, hidden fields, and optional
+constraints:
 
 ```bash
-cue-rs export --out json config.cue
-cue-rs export --out yaml config.cue
-cue-rs export --out toml config.cue
-cue-rs export --out cue config.cue
+cue eval --show-definitions --show-hidden --show-optional config.cue
 ```
 
-`export` requires concrete values. Incomplete values such as `int`, `string`,
-open lists, or unresolved disjunctions are reported as errors instead of being
-silently dropped.
+## Export Concrete Data
+
+Export supports JSON, YAML, TOML, and CUE-like text:
+
+```bash
+cue export --out json config.cue
+cue export --out yaml config.cue
+cue export --out toml config.cue
+cue export --out cue config.cue
+```
+
+`export` requires concrete values. If a value is still `int`, `string`, an open
+list, an unresolved disjunction, or another incomplete constraint, the command
+returns an error instead of dropping the field.
+
+Select a value before export:
+
+```bash
+cue export --out json -e app config.cue
+```
 
 ## Validate Data
 
-Validate a CUE value by itself:
+Validate CUE by itself:
 
 ```bash
-cue-rs vet schema.cue
+cue vet schema.cue
 ```
 
-Validate external data against a CUE schema:
+Validate external data against CUE:
 
 ```bash
-cue-rs vet schema.cue --data data.json
-cue-rs vet schema.cue --data data.yaml --data-format yaml
-cue-rs vet schema.cue --data data.toml --data-format toml
+cue vet schema.cue --data data.json
+cue vet schema.cue --data data.yaml --data-format yaml
+cue vet schema.cue --data data.toml --data-format toml
 ```
 
-Data files can also be passed positionally with an encoding prefix:
+External data may also be positional:
 
 ```bash
-cue-rs vet schema.cue json:data.json
+cue vet schema.cue json:data.json
 ```
 
-## Load Packages And Imports
+For stdin:
 
-`cue-rs` supports local package loading and module-local imports under
+```bash
+printf '{"name":"api","port":8080}\n' | cue vet schema.cue --data - --data-format json
+```
+
+## Packages And Local Imports
+
+`cue-rust` supports local package loading and module-local imports under
 `cue.mod/pkg`.
 
-Example layout:
+Example:
 
 ```text
 .
@@ -123,67 +143,73 @@ package lib
 value: 2
 ```
 
-Evaluate from the module root:
+Run from the module root:
 
 ```bash
-cue-rs eval main.cue
+cue eval main.cue
 ```
 
-Use `--module-root` when running from another directory:
+Run from elsewhere:
 
 ```bash
-cue-rs --module-root /path/to/project eval /path/to/project/main.cue
+cue --module-root /path/to/project eval /path/to/project/main.cue
 ```
 
-## Tags And Stdin
+Local import paths are intentionally constrained to `cue.mod/pkg`. Parent
+directory traversal and symlink inputs are rejected.
+
+## Tags, Stdin, And Limits
 
 Inject tag values:
 
 ```bash
-cue-rs -t env=prod eval config.cue
-cue-rs -t debug=false eval config.cue
+cue -t env=prod eval config.cue
+cue -t debug=false eval config.cue
 ```
 
-Read CUE source from stdin with `-`:
+Read CUE from stdin:
 
 ```bash
-printf 'x: 1\n' | cue-rs eval -
+printf 'x: 1\n' | cue eval -
 ```
+
+Set a source byte limit:
+
+```bash
+cue --source-limit 1048576 eval config.cue
+```
+
+The CLI and loader use bounded reads. Oversized source and data inputs are
+reported as errors.
 
 ## SDK Basics
 
-Add the workspace crate from this repository, or depend on `cue-rust` once it is
-published for your target use case.
+The public facade is the `cue-rust` crate.
 
-Parse, compile, evaluate, and encode:
+Compile, select, resolve a default, and export JSON:
 
 ```rust
-use cue_rust::{
-    Context, ContextConfig, EvaluatedValue, Path, SourceLimits, ValueExt,
-};
+use cue_rust::{Context, EvaluatedValue, Path, ValueExt};
 
-let context = Context::with_config(
-    ContextConfig::builder()
-        .source_limits(SourceLimits::default())
-        .include_comments(false)
-        .build(),
-);
-let value = context.compile_source("example.cue", "x: { items: [*1 | 2, 3] }")?;
+let context = Context::new();
+let value = context.compile_source(
+    "config.cue",
+    "app: { name: \"api\", port: *8080 | int }",
+)?;
 
-assert_eq!(
-    EvaluatedValue::Number("1".to_owned()),
-    value
-        .lookup(&Path::new().field("x").field("items").index(0))?
-        .default_value()?
-        .evaluate()?,
-);
+let port = value
+    .lookup(&Path::new().field("app").field("port"))?
+    .default_value()?
+    .evaluate()?;
 
-let json = value.to_json()?;
-assert!(json.contains("\"items\""));
+assert_eq!(EvaluatedValue::Number("8080".to_owned()), port);
+
+let json = value.lookup_path(&["app"])?.to_json()?;
+assert!(json.contains("\"api\""));
 # Ok::<(), Box<dyn std::error::Error>>(())
 ```
 
-Load local files asynchronously:
+Load files asynchronously:
 
 ```rust
 use camino::Utf8PathBuf;
@@ -195,80 +221,61 @@ let instances = context
     .await?;
 
 let value = context.build_instance(&instances[0])?;
+# let _ = value;
 # Ok::<(), Box<dyn std::error::Error>>(())
 ```
 
-### SDK Compatibility Notes
-
-The public SDK is useful for local embedding, but it is not a full Go CUE API
-clone. Current embedders can use the implemented structured path and default
-APIs:
+Decode external data and unify it with a schema:
 
 ```rust
-use cue_rust::{Context, EvaluatedValue, Path, ValueExt};
+use cue_rust::{Context, DecodeOptions, Encoding, ValidateOptions, decode_bytes};
 
 let context = Context::new();
-let value = context.compile_source(
-    "schema.cue",
-    "#Schema: { _choices: [*\"default\" | \"other\", \"second\"] }",
+let schema = context
+    .compile_source("schema.cue", "#App: { name: string, port?: int }\nout: #App")?
+    .lookup_path(&["out"])?;
+
+let data = decode_bytes(
+    Encoding::Json,
+    br#"{"name":"api","port":8080}"#,
+    DecodeOptions::default(),
 )?;
 
-let path = Path::parse("#Schema._choices[0]")?;
-assert_eq!(
-    EvaluatedValue::String("default".to_owned()),
-    value.lookup(&path)?.default_value()?.evaluate()?,
-);
-
-let json_value = value
-    .lookup(&Path::parse("#Schema._choices")?)?
-    .to_serde_json_value()?;
-assert!(json_value.is_array());
+schema.unify(&data)?.validate(ValidateOptions::default())?;
 # Ok::<(), Box<dyn std::error::Error>>(())
 ```
 
-The stable facade is centered on `Context`, `ContextConfig`, `Value`, `Path`,
-`Selector`, validation options, encoding options, and diagnostic/error types.
-Lower-level parser, source, and compiler internals live under
-`cue_rust::experimental`; use that module for tooling experiments, not for a
-stable app embedding contract.
-
-Current embedders should still account for these limits:
-
-- No `FillPath` or builder-style mutation. To apply data or overrides, compile
-  each input into a `Value` and call `Value::unify`.
-- No typed decode into Rust structs. Export a concrete value as JSON, then hand
-  the JSON to `serde`:
+Export to `serde_json::Value`:
 
 ```rust
-use cue_rust::{Context, EncodeOptions, Encoding, encode_value};
-use serde::Deserialize;
-
-#[derive(Debug, Deserialize)]
-struct AppConfig {
-    name: String,
-    port: u16,
-}
+use cue_rust::{Context, ValueExt};
 
 let context = Context::new();
-let value = context.compile_source(
-    "config.cue",
-    r#"app: { name: "api", port: *8080 | int }"#,
-)?;
-
-let mut options = EncodeOptions::default();
-options.encoding = Encoding::Json;
-let json = encode_value(&value.lookup_path(&["app"])?, options)?;
-let config: AppConfig = serde_json::from_str(&json)?;
-# let _ = config;
+let value = context.compile_source("config.cue", "x: { ok: true }")?;
+let json = value.lookup_path(&["x"])?.to_serde_json_value()?;
+assert_eq!(json["ok"], true);
 # Ok::<(), Box<dyn std::error::Error>>(())
 ```
 
-- No `Subsume`, and no value-level reads for attributes, source positions,
-  source files, or documentation comments.
+## Embedding Notes
 
-## What To Expect
+The stable SDK surface is centered on `Context`, `ContextConfig`, `Value`,
+`Path`, `Selector`, validation options, encoding options, and diagnostic/error
+types.
 
-Use `cue-rust` for local evaluation, validation, embedding, compatibility
-experiments, and Rust-native CUE workflows. Keep using the Go `cue` command when
-you need remote registry operations, OpenAPI/JSON-Schema/Proto import-export,
-LSP features, or exact behavior for every upstream edge case.
+Lower-level parser, source, and compiler types are available through
+`cue_rust::experimental`. Use that module for tooling experiments, not as a
+long-term application contract.
+
+Current limits:
+
+- no `FillPath` or mutable value builder; compile inputs separately and use
+  `Value::unify`
+- no direct typed decode into Rust structs; export JSON and then use `serde`
+- no `Subsume`
+- no value-level API for attributes, source files, source positions, or
+  documentation comments
+
+Use `cue-rust` for local CUE evaluation, validation, Rust embedding, and parity
+experiments. Keep the Go `cue` command for registry workflows, LSP, full schema
+import/export, and exact upstream behavior across every edge case.

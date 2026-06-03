@@ -18,12 +18,35 @@ use cue_rust_syntax::{
 };
 use thiserror::Error;
 
+/// Default maximum recursive compiler lowering depth.
+pub const DEFAULT_MAX_COMPILE_DEPTH: u32 = 512;
+
 /// Compiler options shared by lowering passes.
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[non_exhaustive]
 pub struct CompileOptions {
     /// Whether experimental syntax and semantic features are allowed.
     pub allow_experimental: bool,
+    /// Maximum recursive AST lowering depth.
+    pub max_depth: u32,
+}
+
+impl Default for CompileOptions {
+    fn default() -> Self {
+        Self {
+            allow_experimental: false,
+            max_depth: DEFAULT_MAX_COMPILE_DEPTH,
+        }
+    }
+}
+
+impl CompileOptions {
+    /// Returns a copy of these options with an explicit maximum lowering depth.
+    #[must_use]
+    pub fn with_max_depth(mut self, max_depth: u32) -> Self {
+        self.max_depth = max_depth;
+        self
+    }
 }
 
 /// Infrastructure errors from compilation.
@@ -67,6 +90,8 @@ pub struct Compiler<'runtime> {
     runtime: &'runtime mut Runtime,
     diagnostics: DiagnosticReport,
     scopes: Vec<Scope>,
+    max_depth: u32,
+    lowering_depth: u32,
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -85,6 +110,8 @@ impl<'runtime> Compiler<'runtime> {
             runtime,
             diagnostics: DiagnosticReport::new(),
             scopes: Vec::new(),
+            max_depth: DEFAULT_MAX_COMPILE_DEPTH,
+            lowering_depth: 0,
         }
     }
 
@@ -96,8 +123,9 @@ impl<'runtime> Compiler<'runtime> {
     pub fn compile_instance(
         mut self,
         instance: &BuildInstance,
-        _options: CompileOptions,
+        options: CompileOptions,
     ) -> Result<CompiledInstance, CompileError> {
+        self.max_depth = options.max_depth;
         self.diagnostics
             .extend(instance.diagnostics().diagnostics().iter().cloned());
         let root = self
@@ -415,20 +443,43 @@ impl<'runtime> Compiler<'runtime> {
         Ok(child)
     }
 
+    fn lower_expr(&mut self, expression: &Expr) -> Result<ExprId, CompileError> {
+        if !self.enter_lowering_depth(expression.span()) {
+            return Ok(self
+                .runtime
+                .add_expression(SemanticExpr::Bottom(Bottom::new(
+                    "cue.compile.max_depth_exceeded",
+                    format!("compile depth exceeds limit {}", self.max_depth),
+                    Some(expression.span()),
+                    false,
+                )))?);
+        }
+        let lowered = self.lower_expr_inner(expression);
+        self.exit_lowering_depth();
+        let lowered = lowered?;
+        Ok(self.runtime.add_expression(lowered)?)
+    }
+
     #[allow(
         clippy::too_many_lines,
         reason = "AST expression lowering is a single exhaustive dispatch over the public syntax \
                   enum"
     )]
-    fn lower_expr(&mut self, expression: &Expr) -> Result<ExprId, CompileError> {
-        let lowered = match expression {
+    fn lower_expr_inner(&mut self, expression: &Expr) -> Result<SemanticExpr, CompileError> {
+        Ok(match expression {
             Expr::Identifier(name, span) => self.lower_identifier(name, *span),
             Expr::Number(value, _) => SemanticExpr::Base(BaseValue::Number(value.clone())),
-            Expr::String(value, _) => SemanticExpr::Base(BaseValue::String(unquote_string(value))),
+            Expr::String(value, span) => match decode_string_literal(value, Some(*span)) {
+                Ok(value) => SemanticExpr::Base(BaseValue::String(value)),
+                Err(diagnostic) => self.bottom_from_diagnostic(&diagnostic),
+            },
             Expr::InterpolatedString { parts, .. } => {
                 SemanticExpr::InterpolatedString(self.lower_string_parts(parts)?)
             }
-            Expr::Bytes(value, _) => SemanticExpr::Base(BaseValue::Bytes(unquote_bytes(value))),
+            Expr::Bytes(value, span) => match decode_bytes_literal(value, Some(*span)) {
+                Ok(value) => SemanticExpr::Base(BaseValue::Bytes(value)),
+                Err(diagnostic) => self.bottom_from_diagnostic(&diagnostic),
+            },
             Expr::Bool(value, _) => SemanticExpr::Base(BaseValue::Bool(*value)),
             Expr::Null(_) => SemanticExpr::Base(BaseValue::Null),
             Expr::Struct(declarations, _) => self.lower_struct_expr(declarations)?,
@@ -451,14 +502,14 @@ impl<'runtime> Compiler<'runtime> {
                     if !is_supported_builtin_import(&path) {
                         let name = qualify_import_field(&path, field);
                         let feature = self.feature_for_name(&name);
-                        return Ok(self.runtime.add_expression(SemanticExpr::FieldReference {
+                        return Ok(SemanticExpr::FieldReference {
                             feature,
                             up_count: 0,
-                        })?);
+                        });
                     }
-                    return Ok(self.runtime.add_expression(SemanticExpr::Base(
-                        BaseValue::Builtin(format!("{path}.{field}")),
-                    ))?);
+                    return Ok(SemanticExpr::Base(BaseValue::Builtin(format!(
+                        "{path}.{field}"
+                    ))));
                 }
                 let base = self.lower_expr(base)?;
                 let feature = self.feature_for_name(field);
@@ -530,8 +581,7 @@ impl<'runtime> Compiler<'runtime> {
                 None,
                 false,
             )),
-        };
-        Ok(self.runtime.add_expression(lowered)?)
+        })
     }
 
     fn lower_list_tail(&mut self, tail: &Expr) -> Result<ExprId, CompileError> {
@@ -637,7 +687,9 @@ impl<'runtime> Compiler<'runtime> {
         parts
             .iter()
             .map(|part| match part {
-                StringPart::Text(value) => Ok(StringSegment::Text(unescape_string_segment(value))),
+                StringPart::Text(value) => {
+                    Ok(StringSegment::Text(self.decode_interpolation_text(value)))
+                }
                 StringPart::Expr(expression) => {
                     self.lower_expr(expression).map(StringSegment::Expr)
                 }
@@ -668,6 +720,44 @@ impl<'runtime> Compiler<'runtime> {
         Ok(self
             .runtime
             .add_expression(SemanticExpr::InterpolatedString(segments))?)
+    }
+
+    fn bottom_from_diagnostic(&mut self, diagnostic: &Diagnostic) -> SemanticExpr {
+        self.diagnostics.push(diagnostic.clone());
+        SemanticExpr::Bottom(Bottom::new(
+            diagnostic.code(),
+            diagnostic.message().to_owned(),
+            diagnostic.primary_span(),
+            false,
+        ))
+    }
+
+    fn enter_lowering_depth(&mut self, span: Span) -> bool {
+        if self.lowering_depth >= self.max_depth {
+            self.diagnostics.push(Diagnostic::new(
+                Severity::Error,
+                "cue.compile.max_depth_exceeded",
+                format!("compile depth exceeds limit {}", self.max_depth),
+                Some(span),
+            ));
+            return false;
+        }
+        self.lowering_depth = self.lowering_depth.saturating_add(1);
+        true
+    }
+
+    fn exit_lowering_depth(&mut self) {
+        self.lowering_depth = self.lowering_depth.saturating_sub(1);
+    }
+
+    fn decode_interpolation_text(&mut self, value: &str) -> String {
+        match decode_string_content(value, None) {
+            Ok(value) => value,
+            Err(diagnostic) => {
+                self.diagnostics.push(diagnostic);
+                String::new()
+            }
+        }
     }
 
     fn lower_comprehension_decl(
@@ -804,11 +894,14 @@ fn qualify_import_field(path: &str, field: &str) -> String {
 }
 
 fn unquote_string(value: &str) -> String {
-    let unquoted = value
-        .strip_prefix('"')
-        .and_then(|value| value.strip_suffix('"'))
-        .unwrap_or(value);
-    String::from_utf8_lossy(&unescape_literal_bytes(unquoted)).into_owned()
+    match decode_string_literal(value, None) {
+        Ok(value) => value,
+        Err(_) => value
+            .strip_prefix('"')
+            .and_then(|value| value.strip_suffix('"'))
+            .unwrap_or(value)
+            .to_owned(),
+    }
 }
 
 fn interpolation_body(value: &str) -> Option<&str> {
@@ -923,10 +1016,6 @@ fn interpolation_end(body: &str, expression_start: usize) -> Option<usize> {
     None
 }
 
-fn unescape_string_segment(value: &str) -> String {
-    String::from_utf8_lossy(&unescape_literal_bytes(value)).into_owned()
-}
-
 fn import_name(path: &str) -> &str {
     path.rsplit('/').next().unwrap_or(path)
 }
@@ -984,51 +1073,149 @@ fn is_hidden_label(label: &str) -> bool {
     label.starts_with('_') && label != "_"
 }
 
-fn unquote_bytes(value: &str) -> Vec<u8> {
+fn decode_bytes_literal(value: &str, span: Option<Span>) -> Result<Vec<u8>, Diagnostic> {
     let unquoted = value
         .strip_prefix('\'')
         .and_then(|value| value.strip_suffix('\''))
         .unwrap_or(value);
-    unescape_literal_bytes(unquoted)
+    decode_literal_bytes(unquoted, span)
 }
 
-fn unescape_literal_bytes(value: &str) -> Vec<u8> {
+fn decode_string_literal(value: &str, span: Option<Span>) -> Result<String, Diagnostic> {
+    let unquoted = value
+        .strip_prefix('"')
+        .and_then(|value| value.strip_suffix('"'))
+        .unwrap_or(value);
+    decode_string_content(unquoted, span)
+}
+
+fn decode_string_content(value: &str, span: Option<Span>) -> Result<String, Diagnostic> {
+    String::from_utf8(decode_literal_bytes(value, span)?).map_err(|error| {
+        literal_diagnostic(
+            "cue.compile.invalid_escape",
+            format!(
+                "string escape produced invalid UTF-8 near byte {}",
+                error.utf8_error().valid_up_to()
+            ),
+            span,
+        )
+    })
+}
+
+fn decode_literal_bytes(value: &str, span: Option<Span>) -> Result<Vec<u8>, Diagnostic> {
     let mut output = Vec::with_capacity(value.len());
-    let mut bytes = value.bytes();
-    while let Some(byte) = bytes.next() {
+    let bytes = value.as_bytes();
+    let mut cursor = 0_usize;
+    while let Some(byte) = bytes.get(cursor).copied() {
+        cursor = cursor.saturating_add(1);
         if byte != b'\\' {
             output.push(byte);
             continue;
         }
-        let Some(escaped) = bytes.next() else {
-            output.push(b'\\');
-            break;
+        let Some(escaped) = bytes.get(cursor).copied() else {
+            return Err(literal_diagnostic(
+                "cue.compile.invalid_escape",
+                "unterminated escape sequence",
+                span,
+            ));
         };
+        cursor = cursor.saturating_add(1);
         match escaped {
+            b'b' => output.push(0x08),
+            b'f' => output.push(0x0c),
             b'n' => output.push(b'\n'),
             b'r' => output.push(b'\r'),
             b't' => output.push(b'\t'),
             b'"' => output.push(b'"'),
             b'\'' => output.push(b'\''),
+            b'/' => output.push(b'/'),
             b'\\' => output.push(b'\\'),
-            b'x' => push_hex_escape(&mut output, &mut bytes),
+            b'x' => output.push(read_byte_escape(bytes, &mut cursor, span)?),
+            b'u' => push_unicode_escape(&mut output, bytes, &mut cursor, 4, span)?,
+            b'U' => push_unicode_escape(&mut output, bytes, &mut cursor, 8, span)?,
             other => {
-                output.push(b'\\');
-                output.push(other);
+                return Err(literal_diagnostic(
+                    "cue.compile.invalid_escape",
+                    format!("unsupported escape sequence `\\{}`", char::from(other)),
+                    span,
+                ));
             }
         }
     }
-    output
+    Ok(output)
 }
 
-fn push_hex_escape(output: &mut Vec<u8>, bytes: &mut impl Iterator<Item = u8>) {
-    match (
-        bytes.next().and_then(hex_value),
-        bytes.next().and_then(hex_value),
-    ) {
-        (Some(high), Some(low)) => output.push((high << 4) | low),
-        _ => output.extend_from_slice(b"\\x"),
+fn read_byte_escape(
+    bytes: &[u8],
+    cursor: &mut usize,
+    span: Option<Span>,
+) -> Result<u8, Diagnostic> {
+    let value = read_hex_escape(bytes, cursor, 2, span)?;
+    u8::try_from(value).map_err(|_| {
+        literal_diagnostic(
+            "cue.compile.invalid_escape",
+            "byte escape is out of range",
+            span,
+        )
+    })
+}
+
+fn push_unicode_escape(
+    output: &mut Vec<u8>,
+    bytes: &[u8],
+    cursor: &mut usize,
+    digits: usize,
+    span: Option<Span>,
+) -> Result<(), Diagnostic> {
+    let value = read_hex_escape(bytes, cursor, digits, span)?;
+    let Some(character) = char::from_u32(value) else {
+        return Err(literal_diagnostic(
+            "cue.compile.invalid_escape",
+            format!("invalid Unicode scalar value U+{value:08X}"),
+            span,
+        ));
+    };
+    let mut buffer = [0_u8; 4];
+    output.extend_from_slice(character.encode_utf8(&mut buffer).as_bytes());
+    Ok(())
+}
+
+fn read_hex_escape(
+    bytes: &[u8],
+    cursor: &mut usize,
+    digits: usize,
+    span: Option<Span>,
+) -> Result<u32, Diagnostic> {
+    if bytes.len().saturating_sub(*cursor) < digits {
+        return Err(literal_diagnostic(
+            "cue.compile.invalid_escape",
+            format!("escape sequence requires {digits} hex digits"),
+            span,
+        ));
     }
+    let mut value = 0_u32;
+    for _ in 0..digits {
+        let byte = bytes.get(*cursor).copied().ok_or_else(|| {
+            literal_diagnostic(
+                "cue.compile.invalid_escape",
+                "unterminated escape sequence",
+                span,
+            )
+        })?;
+        let Some(digit) = hex_value(byte) else {
+            return Err(literal_diagnostic(
+                "cue.compile.invalid_escape",
+                format!(
+                    "invalid hex digit `{}` in escape sequence",
+                    char::from(byte)
+                ),
+                span,
+            ));
+        };
+        value = (value << 4) | u32::from(digit);
+        *cursor = (*cursor).saturating_add(1);
+    }
+    Ok(value)
 }
 
 fn hex_value(byte: u8) -> Option<u8> {
@@ -1038,6 +1225,14 @@ fn hex_value(byte: u8) -> Option<u8> {
         b'A'..=b'F' => Some(byte - b'A' + 10),
         _ => None,
     }
+}
+
+fn literal_diagnostic(
+    code: &'static str,
+    message: impl Into<String>,
+    span: Option<Span>,
+) -> Diagnostic {
+    Diagnostic::new(Severity::Error, code, message, span)
 }
 
 fn is_builtin_kind(name: &str) -> bool {
@@ -1092,6 +1287,31 @@ mod tests {
         let compiled =
             Compiler::new(&mut runtime).compile_instance(&instance, CompileOptions::default())?;
         assert!(compiled.diagnostics().has_errors());
+        Ok(())
+    }
+
+    #[test]
+    fn test_should_report_compile_depth_limit() -> Result<(), Box<dyn std::error::Error>> {
+        let parsed = parse_bytes("test.cue", b"x: [[[[1]]]]\n", ParseConfig::default());
+        assert!(!parsed.diagnostics().has_errors());
+        let files = parsed.ast().map_or_else(Vec::new, |ast| vec![ast.clone()]);
+        let instance = BuildInstance::new(None, files);
+        let mut runtime = Runtime::default();
+        let compiled = Compiler::new(&mut runtime).compile_instance(
+            &instance,
+            CompileOptions {
+                max_depth: 3,
+                ..CompileOptions::default()
+            },
+        )?;
+        assert!(compiled.diagnostics().has_errors());
+        assert!(
+            compiled
+                .diagnostics()
+                .diagnostics()
+                .iter()
+                .any(|diagnostic| diagnostic.code() == "cue.compile.max_depth_exceeded")
+        );
         Ok(())
     }
 

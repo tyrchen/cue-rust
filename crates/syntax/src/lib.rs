@@ -19,6 +19,9 @@ pub use parser::{ParseResult, parse_bytes};
 
 const SCANNER_SOURCE_ID: u32 = 1;
 
+/// Default maximum recursive parse depth for expressions and nested values.
+pub const DEFAULT_MAX_PARSE_DEPTH: u32 = 256;
+
 /// Parser mode requested by the SDK or CLI.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 #[non_exhaustive]
@@ -29,11 +32,23 @@ pub enum ParseMode {
 }
 
 /// Parser configuration shared by syntax entry points.
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ParseConfig {
     mode: ParseMode,
     limits: SourceLimits,
     include_comments: bool,
+    max_depth: u32,
+}
+
+impl Default for ParseConfig {
+    fn default() -> Self {
+        Self {
+            mode: ParseMode::default(),
+            limits: SourceLimits::default(),
+            include_comments: false,
+            max_depth: DEFAULT_MAX_PARSE_DEPTH,
+        }
+    }
 }
 
 impl ParseConfig {
@@ -44,6 +59,7 @@ impl ParseConfig {
             mode,
             limits,
             include_comments: false,
+            max_depth: DEFAULT_MAX_PARSE_DEPTH,
         }
     }
 
@@ -65,10 +81,23 @@ impl ParseConfig {
         self.include_comments
     }
 
+    /// Returns the maximum recursive parse depth.
+    #[must_use]
+    pub fn max_depth(self) -> u32 {
+        self.max_depth
+    }
+
     /// Returns a copy of this config with comment retention enabled or disabled.
     #[must_use]
     pub fn with_comments(mut self, include_comments: bool) -> Self {
         self.include_comments = include_comments;
+        self
+    }
+
+    /// Returns a copy of this config with an explicit maximum parse depth.
+    #[must_use]
+    pub fn with_max_depth(mut self, max_depth: u32) -> Self {
+        self.max_depth = max_depth;
         self
     }
 }
@@ -390,6 +419,14 @@ impl<'src> Scanner<'src> {
             self.advance_digits();
         }
         let text = self.text(start, self.offset).to_owned();
+        if !is_valid_number_literal(&text) {
+            self.push_diagnostic(
+                "cue.scan.invalid_number",
+                format!("invalid number literal `{text}`"),
+                start,
+                self.offset,
+            );
+        }
         self.push_token(TokenKind::Number, start, self.offset, text, false);
         self.insert_comma = true;
     }
@@ -625,6 +662,52 @@ impl<'src> Scanner<'src> {
     }
 }
 
+fn is_valid_number_literal(text: &str) -> bool {
+    let (mantissa, exponent) = split_exponent(text);
+    if let Some(exponent) = exponent {
+        let exponent_digits = exponent.strip_prefix(['+', '-']).unwrap_or(exponent);
+        if !is_valid_digit_run(exponent_digits) {
+            return false;
+        }
+    }
+
+    if let Some((whole, fraction)) = mantissa.split_once('.') {
+        return is_valid_digit_run(whole) && is_valid_digit_run(fraction);
+    }
+
+    is_valid_digit_run(mantissa)
+}
+
+fn split_exponent(text: &str) -> (&str, Option<&str>) {
+    let Some(index) = text.find(['e', 'E']) else {
+        return (text, None);
+    };
+    let exponent_start = index.saturating_add(1);
+    (&text[..index], text.get(exponent_start..))
+}
+
+fn is_valid_digit_run(text: &str) -> bool {
+    if text.is_empty() {
+        return false;
+    }
+
+    let mut seen_digit = false;
+    let mut previous_was_underscore = false;
+    for byte in text.bytes() {
+        match byte {
+            b'0'..=b'9' => {
+                seen_digit = true;
+                previous_was_underscore = false;
+            }
+            b'_' if !seen_digit || previous_was_underscore => return false,
+            b'_' => previous_was_underscore = true,
+            _ => return false,
+        }
+    }
+
+    !previous_was_underscore
+}
+
 #[cfg(test)]
 mod tests {
     use proptest::prelude::*;
@@ -674,6 +757,40 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(vec!["1", "2", "1e-2"], number_texts);
         assert!(tokens.iter().any(|token| token.text() == "+"));
+    }
+
+    #[rstest]
+    #[case("1_000")]
+    #[case("1_000.5_0")]
+    #[case("1e1_0")]
+    #[case("1_0e+2")]
+    #[case("1_0E-2")]
+    fn test_should_accept_valid_underscored_number_literals(#[case] literal: &str) {
+        let source = format!("x: {literal}\n");
+        let result = scan_bytes("test.cue", source.as_bytes(), ParseConfig::default());
+
+        assert!(!result.diagnostics().has_errors(), "{literal}");
+    }
+
+    #[rstest]
+    #[case("1_")]
+    #[case("1__2")]
+    #[case("1e")]
+    #[case("1e_")]
+    #[case("1._2")]
+    #[case("1e+")]
+    #[case("1e+_2")]
+    fn test_should_report_invalid_number_literals(#[case] literal: &str) {
+        let source = format!("x: {literal}\n");
+        let result = scan_bytes("test.cue", source.as_bytes(), ParseConfig::default());
+        let codes = result
+            .diagnostics()
+            .diagnostics()
+            .iter()
+            .map(cue_rust_source::Diagnostic::code)
+            .collect::<Vec<_>>();
+
+        assert!(codes.contains(&"cue.scan.invalid_number"), "{literal}");
     }
 
     #[test]

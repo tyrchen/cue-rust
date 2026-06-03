@@ -303,7 +303,7 @@ checksum = "460fbee9c2c2f33933d720630a6a0bac33ba7053db5344fac858d4b8952d77d5"
 
 [[package]]
 name = "cue-rs"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "camino",
@@ -317,7 +317,7 @@ dependencies = [
 
 [[package]]
 name = "cue-rust"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "camino",
  "criterion",
@@ -336,7 +336,7 @@ dependencies = [
 
 [[package]]
 name = "cue-rust-adt"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "cue-rust-source",
  "indexmap",
@@ -345,7 +345,7 @@ dependencies = [
 
 [[package]]
 name = "cue-rust-compiler"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "cue-rust-adt",
  "cue-rust-loader",
@@ -356,8 +356,9 @@ dependencies = [
 
 [[package]]
 name = "cue-rust-encoding"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
+ "bigdecimal",
  "cue-rust-eval",
  "cue-rust-source",
  "indexmap",
@@ -370,7 +371,7 @@ dependencies = [
 
 [[package]]
 name = "cue-rust-eval"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "bigdecimal",
  "cue-rust-adt",
@@ -384,7 +385,7 @@ dependencies = [
 
 [[package]]
 name = "cue-rust-loader"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "camino",
  "cue-rust-source",
@@ -396,7 +397,7 @@ dependencies = [
 
 [[package]]
 name = "cue-rust-source"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "miette",
  "thiserror",
@@ -404,7 +405,7 @@ dependencies = [
 
 [[package]]
 name = "cue-rust-syntax"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "cue-rust-source",
  "proptest",

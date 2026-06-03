@@ -3,8 +3,9 @@
 #![forbid(unsafe_code)]
 #![warn(rust_2024_compatibility, missing_docs, missing_debug_implementations)]
 
-use std::{str, str::FromStr};
+use std::{borrow::Cow, str, str::FromStr};
 
+use bigdecimal::BigDecimal;
 use cue_rust_eval::{
     EvalError, EvaluatedValue, ExportOptions, NumericBound, StringConstraint, StringConstraintSet,
     ValidateOptions, Value,
@@ -339,7 +340,7 @@ fn evaluated_to_json(value: EvaluatedValue) -> Result<JsonValue, EncodeError> {
         EvaluatedValue::Top => unsupported(Encoding::Json, "incomplete value"),
         EvaluatedValue::Null => Ok(JsonValue::Null),
         EvaluatedValue::Bool(value) => Ok(JsonValue::Bool(value)),
-        EvaluatedValue::Number(value) => JsonNumber::from_str(&value)
+        EvaluatedValue::Number(value) => JsonNumber::from_str(normalized_number(&value).as_ref())
             .map(JsonValue::Number)
             .map_err(|_| unsupported_error(Encoding::Json, "invalid JSON number")),
         EvaluatedValue::String(value) => Ok(JsonValue::String(value)),
@@ -490,23 +491,49 @@ fn evaluated_to_yaml(value: EvaluatedValue) -> Result<YamlValue, EncodeError> {
 }
 
 fn number_to_toml(value: &str) -> Result<TomlValue, EncodeError> {
-    if let Ok(integer) = value.parse::<i64>() {
+    let normalized = normalized_number(value);
+    if let Ok(integer) = normalized.parse::<i64>() {
         return Ok(TomlValue::Integer(integer));
     }
-    if let Ok(float) = value.parse::<f64>() {
+    if let Some(float) = exact_f64(&normalized) {
         return Ok(TomlValue::Float(float));
     }
-    unsupported(Encoding::Toml, "invalid TOML number")
+    unsupported(
+        Encoding::Toml,
+        format!("number `{value}` cannot be represented exactly as TOML"),
+    )
 }
 
 fn number_to_yaml(value: &str) -> Result<YamlValue, EncodeError> {
-    if let Ok(integer) = value.parse::<i64>() {
+    let normalized = normalized_number(value);
+    if let Ok(integer) = normalized.parse::<i64>() {
         return Ok(YamlValue::Number(YamlNumber::Integer(integer)));
     }
-    if let Ok(float) = value.parse::<f64>() {
+    if let Some(float) = exact_f64(&normalized) {
         return Ok(YamlValue::Number(YamlNumber::Float(float)));
     }
-    unsupported(Encoding::Yaml, "invalid YAML number")
+    unsupported(
+        Encoding::Yaml,
+        format!("number `{value}` cannot be represented exactly as YAML"),
+    )
+}
+
+fn normalized_number(value: &str) -> Cow<'_, str> {
+    if value.contains('_') {
+        Cow::Owned(value.replace('_', ""))
+    } else {
+        Cow::Borrowed(value)
+    }
+}
+
+fn exact_f64(value: &str) -> Option<f64> {
+    let float = value.parse::<f64>().ok()?;
+    if !float.is_finite() {
+        return None;
+    }
+    let original = BigDecimal::from_str(value).ok()?;
+    let rendered = BigDecimal::from_str(&float.to_string()).ok()?;
+    (original == rendered).then_some(float)
 }
 
 fn unsupported<T>(encoding: Encoding, message: impl Into<String>) -> Result<T, EncodeError> {
@@ -746,6 +773,74 @@ mod tests {
                 },
             )?,
         );
+        Ok(())
+    }
+
+    #[test]
+    fn test_should_reject_inexact_yaml_and_toml_numbers() -> Result<(), Box<dyn std::error::Error>>
+    {
+        fn number_field(number: &str) -> Value {
+            Value::from_evaluated(EvaluatedValue::Struct(indexmap::IndexMap::from([(
+                "n".to_owned(),
+                EvaluatedValue::Number(number.to_owned()),
+            )])))
+        }
+
+        let exact = number_field("0.1");
+        for encoding in [Encoding::Yaml, Encoding::Toml] {
+            let output = encode_value(
+                &exact,
+                EncodeOptions {
+                    encoding,
+                    ..EncodeOptions::default()
+                },
+            )?;
+            assert!(output.contains("0.1"));
+        }
+
+        for number in ["9223372036854775808", "1.234567890123456789"] {
+            let value = number_field(number);
+            for encoding in [Encoding::Yaml, Encoding::Toml] {
+                let result = encode_value(
+                    &value,
+                    EncodeOptions {
+                        encoding,
+                        ..EncodeOptions::default()
+                    },
+                );
+                assert!(
+                    matches!(result, Err(super::EncodeError::Unsupported { .. })),
+                    "{encoding:?} unexpectedly accepted {number}: {result:?}",
+                );
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn test_should_encode_underscored_numbers_as_external_numbers()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let value = Value::from_evaluated(EvaluatedValue::Struct(indexmap::IndexMap::from([(
+            "x".to_owned(),
+            EvaluatedValue::Number("1_000".to_owned()),
+        )])));
+
+        let json = encode_value(&value, EncodeOptions::default())?;
+        assert!(json.contains("\"x\": 1000"));
+
+        for encoding in [Encoding::Yaml, Encoding::Toml] {
+            let output = encode_value(
+                &value,
+                EncodeOptions {
+                    encoding,
+                    ..EncodeOptions::default()
+                },
+            )?;
+            assert!(
+                output.contains("1000"),
+                "{encoding:?} did not normalize numeric separator: {output}",
+            );
+        }
         Ok(())
     }
 

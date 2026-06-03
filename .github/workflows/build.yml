@@ -41,14 +41,14 @@ jobs:
         run: |
           rustup toolchain install stable --component llvm-tools-preview
           rustup toolchain install nightly --component rustfmt
-      - name: Install cargo-llvm-cov
+      - name: Install cargo-audit
         uses: taiki-e/install-action@v2
         with:
-          tool: cargo-llvm-cov
-      - name: install nextest
+          tool: cargo-audit
+      - name: Install cargo-deny
         uses: taiki-e/install-action@v2
         with:
-          tool: nextest
+          tool: cargo-deny
       - name: Install cargo-fuzz
         uses: taiki-e/install-action@v2
         with:
@@ -56,14 +56,10 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       # - name: Install Protoc
       #   uses: arduino/setup-protoc@v2
-      - name: Check code format
-        run: cargo +nightly fmt --all -- --check
-      - name: Check the package for errors
-        run: cargo check --all
-      - name: Lint rust sources
-        run: cargo clippy --all-targets --all-features --tests --benches -- -D warnings
-      - name: Execute rust tests
-        run: cargo nextest run --all-features
+      - name: Run local quality gates
+        run: make check
+      - name: Check generated agent instructions
+        run: make check-agent-sync
       - name: Run fuzz smoke targets
         run: make fuzz-smoke
       - name: Generate a changelog

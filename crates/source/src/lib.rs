@@ -258,6 +258,12 @@ impl SourceFile {
         bytes: &[u8],
         limits: SourceLimits,
     ) -> Result<Self, SourceError> {
+        if bytes.len() > limits.max_file_bytes() {
+            return Err(SourceError::SourceTooLarge {
+                actual: bytes.len(),
+                limit: limits.max_file_bytes(),
+            });
+        }
         let content =
             String::from_utf8(bytes.to_vec()).map_err(|error| SourceError::InvalidUtf8 {
                 valid_up_to: error.utf8_error().valid_up_to(),
@@ -281,6 +287,20 @@ impl SourceFile {
     #[must_use]
     pub fn line_index(&self) -> &LineIndex {
         &self.line_index
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{SourceError, SourceFile, SourceLimits};
+
+    #[test]
+    fn test_should_reject_oversized_bytes_before_utf8_validation()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let limits = SourceLimits::new(1)?;
+        let result = SourceFile::named_bytes("large.cue", &[0xff, 0xff], limits);
+        assert!(matches!(result, Err(SourceError::SourceTooLarge { .. })));
+        Ok(())
     }
 }
 

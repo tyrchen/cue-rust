@@ -1,6 +1,6 @@
 # Issue 0003 — `Value::unify` collapses defaulted-disjunction fields before unifying (0001 regression on the API path)
 
-Status: open · Severity: **high (blocks embedders)** · Found: 2026-06-02
+Status: fixed in `24b733d` · Severity: **high (blocks embedders)** · Found: 2026-06-02
 Reported against: `cc57fa3` ("Fix defaulted disjunction and optional export")
 Component: `crates/eval` — `Value::unify` (`crates/eval/src/lib.rs:814`) interacting
 with `evaluate`/`evaluate_export` default resolution.

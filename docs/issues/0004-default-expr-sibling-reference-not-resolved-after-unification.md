@@ -1,6 +1,6 @@
 # Issue 0004 — A default expression that references a sibling field does not see values supplied by later unification
 
-Status: open · Severity: medium (blocks computed-default policies) · Found: 2026-06-02
+Status: fixed in `04fc3ae` · Severity: medium (blocks computed-default policies) · Found: 2026-06-02
 Reported against: `cc57fa3`
 Component: `crates/eval` — lazy field-reference resolution inside a default
 expression (`x: bool | *(<expr over sibling fields>)`) under unification.

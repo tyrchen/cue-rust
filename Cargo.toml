@@ -3,7 +3,7 @@ members = ["crates/*", "apps/*"]
 resolver = "3"
 
 [workspace.package]
-version = "0.1.0"
+version = "0.2.0"
 authors = ["Tyr Chen <tchen@tyrchen.com>"]
 edition = "2024"
 license = "MIT"
@@ -36,14 +36,14 @@ tracing-subscriber = { version = "0.3.23", features = ["env-filter", "fmt"] }
 typed-builder = "0.23.2"
 
 # workspace crates
-cue-rust-adt = { version = "0.1.0", path = "crates/adt" }
-cue-rust-compiler = { version = "0.1.0", path = "crates/compiler" }
-cue-rust-encoding = { version = "0.1.0", path = "crates/encoding" }
-cue-rust-eval = { version = "0.1.0", path = "crates/eval" }
-cue-rust-loader = { version = "0.1.0", path = "crates/loader" }
-cue-rust-source = { version = "0.1.0", path = "crates/source" }
-cue-rust-syntax = { version = "0.1.0", path = "crates/syntax" }
-cue-rust = { version = "0.1.0", path = "crates/sdk" }
+cue-rust-adt = { version = "0.2.0", path = "crates/adt" }
+cue-rust-compiler = { version = "0.2.0", path = "crates/compiler" }
+cue-rust-encoding = { version = "0.2.0", path = "crates/encoding" }
+cue-rust-eval = { version = "0.2.0", path = "crates/eval" }
+cue-rust-loader = { version = "0.2.0", path = "crates/loader" }
+cue-rust-source = { version = "0.2.0", path = "crates/source" }
+cue-rust-syntax = { version = "0.2.0", path = "crates/syntax" }
+cue-rust = { version = "0.2.0", path = "crates/sdk" }
 
 [workspace.lints.rust]
 missing_debug_implementations = "warn"

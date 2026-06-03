@@ -34,6 +34,7 @@ const REGEX_DFA_SIZE_LIMIT_BYTES: usize = 1024 * 1024;
 const MAX_BUILTIN_GENERATED_BYTES: usize = 16 * 1024 * 1024;
 const MAX_BUILTIN_GENERATED_ITEMS: usize = 1_000_000;
 const MAX_COMPREHENSION_GENERATED_ITEMS: usize = MAX_BUILTIN_GENERATED_ITEMS;
+const MAX_DISJUNCTION_EXPANSION: usize = 4_096;
 const MAX_SCHEMA_SORT_ITEMS: usize = 100_000;
 const MAX_FIXPOINT_ITERATIONS: usize = 64;
 const CUE_DECIMAL_PRECISION: u64 = 34;
@@ -6763,8 +6764,16 @@ fn is_choice_value(value: &EvaluatedValue) -> bool {
 fn evaluate_choice_binary(op: &str, left: EvaluatedValue, right: EvaluatedValue) -> EvaluatedValue {
     let left_disjuncts = disjuncts_from(left);
     let right_disjuncts = disjuncts_from(right);
-    let mut results =
-        Vec::with_capacity(left_disjuncts.len().saturating_mul(right_disjuncts.len()));
+    let Ok(capacity) =
+        checked_disjunction_expansion(left_disjuncts.len(), right_disjuncts.len(), None)
+    else {
+        return disjunction_expansion_limit_bottom(
+            left_disjuncts.len(),
+            right_disjuncts.len(),
+            None,
+        );
+    };
+    let mut results = Vec::with_capacity(capacity);
     for left in &left_disjuncts {
         for right in &right_disjuncts {
             let value = evaluate_plain_binary(
@@ -8425,7 +8434,10 @@ fn unify_disjunctions(
     right: &[Disjunct],
     span: Option<Span>,
 ) -> EvaluatedValue {
-    let mut unified = Vec::new();
+    let Ok(capacity) = checked_disjunction_expansion(left.len(), right.len(), span) else {
+        return disjunction_expansion_limit_bottom(left.len(), right.len(), span);
+    };
+    let mut unified = Vec::with_capacity(capacity);
     for left_disjunct in left {
         for right_disjunct in right {
             let value = unify_values(
@@ -8442,6 +8454,40 @@ fn unify_disjunctions(
         }
     }
     collapse_disjunction(EvaluatedValue::Disjunction(unique_disjuncts(unified)))
+}
+
+fn checked_disjunction_expansion(
+    left_len: usize,
+    right_len: usize,
+    span: Option<Span>,
+) -> Result<usize, EvaluatedValue> {
+    let Some(count) = left_len.checked_mul(right_len) else {
+        return Err(disjunction_expansion_limit_bottom(
+            left_len, right_len, span,
+        ));
+    };
+    if count > MAX_DISJUNCTION_EXPANSION {
+        return Err(disjunction_expansion_limit_bottom(
+            left_len, right_len, span,
+        ));
+    }
+    Ok(count)
+}
+
+fn disjunction_expansion_limit_bottom(
+    left_len: usize,
+    right_len: usize,
+    span: Option<Span>,
+) -> EvaluatedValue {
+    EvaluatedValue::Bottom(Bottom::new(
+        "cue.eval.disjunction_expansion_limit",
+        format!(
+            "disjunction expansion {left_len} x {right_len} exceeds limit \
+             {MAX_DISJUNCTION_EXPANSION}"
+        ),
+        span,
+        false,
+    ))
 }
 
 fn unify_disjunction_with_value(

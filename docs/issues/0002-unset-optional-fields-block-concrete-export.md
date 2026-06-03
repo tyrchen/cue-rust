@@ -1,6 +1,6 @@
 # Issue 0002 — Unset optional fields block concrete export instead of being omitted
 
-Status: open · Severity: **medium-high (blocking embedders)** · Found: 2026-06-02
+Status: fixed in `cc57fa3` · Severity: **medium-high (blocking embedders)** · Found: 2026-06-02
 Reported against: `d0181ce` (also reproduces on `ee8220e`, `da88884`)
 Component: `crates/encoding` (`evaluated_to_json` struct encoding) and/or
 `crates/eval` (concrete evaluation of optional fields)

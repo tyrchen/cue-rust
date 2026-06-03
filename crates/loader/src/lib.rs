@@ -15,6 +15,7 @@ use cue_rust_source::{
 };
 use cue_rust_syntax::{AstFile, ParseConfig, parse_bytes};
 use thiserror::Error;
+use tokio::io::AsyncReadExt;
 use typed_builder::TypedBuilder;
 
 const CUE_EXTENSION: &str = "cue";
@@ -430,7 +431,7 @@ impl Loader {
         path: Utf8PathBuf,
         cue_files: &mut Vec<LoadedSource>,
     ) -> Result<(), LoadError> {
-        let bytes = tokio::fs::read(path.as_std_path()).await?;
+        let bytes = read_limited_file(&path, self.config.source_limits).await?;
         SourceFile::named_bytes(path.as_str(), &bytes, self.config.source_limits)?;
         cue_files.push(LoadedSource {
             name: path,
@@ -543,6 +544,7 @@ impl Loader {
         } else {
             current_dir.join(arg)
         };
+        reject_symlink_leaf(&path).await?;
         let canonical = tokio::fs::canonicalize(path.as_std_path()).await?;
         let canonical = path_to_utf8(canonical)?;
         assert_under_root(&canonical, allowed_root)?;
@@ -601,6 +603,7 @@ impl Loader {
         imports: &[String],
         diagnostics: &mut DiagnosticReport,
     ) -> Result<BTreeMap<String, Vec<AstFile>>, LoadError> {
+        let import_root = root_dir.join(CUE_MOD_PKG_DIR);
         let mut resolved = BTreeMap::new();
         let mut visited = BTreeSet::new();
         let mut pending = imports.iter().cloned().collect::<VecDeque<_>>();
@@ -609,11 +612,19 @@ impl Loader {
             if is_builtin_import_path(&path) || !is_local_import_path(&path) {
                 continue;
             }
+            if validate_local_import_path(&path).is_err() {
+                diagnostics.push(Diagnostic::new(
+                    Severity::Error,
+                    "cue.load.invalid_local_import_path",
+                    format!("local import `{path}` contains an invalid filesystem path"),
+                    None,
+                ));
+                continue;
+            }
             if !visited.insert(path.clone()) {
                 continue;
             }
-            let import_dir = root_dir.join(CUE_MOD_PKG_DIR).join(&path);
-            if !import_dir.exists() {
+            let Some(import_dir) = self.resolve_local_import_dir(&import_root, &path).await? else {
                 diagnostics.push(Diagnostic::new(
                     Severity::Error,
                     "cue.load.missing_local_import",
@@ -621,9 +632,9 @@ impl Loader {
                     None,
                 ));
                 continue;
-            }
+            };
             let mut sources = Vec::new();
-            self.collect_directory(&import_dir, root_dir, &mut sources, false)
+            self.collect_directory(&import_dir, &import_root, &mut sources, false)
                 .await?;
             let mut ast_files = Vec::with_capacity(sources.len());
             for source in sources {
@@ -660,6 +671,58 @@ impl Loader {
         }
         Ok(resolved)
     }
+
+    async fn resolve_local_import_dir(
+        &self,
+        import_root: &Utf8PathBuf,
+        path: &str,
+    ) -> Result<Option<Utf8PathBuf>, LoadError> {
+        let candidate = import_root.join(path);
+        if !tokio::fs::try_exists(candidate.as_std_path()).await? {
+            return Ok(None);
+        }
+        let metadata = tokio::fs::symlink_metadata(candidate.as_std_path()).await?;
+        if metadata.file_type().is_symlink() {
+            return Err(LoadError::Symlink { path: candidate });
+        }
+        let canonical = path_to_utf8(tokio::fs::canonicalize(candidate.as_std_path()).await?)?;
+        assert_under_root(&canonical, import_root)?;
+        Ok(Some(canonical))
+    }
+}
+
+async fn read_limited_file(path: &Utf8PathBuf, limits: SourceLimits) -> Result<Vec<u8>, LoadError> {
+    let limit = limits.max_file_bytes();
+    let metadata = tokio::fs::metadata(path.as_std_path()).await?;
+    let limit_u64 = u64::try_from(limit).unwrap_or(u64::MAX);
+    if metadata.is_file() && metadata.len() > limit_u64 {
+        return Err(LoadError::Source(SourceError::SourceTooLarge {
+            actual: usize::try_from(metadata.len()).unwrap_or(usize::MAX),
+            limit,
+        }));
+    }
+
+    let mut input = Vec::new();
+    tokio::fs::File::open(path.as_std_path())
+        .await?
+        .take(limit_u64.saturating_add(1))
+        .read_to_end(&mut input)
+        .await?;
+    if input.len() > limit {
+        return Err(LoadError::Source(SourceError::SourceTooLarge {
+            actual: input.len(),
+            limit,
+        }));
+    }
+    Ok(input)
+}
+
+async fn reject_symlink_leaf(path: &Utf8PathBuf) -> Result<(), LoadError> {
+    let metadata = tokio::fs::symlink_metadata(path.as_std_path()).await?;
+    if metadata.file_type().is_symlink() {
+        return Err(LoadError::Symlink { path: path.clone() });
+    }
+    Ok(())
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -695,6 +758,23 @@ fn is_builtin_import_path(path: &str) -> bool {
 
 fn is_local_import_path(path: &str) -> bool {
     path.contains('.') || path.contains('/')
+}
+
+fn validate_local_import_path(path: &str) -> Result<(), ()> {
+    if path.is_empty() || path.as_bytes().contains(&0) {
+        return Err(());
+    }
+    let path = Utf8PathBuf::from(path);
+    if path.is_absolute() {
+        return Err(());
+    }
+    if path
+        .components()
+        .any(|component| component.as_str() == "..")
+    {
+        return Err(());
+    }
+    Ok(())
 }
 
 fn data_arg(arg: &Utf8PathBuf) -> Option<(String, Utf8PathBuf)> {
@@ -1100,11 +1180,57 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_should_reject_traversing_local_import_path() -> Result<(), Box<dyn Error>> {
+        let dir = fixture_dir().await?;
+        let root = dir.join("root");
+        let outside = dir.join("outside");
+        fs::create_dir_all(root.join("cue.mod/pkg")).await?;
+        fs::create_dir_all(&outside).await?;
+        fs::write(
+            root.join("cue.mod/module.cue"),
+            "module: \"example.com/root\"\n",
+        )
+        .await?;
+        fs::write(
+            root.join("main.cue"),
+            "package p\nimport \"../../../outside\"\nx: outside.y\n",
+        )
+        .await?;
+        fs::write(outside.join("out.cue"), "package outside\ny: 42\n").await?;
+        let loader = Loader::new(LoadConfig::builder().current_dir(Some(root)).build());
+        let instances = loader.load_args(&[Utf8PathBuf::from(".")]).await?;
+        let instance = instances.first().ok_or("missing instance")?;
+        let codes = instance
+            .diagnostics()
+            .diagnostics()
+            .iter()
+            .map(cue_rust_source::Diagnostic::code)
+            .collect::<Vec<_>>();
+
+        assert!(codes.contains(&"cue.load.invalid_local_import_path"));
+        assert!(!instance.imports().contains_key("../../../outside"));
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn test_should_reject_path_traversal() -> Result<(), Box<dyn Error>> {
         let dir = fixture_dir().await?;
         let loader = Loader::new(LoadConfig::builder().current_dir(Some(dir)).build());
         let result = loader.load_args(&[Utf8PathBuf::from("../x.cue")]).await;
         assert!(matches!(result, Err(LoadError::PathTraversal { .. })));
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_should_reject_symlink_file_argument() -> Result<(), Box<dyn Error>> {
+        let dir = fixture_dir().await?;
+        fs::write(dir.join("real.cue"), "x: 1\n").await?;
+        std::os::unix::fs::symlink("real.cue", dir.join("link.cue"))?;
+        let loader = Loader::new(LoadConfig::builder().current_dir(Some(dir)).build());
+        let result = loader.load_args(&[Utf8PathBuf::from("link.cue")]).await;
+
+        assert!(matches!(result, Err(LoadError::Symlink { .. })));
         Ok(())
     }
 

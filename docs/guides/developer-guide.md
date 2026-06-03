@@ -1,29 +1,52 @@
 # Developer Guide
 
-This guide is for contributors working on `cue-rust` itself.
+This guide is for contributors working on `cue-rust`.
 
 ## Repository Layout
 
 ```text
-apps/cue/        CLI binary, published as cue-rs
-crates/adt/      ADT runtime data structures
+apps/cue/        CLI package; installs a binary named cue
+crates/adt/      semantic graph and runtime data structures
 crates/compiler/ AST-to-ADT lowering
-crates/encoding/ JSON, YAML, TOML, and CUE-like output
-crates/eval/     evaluator, validation, builtins, export profiles
-crates/loader/   local package loader, module-local imports, stdin, tags
+crates/encoding/ JSON, YAML, TOML, and CUE-like encoding/decoding
+crates/eval/     evaluator, validation, builtins, defaults, export profiles
+crates/loader/   local package loader, stdin, overlays, tags, data files
 crates/sdk/      public cue-rust facade
-crates/source/   source files, limits, diagnostics
+crates/source/   source files, byte limits, spans, diagnostics
 crates/syntax/   scanner, parser, AST
-docs/research/   prior-art and design research
+docs/guides/     user and developer documentation
+docs/issues/     detailed bug reports and fix notes
+docs/research/   research notes and prior-art studies
 specs/           product, design, roadmap, and implementation plans
-vendors/         vendored upstream CUE source used for parity work
+vendors/         vendored upstream CUE checkout for compatibility work
 ```
 
-The public crate is `cue-rust`; the CLI package is `cue-rs`.
+The published SDK crate is `cue-rust`. The CLI package is `cue-rs`, and its
+binary is `cue`.
+
+## Architecture
+
+The implementation is layered. Keep behavior in the layer that owns it.
+
+1. `source` validates source names, byte limits, UTF-8, spans, line indexes, and
+   diagnostics.
+2. `syntax` scans and parses CUE into a tolerant AST.
+3. `loader` resolves local inputs into build instances, applies overlays and
+   tags, records external data files, and resolves module-local imports.
+4. `compiler` lowers AST files into the ADT runtime.
+5. `eval` evaluates vertices, unifies values, enforces constraints, handles
+   defaults, runs builtins, and validates/export profiles.
+6. `encoding` converts between evaluated values and JSON/YAML/TOML/CUE-like
+   data.
+7. `sdk` exposes the application-facing facade.
+8. `apps/cue` provides CLI orchestration, IO, error context, and exit codes.
+
+Do not bypass earlier layers from later layers. For example, the evaluator
+should not read files, and the encoder should not reinterpret source syntax.
 
 ## Development Loop
 
-Start with the existing Makefile targets:
+Prefer Makefile targets:
 
 ```bash
 make build
@@ -33,7 +56,15 @@ make vendor-corpus
 make compat-report
 ```
 
-Run the full gate before a production-facing commit:
+Before claiming a production-facing change is ready, run:
+
+```bash
+make check
+make check-agent-sync
+make fuzz-smoke
+```
+
+`make check` includes:
 
 ```bash
 cargo build --workspace --all-targets
@@ -45,84 +76,117 @@ cargo audit
 cargo deny check
 ```
 
-Do not use `cargo clean`. The repository policy forbids it unless a user
-explicitly approves it.
+Do not run `cargo clean` unless the user explicitly approves it.
 
-## Implementation Rules
+## Code Rules
 
-Follow `AGENTS.md` as binding project policy. The most important rules for this
-codebase are:
+Project policy lives in `AGENTS.md`. The rules that matter most in daily work:
 
-- keep crates on Rust 2024 and forbid unsafe code
-- use `thiserror` for library error types and `anyhow` in the CLI
-- avoid `unwrap`, `expect`, `todo`, `unimplemented`, and panics on external input
-- validate input at loader, parser, CLI, decoding, and encoding boundaries
-- prefer typed domain values and explicit invariants over loosely shaped strings
-- keep public items documented
-- keep edits scoped to the phase or gap being addressed
+- Rust 2024 edition
+- `#![forbid(unsafe_code)]`
+- public items documented
+- `thiserror` for library errors, `anyhow` for CLI orchestration
+- no `unwrap`, `expect`, `todo`, `unimplemented`, or user-input panics in
+  production code
+- validate input at source, parser, loader, decoder, encoder, and CLI
+  boundaries
+- use explicit limits for source bytes, decoded depth, collection size,
+  generated builtin output, regex size, disjunction expansion, and recursive
+  parse/compile/eval paths
+- prefer structured types and checked arithmetic over loosely shaped strings
+- keep changes scoped to the behavior being fixed
 
-When adding automation, prefer a Makefile target over a loose shell script.
-
-## Architecture
-
-The pipeline is intentionally layered:
-
-1. `source` validates bytes, names, limits, and diagnostics.
-2. `syntax` scans and parses into a tolerant AST.
-3. `loader` groups files into build instances, resolves local inputs, injects
-   tags, records data files, and resolves module-local imports.
-4. `compiler` lowers AST files into the ADT runtime.
-5. `eval` evaluates vertices, applies constraints, handles builtins, and exposes
-   validation/export behavior.
-6. `encoding` serializes concrete evaluated values.
-7. `sdk` provides the stable facade used by applications and tests.
-8. `apps/cue` wires the SDK into the CLI.
-
-Do not bypass earlier layers from later layers. For example, the evaluator should
-not parse files, and the encoder should not reinterpret source syntax.
+For new automation, add a Makefile target instead of a one-off shell script.
 
 ## Compatibility Work
 
-Upstream CUE is vendored under `vendors/cue`. Before implementing a parity gap:
+Upstream CUE is vendored under `vendors/cue`.
 
-1. Find the upstream fixture or implementation that defines the behavior.
-2. Decide whether the gap is high value for the current maturity level.
-3. Add or extend a Rust integration test under `crates/sdk/tests/`.
-4. Implement the smallest coherent architectural batch, not a one-off fixture
-   hack.
-5. Update `target/compatibility/core.json` coverage through
-   `make compat-report` only when executable evidence proves the gap is closed.
+When closing a compatibility gap:
 
-Good parity batches usually touch parser/compiler/evaluator together. Avoid
-claiming support by only matching one fixture string.
+1. Find the upstream fixture, implementation, or spec text that defines the
+   behavior.
+2. Decide whether the gap is in scope for the current maturity level.
+3. Add a focused Rust test. Public behavior usually belongs in `crates/sdk/tests`
+   or `apps/cue/tests`.
+4. Implement the behavior in the proper layer. Avoid fixture-specific branches.
+5. Update compatibility reporting only when executable evidence proves the gap
+   is closed.
 
-## Tests
+Good parity batches often cross parser, compiler, and evaluator. Matching one
+output string is not enough if the underlying value semantics are still wrong.
 
-Use these test layers deliberately:
+## Testing Strategy
 
-- unit tests in the crate module for focused behavior
-- `crates/sdk` tests for public API behavior
-- `crates/sdk/tests/vendor_corpus.rs` for borrowed upstream fixture behavior
-- `apps/cue` integration tests for CLI workflows
-- compatibility report tests for machine-readable pass/expected-fail accounting
-- fuzz smoke targets for scanner and decoder crash resistance
+Use the smallest test layer that proves the behavior:
 
-Test names should use the `test_should_...` style already used in the repo.
+- crate unit tests for local parser, compiler, evaluator, loader, source, and
+  encoding behavior
+- SDK tests for public API behavior
+- CLI tests for command-line workflows and exit codes
+- borrowed vendor fixtures for upstream compatibility
+- compatibility reports for pass/expected-fail accounting
+- fuzz smoke for scanner and decoder crash resistance
 
-## CLI Changes
+Test names should follow the existing `test_should_...` style.
 
-The CLI should remain a thin orchestration layer. It may handle command-line
-parsing, IO, process exit codes, and user-facing error context. Core behavior
-belongs in the SDK or lower crates.
+For bug fixes, add the reproduction first when practical. If a fix protects a
+security or resource boundary, test the boundary directly, not only a downstream
+symptom.
 
-When adding a CLI feature, add a vendor-style script test under `apps/cue/tests`
-when the behavior is observable from the command line.
+## CLI Guidelines
 
-## Documentation Changes
+The CLI should stay thin. It owns:
 
-Specs live under `specs/`. User and developer documentation lives under `docs/`.
-Research memos live under `docs/research/`. When adding docs, update
-`docs/index.md`; when adding specs, update `specs/index.md`.
+- argument parsing
+- stdin/stdout/stderr
+- file IO boundary context
+- process exit codes
+- user-facing error messages
 
-Keep documentation honest about maturity. If a feature is a compatibility gap,
-say so directly instead of implying full upstream parity.
+Core CUE behavior belongs in the SDK or lower crates. If a CLI feature exposes
+new behavior, add an integration test under `apps/cue/tests`.
+
+## Documentation
+
+- User and developer docs live under `docs/guides/`.
+- Bug reports and fix notes live under `docs/issues/`.
+- Research notes live under `docs/research/`.
+- Product and implementation specs live under `specs/`.
+
+Update `docs/index.md` when adding docs. Update `specs/index.md` when adding
+specs.
+
+Keep documentation honest about maturity. If a behavior is a known gap, name the
+gap clearly.
+
+## Release Checklist
+
+For a version bump:
+
+1. Update `workspace.package.version` and workspace internal dependency versions
+   in `Cargo.toml`.
+2. Regenerate `Cargo.lock`.
+3. Update README and user-facing docs when the release changes behavior or
+   maturity.
+4. Run the full gate:
+
+```bash
+make check
+make check-agent-sync
+make fuzz-smoke
+```
+
+Dry-run publishing in dependency order:
+
+```bash
+cargo publish -p cue-rust-source --dry-run
+cargo publish -p cue-rust-adt --dry-run
+cargo publish -p cue-rust-syntax --dry-run
+cargo publish -p cue-rust-eval --dry-run
+cargo publish -p cue-rust-loader --dry-run
+cargo publish -p cue-rust-compiler --dry-run
+cargo publish -p cue-rust-encoding --dry-run
+cargo publish -p cue-rust --dry-run
+cargo publish -p cue-rs --dry-run
+```

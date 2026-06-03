@@ -7,6 +7,10 @@
 - [用户指南](guides/user-guide.zh-CN.md)
 - [开发指南](guides/developer-guide.zh-CN.md)
 
+## Issues
+
+- [Tracked Issues](issues/README.md)
+
 ## Research
 
 - [Study: CUE Architecture and Rust Port Shape](research/study-cue-architecture.md)

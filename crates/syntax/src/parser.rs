@@ -61,7 +61,7 @@ pub fn parse_bytes(name: impl Into<String>, bytes: &[u8], config: ParseConfig) -
     let scan = scan_bytes(name, bytes, config);
     let mut diagnostics = scan.diagnostics().clone();
     let ast = if scan.source().is_some() {
-        let mut parser = Parser::new(scan.tokens());
+        let mut parser = Parser::new(scan.tokens(), config);
         let ast = parser.parse_file();
         diagnostics.extend(parser.diagnostics.diagnostics().iter().cloned());
         Some(ast)
@@ -76,14 +76,18 @@ struct Parser<'tokens> {
     tokens: &'tokens [Token],
     cursor: usize,
     diagnostics: DiagnosticReport,
+    max_depth: u32,
+    expression_depth: u32,
 }
 
 impl<'tokens> Parser<'tokens> {
-    fn new(tokens: &'tokens [Token]) -> Self {
+    fn new(tokens: &'tokens [Token], config: ParseConfig) -> Self {
         Self {
             tokens,
             cursor: 0,
             diagnostics: DiagnosticReport::new(),
+            max_depth: config.max_depth(),
+            expression_depth: 0,
         }
     }
 
@@ -210,7 +214,11 @@ impl<'tokens> Parser<'tokens> {
         }
         self.error_here("cue.parse.expected_decl", "expected declaration");
         let bad = self.current_span();
+        let cursor = self.cursor;
         self.recover_to_separator();
+        if self.cursor == cursor && !self.at(TokenKind::Eof) {
+            self.bump();
+        }
         Decl::Bad(bad)
     }
 
@@ -261,6 +269,11 @@ impl<'tokens> Parser<'tokens> {
             return self.parse_expr(0);
         }
 
+        let depth_span = self.current_span();
+        if !self.enter_expression_depth(depth_span) {
+            self.recover_to_separator();
+            return Expr::Bad(depth_span);
+        }
         let (alias, label) = self.parse_field_head();
         let marker = self.parse_field_marker();
         self.expect_kind(
@@ -270,7 +283,7 @@ impl<'tokens> Parser<'tokens> {
         );
         let value = self.parse_field_value();
         let span = merge_span(label.span(), value.span());
-        Expr::Struct(
+        let expression = Expr::Struct(
             vec![Decl::Field(FieldDecl {
                 alias,
                 label,
@@ -279,7 +292,9 @@ impl<'tokens> Parser<'tokens> {
                 span,
             })],
             span,
-        )
+        );
+        self.exit_expression_depth();
+        expression
     }
 
     fn parse_field_head(&mut self) -> (Option<String>, Label) {
@@ -357,6 +372,17 @@ impl<'tokens> Parser<'tokens> {
     }
 
     fn parse_expr(&mut self, min_bp: u8) -> Expr {
+        let span = self.current_span();
+        if !self.enter_expression_depth(span) {
+            self.recover_to_separator();
+            return Expr::Bad(span);
+        }
+        let expression = self.parse_expr_inner(min_bp);
+        self.exit_expression_depth();
+        expression
+    }
+
+    fn parse_expr_inner(&mut self, min_bp: u8) -> Expr {
         let mut left = self.parse_prefix();
 
         loop {
@@ -1045,6 +1071,24 @@ impl<'tokens> Parser<'tokens> {
         ));
     }
 
+    fn enter_expression_depth(&mut self, span: Span) -> bool {
+        if self.expression_depth >= self.max_depth {
+            self.diagnostics.push(Diagnostic::new(
+                Severity::Error,
+                "cue.parse.max_depth_exceeded",
+                format!("parse depth exceeds limit {}", self.max_depth),
+                Some(span),
+            ));
+            return false;
+        }
+        self.expression_depth = self.expression_depth.saturating_add(1);
+        true
+    }
+
+    fn exit_expression_depth(&mut self) {
+        self.expression_depth = self.expression_depth.saturating_sub(1);
+    }
+
     fn bad_decl_at_current(&self) -> Decl {
         Decl::Bad(self.current_span())
     }
@@ -1099,7 +1143,7 @@ impl<'tokens> Parser<'tokens> {
         let parsed = parse_bytes(
             "__cue_rs_interp.cue",
             source.as_bytes(),
-            ParseConfig::default(),
+            ParseConfig::default().with_max_depth(self.max_depth),
         );
         self.diagnostics
             .extend(parsed.diagnostics().diagnostics().iter().cloned());
@@ -1168,6 +1212,23 @@ mod tests {
         assert_eq!(
             Some("file\n  package demo\n  field x\n    number 1".to_owned()),
             tree,
+        );
+    }
+
+    #[test]
+    fn test_should_reject_expression_depth_over_limit() {
+        let result = parse_bytes(
+            "test.cue",
+            b"x: [[[[1]]]]\n",
+            ParseConfig::default().with_max_depth(3),
+        );
+        assert!(result.diagnostics().has_errors());
+        assert!(
+            result
+                .diagnostics()
+                .diagnostics()
+                .iter()
+                .any(|diagnostic| { diagnostic.code() == "cue.parse.max_depth_exceeded" })
         );
     }
 

@@ -1,7 +1,7 @@
 # Issue 0006 — `Value::unify` rejects a *present* optional field in a closed struct ("not allowed in closed struct")
 
-Status: **REOPENED** (fix in `58b4695` did not resolve the reproduction) · Severity: **high (blocks embedders)** · Found: 2026-06-02
-Reported against: `04fc3ae` · Still reproduces at: `58b4695`
+Status: **fixed** in `3692b3b` — verified (top-level + nested present-optional now validate via `unify(decoded)`) · Severity: **high (blocks embedders)** · Found: 2026-06-02
+Reported against: `04fc3ae` · First fix attempt `58b4695` (incomplete) · Fixed `3692b3b`
 Component: `crates/eval` — `Value::unify` closedness handling for optional fields.
 Relationship: same family as 0003 — a `Value::unify` (API path) discrepancy vs
 the compile-time `&` path, this time for **optional fields in closed structs**.
@@ -102,7 +102,7 @@ as an extra closed-struct field. Export of already-materialized values still
 applies `ExportOptions`, so concrete JSON export continues to omit unset optional
 constraints by default.
 
-## REOPENED — fix did not resolve the reproduction (verified at `58b4695`)
+## Historical incomplete fix note — `58b4695` did not resolve the reproduction
 
 The exact reproduction in this issue **still fails** at `58b4695`. Minimal,
 re-confirmed against the SDK at that commit (no stale build / lockfile — `Cargo.lock`
