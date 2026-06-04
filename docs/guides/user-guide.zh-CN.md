@@ -15,10 +15,10 @@ cue version
 开发时也可以不安装：
 
 ```bash
-cargo run -p cue-rs -- version
+cargo run -p cue-rust-cli -- version
 ```
 
-这里有两个名字容易混：Cargo package 叫 `cue-rs`，安装出来的命令叫 `cue`。
+这里有两个名字容易混：Cargo package 叫 `cue-rust-cli`，安装出来的命令叫 `cue`。
 
 ## 计算 CUE 文件
 

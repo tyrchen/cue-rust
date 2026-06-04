@@ -21,7 +21,7 @@ use tokio::io::AsyncReadExt;
 
 /// cue-rust command-line arguments.
 #[derive(Debug, Parser)]
-#[command(name = "cue-rs", version, about = "Rust-native CUE CLI")]
+#[command(name = "cue", version, about = "Rust-native CUE CLI")]
 struct Cli {
     /// Increase diagnostic verbosity.
     #[arg(long, global = true)]

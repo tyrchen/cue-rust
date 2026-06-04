@@ -21,7 +21,7 @@ specs/           产品、设计、路线图和实现计划
 vendors/         vendored upstream CUE，用来做兼容性对照
 ```
 
-对外 SDK crate 是 `cue-rust`。命令行 package 是 `cue-rs`，二进制命令是 `cue`。
+对外 SDK crate 是 `cue-rust`。命令行 package 是 `cue-rust-cli`，二进制命令是 `cue`。
 
 ## 架构分层
 
@@ -155,16 +155,19 @@ make check-agent-sync
 make fuzz-smoke
 ```
 
-发布前按依赖顺序 dry-run：
+`make check` 会包含 workspace 打包验证，确认每个 crate 都能打包，
+也能从发布包重新构建。第一次发布多 crate workspace 时，依赖下游的
+`cargo publish --dry-run` 只有在上游 workspace crate 已经进入 crates.io
+索引后才会通过。发布时按依赖顺序执行：
 
 ```bash
-cargo publish -p cue-rust-source --dry-run
-cargo publish -p cue-rust-adt --dry-run
-cargo publish -p cue-rust-syntax --dry-run
-cargo publish -p cue-rust-eval --dry-run
-cargo publish -p cue-rust-loader --dry-run
-cargo publish -p cue-rust-compiler --dry-run
-cargo publish -p cue-rust-encoding --dry-run
-cargo publish -p cue-rust --dry-run
-cargo publish -p cue-rs --dry-run
+cargo publish -p cue-rust-source
+cargo publish -p cue-rust-adt
+cargo publish -p cue-rust-syntax
+cargo publish -p cue-rust-eval
+cargo publish -p cue-rust-loader
+cargo publish -p cue-rust-compiler
+cargo publish -p cue-rust-encoding
+cargo publish -p cue-rust
+cargo publish -p cue-rust-cli
 ```

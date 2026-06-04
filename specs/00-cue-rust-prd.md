@@ -66,9 +66,9 @@ let bytes = value.to_json(Default::default())?;
 The CLI should feel like this:
 
 ```text
-cue-rs export ./config.cue --out json
-cue-rs vet schema.cue data.yaml
-cue-rs eval ./... -e services.api.port
+cue export ./config.cue --out json
+cue vet schema.cue data.yaml
+cue eval ./... -e services.api.port
 ```
 
 ## Upstream Compatibility Anchors

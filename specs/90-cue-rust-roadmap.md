@@ -18,7 +18,7 @@ Outcome:
 - Workspace split into source, syntax, diagnostics, SDK facade, and CLI skeleton crates.
 - Rust toolchain, lint, audit, deny, and Makefile automation are complete.
 - Scanner and tolerant parser handle core CUE syntax with diagnostics and partial ASTs.
-- `cue-rs parse` and `cue-rs fmt --check` can run on local files.
+- `cue parse` and `cue fmt --check` can run on local files.
 
 Exit criteria:
 
@@ -47,7 +47,7 @@ Outcome:
 
 - Deterministic evaluator handles scalar and struct unification, references, simple disjunctions, defaults, bottom, validation, and JSON export.
 - SDK exposes `compile_source`, `validate`, `unify`, `lookup_path`, `kind`, and `to_json`.
-- `cue-rs eval`, `cue-rs export`, and `cue-rs vet` work for local source files.
+- `cue eval`, `cue export`, and `cue vet` work for local source files.
 
 Exit criteria:
 
@@ -65,7 +65,7 @@ Outcome:
 
 Exit criteria:
 
-- `cue-rs vet schema.cue data.yaml` works for streams and reports per-document diagnostics
+- `cue vet schema.cue data.yaml` works for streams and reports per-document diagnostics
 - path traversal and oversized source tests pass
 - loader behavior has golden tests against selected upstream cases
 

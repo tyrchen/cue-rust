@@ -11,6 +11,7 @@ documentation = "https://docs.rs/cue-rust"
 repository = "https://github.com/tyrchen/cue-rust"
 homepage = "https://github.com/tyrchen/cue-rust"
 readme = "README.md"
+rust-version = "1.96"
 
 [workspace.dependencies]
 anyhow = "1.0.102"
@@ -44,6 +45,7 @@ cue-rust-loader = { version = "0.2.0", path = "crates/loader" }
 cue-rust-source = { version = "0.2.0", path = "crates/source" }
 cue-rust-syntax = { version = "0.2.0", path = "crates/syntax" }
 cue-rust = { version = "0.2.0", path = "crates/sdk" }
+cue-rust-cli = { version = "0.2.0", path = "apps/cue" }
 
 [workspace.lints.rust]
 missing_debug_implementations = "warn"

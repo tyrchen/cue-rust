@@ -6,7 +6,7 @@ Depends on: [SDK design](20-cue-rust-sdk-design.md), [Encoding design](21-cue-ru
 
 ## Design Summary
 
-The CLI binary is `cue-rs`. It follows CUE command behavior where practical but does not pretend to be upstream `cue` until compatibility gates justify that alias. The CLI is a thin application layer over the SDK.
+The CLI package is `cue-rust-cli`; the installed binary is `cue`. It follows CUE command behavior where practical while documenting the implementation's current compatibility limits. The CLI is a thin application layer over the SDK.
 
 Upstream root command wires global flags, subcommands, current directory handling, help, benchmarking, and error printing in `cmd/cue/cmd/root.go` (`vendors/cue/cmd/cue/cmd/root.go:282`). Rust should use `clap` derive for command structure and keep business logic in library crates.
 
@@ -14,28 +14,28 @@ Upstream root command wires global flags, subcommands, current directory handlin
 
 M0:
 
-- `cue-rs parse`
-- `cue-rs fmt --check`
-- `cue-rs version`
+- `cue parse`
+- `cue fmt --check`
+- `cue version`
 
 M2:
 
-- `cue-rs eval`
-- `cue-rs export`
-- `cue-rs vet`
+- `cue eval`
+- `cue export`
+- `cue vet`
 
 M3:
 
-- `cue-rs def`
-- `cue-rs trim`
-- `cue-rs import`
-- `cue-rs mod`
+- `cue def`
+- `cue trim`
+- `cue import`
+- `cue mod`
 
 M5:
 
-- `cue-rs completion`
-- `cue-rs lsp`
-- `cue-rs registry`
+- `cue completion`
+- `cue lsp`
+- `cue registry`
 
 Upstream has additional commands such as `cmd`, `get`, `login`, `refactor`, and experimental commands. Those remain outside the first compatibility target.
 

@@ -21,7 +21,7 @@ specs/           product, design, roadmap, and implementation plans
 vendors/         vendored upstream CUE checkout for compatibility work
 ```
 
-The published SDK crate is `cue-rust`. The CLI package is `cue-rs`, and its
+The published SDK crate is `cue-rust`. The CLI package is `cue-rust-cli`, and its
 binary is `cue`.
 
 ## Architecture
@@ -177,16 +177,20 @@ make check-agent-sync
 make fuzz-smoke
 ```
 
-Dry-run publishing in dependency order:
+`make check` includes verified workspace packaging, which verifies every crate
+can be packaged and built from its published archive. For the initial multi-crate
+release, downstream `cargo publish --dry-run` commands can only pass after their
+workspace dependencies are already available in the crates.io index. Publish in
+dependency order:
 
 ```bash
-cargo publish -p cue-rust-source --dry-run
-cargo publish -p cue-rust-adt --dry-run
-cargo publish -p cue-rust-syntax --dry-run
-cargo publish -p cue-rust-eval --dry-run
-cargo publish -p cue-rust-loader --dry-run
-cargo publish -p cue-rust-compiler --dry-run
-cargo publish -p cue-rust-encoding --dry-run
-cargo publish -p cue-rust --dry-run
-cargo publish -p cue-rs --dry-run
+cargo publish -p cue-rust-source
+cargo publish -p cue-rust-adt
+cargo publish -p cue-rust-syntax
+cargo publish -p cue-rust-eval
+cargo publish -p cue-rust-loader
+cargo publish -p cue-rust-compiler
+cargo publish -p cue-rust-encoding
+cargo publish -p cue-rust
+cargo publish -p cue-rust-cli
 ```

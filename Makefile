@@ -21,6 +21,9 @@ clippy-pedantic:
 doc:
 	@RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps
 
+package:
+	@cargo package --workspace --allow-dirty
+
 audit:
 	@cargo audit
 
@@ -36,12 +39,12 @@ compat-report:
 
 vendor-corpus:
 	@cargo test -p cue-rust --test vendor_corpus
-	@cargo test -p cue-rs --test vendor_scripts
+	@cargo test -p cue-rust-cli --test vendor_scripts
 
 bench-smoke:
 	@cargo bench -p cue-rust --bench phase9 -- --sample-size 10 --warm-up-time 0.1 --measurement-time 0.1 --save-baseline smoke
 
-check: build test fmt-check clippy-pedantic doc audit deny
+check: build test fmt-check clippy-pedantic doc audit deny package
 
 ci: check check-agent-sync fuzz-smoke
 
@@ -71,4 +74,4 @@ release:
 update-submodule:
 	@git submodule update --init --recursive --remote
 
-.PHONY: build test fmt fmt-check clippy clippy-pedantic doc audit deny fuzz-smoke compat-report vendor-corpus bench-smoke check ci check-agent-sync release update-submodule
+.PHONY: build test fmt fmt-check clippy clippy-pedantic doc package audit deny fuzz-smoke compat-report vendor-corpus bench-smoke check ci check-agent-sync release update-submodule

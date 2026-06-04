@@ -67,7 +67,7 @@ Deliverables:
 - tolerant parser with `Bad*` recovery nodes
 - expression precedence parser
 - comments and attributes retained
-- `cue-rs parse`
+- `cue parse`
 
 Exit criteria:
 
@@ -131,9 +131,9 @@ Deliverables:
 - JSON decoder and encoder
 - YAML decoder and encoder
 - TOML decoder and encoder
-- `cue-rs eval`
-- `cue-rs export`
-- `cue-rs vet`
+- `cue eval`
+- `cue export`
+- `cue vet`
 
 Exit criteria:
 

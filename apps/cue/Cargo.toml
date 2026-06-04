@@ -1,14 +1,15 @@
 [package]
-name = "cue-rs"
+name = "cue-rust-cli"
 description = "Command-line interface for cue-rust."
 version.workspace = true
 authors.workspace = true
 edition.workspace = true
 license.workspace = true
-documentation.workspace = true
+documentation = "https://docs.rs/cue-rust-cli"
 repository.workspace = true
 homepage.workspace = true
 readme.workspace = true
+rust-version.workspace = true
 
 [[bin]]
 name = "cue"

@@ -15,10 +15,10 @@ cue version
 Run it without installing:
 
 ```bash
-cargo run -p cue-rs -- version
+cargo run -p cue-rust-cli -- version
 ```
 
-The Cargo package is named `cue-rs`; the installed binary is named `cue`.
+The Cargo package is named `cue-rust-cli`; the installed binary is named `cue`.
 
 ## Evaluate CUE
 

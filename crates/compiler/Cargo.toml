@@ -5,10 +5,11 @@ version.workspace = true
 authors.workspace = true
 edition.workspace = true
 license.workspace = true
-documentation.workspace = true
+documentation = "https://docs.rs/cue-rust-compiler"
 repository.workspace = true
 homepage.workspace = true
 readme = "../../README.md"
+rust-version.workspace = true
 
 [dependencies]
 cue-rust-adt.workspace = true

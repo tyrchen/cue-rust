@@ -21,7 +21,7 @@ crates/
   encoding/     JSON/YAML/TOML/CUE/text/binary encode/decode
   sdk/          public facade re-exported as cue_rust
 apps/
-  cue-rs/       CLI binary
+  cue/          CLI package source for the `cue` binary
 ```
 
 The initial repository currently has `crates/core`; implementation should either replace it with the crate layout above or keep it as a temporary facade only during the first workspace restructuring phase.
@@ -36,7 +36,7 @@ The initial repository currently has `crates/core`; implementation should either
 - `eval` depends on `adt`.
 - `encoding` depends on `eval` public export trees, not evaluator internals.
 - `sdk` depends on all stable internal crates.
-- `apps/cue-rs` depends on `sdk` and application-only crates.
+- `apps/cue` depends on `sdk` and application-only crates.
 
 ## Feature Flags
 

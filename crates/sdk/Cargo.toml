@@ -9,6 +9,7 @@ documentation.workspace = true
 repository.workspace = true
 homepage.workspace = true
 readme = "../../README.md"
+rust-version.workspace = true
 
 [lib]
 name = "cue_rust"

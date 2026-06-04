@@ -47,7 +47,7 @@ edge.
 
 - Repo HEAD when filed: `d0181ce` (`chore: make binary cue not cue-rs`).
 - Also reproduces on `ee8220e` and `da88884`.
-- Repro via the `cue` CLI (`cargo build -p cue-rs` → binary `cue`) or the SDK
+- Repro via the `cue` CLI (`cargo build -p cue-rust-cli` → binary `cue`) or the SDK
   library path (`Context::compile_source` → `lookup_path` → `evaluate` /
   `to_serde_json_value`).
 

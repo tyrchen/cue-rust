@@ -21,7 +21,7 @@ cue version
 During development:
 
 ```bash
-cargo run -p cue-rs -- version
+cargo run -p cue-rust-cli -- version
 ```
 
 ## Quick Start
@@ -143,7 +143,7 @@ make fuzz-smoke
 ```
 
 `make check` runs workspace build, tests, nightly rustfmt check, pedantic clippy,
-docs, `cargo audit`, and `cargo deny check`.
+docs, `cargo audit`, `cargo deny check`, and verified workspace packaging.
 
 ## License
 

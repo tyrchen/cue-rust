@@ -24,10 +24,10 @@ Worth building in this batch:
    - Importance: Phase 9 needs visible pass/fail accounting, otherwise parity work can regress silently.
    - Rust shape: keep supported cases executable and mark known gaps explicitly with stable categories and reasons.
 
-3. CLI binary name restoration to `cue-rs`.
-   - Spec evidence: README and CLI specs define the binary as `cue-rs`; integration tests already use `CARGO_BIN_EXE_cue-rs`.
+3. CLI binary name restoration to `cue`.
+   - Spec evidence: README and CLI specs define the installed command as `cue`; integration tests already use `CARGO_BIN_EXE_cue`.
    - Importance: all CLI workflows and install smoke tests depend on the public binary name.
-   - Rust shape: keep the app source in `apps/cue`, but set package and bin name to `cue-rs`.
+   - Rust shape: keep the app source in `apps/cue`, publish it as `cue-rust-cli`, and set the binary name to `cue`.
 
 Not worth building in this batch:
 
